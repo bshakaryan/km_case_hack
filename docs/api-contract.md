@@ -1,31 +1,172 @@
-# НарядAI — shared implementation contract
+# НарядAI — контракт API и клиентов
 
-React/TypeScript/Vite frontend; FastAPI/SQLAlchemy backend; PostgreSQL via Docker Compose. SQLite is allowed only for local development and tests. Russian UI. UTC ISO timestamps; UI Asia/Almaty. API base `/api`. Auth Bearer token returned by POST `/auth/login` {login,pin}; response {token,user}. GET `/auth/me` user. Roles master,worker,manager,admin. Demo accounts master / worker / manager / admin PIN 1234; second master master2 and workers worker2…worker15.
+Обновлено 2026-10-05. Разделы «Реализовано» описывают исходный код версии `322c3d4`, а не целевую готовность продукта. После каждого изменения поведения этот документ и машинный контракт обновляются в том же изменении. Общие решения: [decisions.md](decisions.md); последовательность разработки: [implementation-plan.md](implementation-plan.md).
 
-Status codes: issued,accepted,queued,rejected,in_progress,paused,completed,ai_review,rework,closed,cancelled. Priority emergency,high,normal,planned. Work type planned,unplanned. Each transition audited. Overdue is a derived flag, not status.
+## Реализовано: общие правила
 
-GET `/reference` -> {areas:[{id,name}],equipment:[{id,name,inventory_number,area_id,type,criticality}],employees:[{id,name,login,role,specialty,grade,brigade_id,on_shift}],brigades:[{id,name}],fault_codes:[{id,code,name}],materials:[{id,name,unit}],time_norms:[{id,name,hours}]}. Admin POST/PATCH `/reference/{collection}` (PATCH /{id}) with object fields. No delete needed.
+- Базовый путь `/api`; JSON, кроме загрузки фотографий и экспорта. Идентификаторы — целые числа. Время в ответах — ISO 8601 с UTC; `deadline` в запросе требует часовой пояс. Календарные даты и смены сервер трактует в `Asia/Almaty`.
+- Роли: `master`, `worker`, `manager`, `admin`. Мастер и администратор управляют всеми нарядами, а не только созданными ими. `manager` читает данные и может отметить собственное уведомление прочитанным.
+- Работник видит и изменяет наряды только при `assignee_id == user.id`; принадлежность к `brigade_id` сама по себе доступа не даёт. Справочники и список работников доступны всем авторизованным ролям.
+- Запросы с типизированными телами запрещают неизвестные поля и обрезают крайние пробелы строк. Для справочников действуют отдельные проверки. HTTP-ошибки имеют `detail`: строка для бизнес-ошибок либо массив ошибок валидации FastAPI; стабильного поля кода ошибки ещё нет.
+- Основные коды: `200` — успех; `201` — создание наряда, фото или записи справочника; `401` — отсутствующая/неверная/истёкшая сессия; `403` — права; `404` — объект не найден; `409` — недопустимое текущее состояние или конфликт записи справочника; `422` — поля/связи/правила; `413` — фото слишком большое; `429` — ограничение входа.
+- `/openapi.json` и `/docs` генерируются FastAPI. Сейчас OpenAPI описывает входные модели, но многие ответы возвращаются обычными словарями и не имеют полных `response_model`. Поэтому он пока не является полным источником схем для генерации клиента.
+- Версии записей, ключи идемпотентности, протокол синхронизации, постраничные курсоры и долговечные фоновые задания пока отсутствуют. Клиент не должен автоматически повторять неизвестно завершившуюся запись как безопасную операцию.
 
-GET `/employees` -> array reference employee fields + {status:free|busy|queued|off_shift,current_order:string|null,queue_count:number,rating:number,completed_count:number}.
+## Реализовано: вход и справочники
 
-GET `/orders` query area_id,equipment_id,assignee_id,brigade_id,priority,status,search,from_date,to_date,limit (default 1000) -> array Order. GET `/orders/{id}` -> OrderDetail. GET `/dashboard` -> {issued,completed,overdue,downtime_count,active,total,avg_rating,shift_label}. Shift metrics use local current shift; list may include historical closed orders.
+| Метод и путь | Запрос и ответ |
+|---|---|
+| `GET /health` | Публично: `{status:"ok", database:"connected", ai:"stub", native:"stub"}`. Также доступен без префикса по `/health`. |
+| `POST /auth/login` | `{login, pin}` → `{token, user:Employee}`. `login`: 1–80 символов, `pin`: 4–32. Сессия на 12 часов; не более 10 попыток за минуту для пары IP+login в памяти процесса. |
+| `GET /auth/me` | `Employee`. Для всех защищённых HTTP-маршрутов нужен `Authorization: Bearer <token>`. |
+| `POST /auth/logout` | Отзывает текущую сессию → `{ok:true}`. |
+| `GET /reference` | `{areas, equipment, employees, brigades, fault_codes, materials, time_norms}` — массивы объектов ниже. |
+| `POST /reference/{collection}` | Только `admin`. Создаёт запись, возвращает её, HTTP `201`. |
+| `PATCH /reference/{collection}/{id}` | Только `admin`. Изменяет переданные поля, возвращает запись. Удаления нет. |
+| `GET /employees` | Работники: `Employee` + `{status, current_order, queue_count, rating, completed_count}`. |
 
-Order: {id,number,title,description,work_type,area_id,area_name,equipment_id,equipment_name,assignee_id,assignee_name,brigade_id,master_id,priority,status,deadline,created_at,started_at,completed_at,closed_at,comment,is_overdue,normal_hours,downtime_minutes,score}. Detail extends {events:[{id,action,from_status,to_status,actor_name,created_at,comment}],photos:[{id,kind,url,created_at,author_name}],completion:{work_done,fault_code_id,comment,materials:[{material_id,name,quantity,unit}]}|null,ai_review:{verdict,score,explanation,is_stub,master_score}|null}.
+`Employee = {id, name, login, role, specialty, grade, brigade_id:int|null, on_shift:bool}`. PIN и его хеш не возвращаются. Демоданные: `master`, `master2`, `worker`, `worker2`…`worker15`, `manager`, `admin`; PIN `1234` — только для демосреды.
 
-POST `/orders` {title,description,work_type,area_id,equipment_id,assignee_id?,brigade_id?,priority,deadline,normal_hours?,comment?} -> detail. Exactly one assignee or brigade, brigade resolved to available lead for demo but retains brigade_id. PATCH `/orders/{id}` {assignee_id?,brigade_id?,priority?,deadline?,comment?}; all edits audited.
+Объекты справочников:
 
-POST `/orders/{id}/transition` {action,reason?,comment?,score?}. Actions accept,queue,reject,start,pause,resume,close,rework,cancel. Worker only assigned orders; master/admin can manage. Manager read-only. Reasons required reject/pause/rework/cancel. close only after ai_review, master final decision.
+- `areas`, `brigades`: `{id, name}`.
+- `equipment`: `{id, name, inventory_number, area_id, type, criticality}`.
+- `employees`: `Employee`; при создании обязателен `pin`, при обновлении необязателен. Административный PIN: 4–12 цифр; `grade`: 0–8; `on_shift`: boolean; `brigade_id` допускает `null`.
+- `fault_codes`: `{id, code, name}`; `materials`: `{id, name, unit}`; `time_norms`: `{id, name, hours}`, `0 < hours <= 1000`.
 
-POST `/orders/{id}/complete` {work_done,fault_code_id,materials:[{material_id,quantity}],comment?} -> detail. Only in_progress. Validate unplanned after photo exists (422 otherwise); master/worker upload before completing. Records completed then ai_review events; deterministic stub verdict with explicit is_stub=true, manual master acceptance mandatory.
+В POST справочника обязательны `name`; дополнительно для оборудования — `inventory_number, area_id, type`, для работника — `login, role, pin`, для кода — `code`, для материала — `unit`, для норматива — `hours`. Остальные поля используют серверные значения по умолчанию. PATCH должен быть непустым; неизвестные поля запрещены, `id` не изменяется. Строковые поля непустые, длины ограничены колонками моделей; связи проверяются.
 
-POST `/orders/{id}/photos` multipart `file`, `kind` before|after -> photo. Pillow validation, compressed JPEG, max 10MB, max 5 per kind. Photos served GET `/photos/{id}` with Bearer auth; frontend fetch to Blob URL (not public uploads).
+Статус работника: `free|busy|queued|off_shift`; `current_order` — номер наряда или `null`. `queue_count` считает все назначенные незавершённые наряды, кроме текущего и отклонённых, а не только статус `queued`. В исходной реализации рейтинг здесь считается по всем имеющимся нарядам, без действующего ограничения последними 90 днями.
 
-GET `/notifications` -> [{id,title,message,kind,order_id,created_at,read}]. POST `/notifications/{id}/read`. Deadline background monitor every <=5sec, deduplicated due-soon/overdue/unaccepted notifications persisted for worker and master. Native push adapter logs/persists only, never real push.
+## Реализовано: чтение нарядов
 
-GET `/analytics` query days (default 90),from_date,to_date,area_id,equipment_id,assignee_id,brigade_id -> {summary:{total,closed,on_time_percent,avg_score,downtime_hours},trend:[{date,planned,unplanned}],by_area:[{name,count,downtime_hours}],rankings:[{id,name,specialty,brigade,score,quality,on_time,closed_count,rework_rate}],equipment:[{id,name,area_name,orders,downtime_hours}],materials:[{name,unit,quantity}],insights:[{title,description,severity,is_stub}],ai_summary:string,is_stub:true}. Ratings computed deterministically, formula documented.
+`GET /orders` → массив `Order`, сортировка `created_at DESC`. Параметры: `area_id, equipment_id, assignee_id, brigade_id, priority, status, search, from_date, to_date, limit`. `limit` по умолчанию 1000, диапазон 1–5000; `offset`, курсора и общего числа записей нет. `search` до 200 символов ищет подстроку в номере, заголовке и описании.
 
-GET `/reports/export` same filters as analytics, `format=csv|xlsx` -> real CSV (UTF-8 BOM) or XLSX with order and summary worksheets; spreadsheet-safe strings. POST `/auth/logout` revokes the current session. Native + AI interfaces GET `/integrations` -> {ai:{mode,status,description},native:{mode,status,description},realtime:{mode,status,description}}. GET `/health` public.
+`from_date`/`to_date` фильтруют **дату создания**, включая границы. При `YYYY-MM-DD` берутся начало/конец дня в `Asia/Almaty`; также принимается ISO 8601. Обратный период даёт `422`. Фильтр работника по собственным назначениям применяется дополнительно к параметрам.
 
-Realtime: authenticated WebSocket `/api/ws?token=…` (alias `/ws?token=…`), event {type:'orders.updated'|'notifications.updated'|'connected',order_id?}; clients refetch; 5-second polling fallback. No personal data in broadcast. Tokens revalidated at least every 30 seconds even on idle connections.
+`GET /orders/{id}` → `OrderDetail`.
 
-Directories: backend/ owned backend agent; frontend/ owned frontend agent; infrastructure/docs/native-stub owned infra agent. Root coordinates dependencies and integration tests. Seed at least 520 historical orders over 90 days plus active current-shift orders, 4 areas,25 equipment,2 masters,15 workers,3 brigades,20 fault codes,40 materials. Embed repeated conveyor faults, recurring post-maintenance issue, high material consumption. Stub insights clearly labeled. No external services or real employee data.
+```text
+Order = {
+  id, number, title, description, work_type,
+  area_id, area_name, equipment_id, equipment_name,
+  assignee_id, assignee_name, brigade_id:int|null, master_id,
+  priority, status, deadline, created_at,
+  started_at:datetime|null, completed_at:datetime|null, closed_at:datetime|null,
+  comment, is_overdue:bool, normal_hours:number, downtime_minutes:number,
+  score:number|null
+}
+OrderDetail = Order + {
+  events:[{id, action, from_status:string|null, to_status, actor_name, created_at, comment}],
+  photos:[{id, kind, url, created_at, author_name}],
+  completion:{work_done, fault_code_id, comment,
+    materials:[{material_id, name, quantity, unit}]}|null,
+  ai_review:{verdict, score, explanation, is_stub, master_score:number|null}|null
+}
+```
+
+`priority = emergency|high|normal|planned`; `work_type = planned|unplanned`. Статусы перечислены в таблице переходов. Просрочка — вычисляемый флаг при истёкшем `deadline`, исключающий `completed`, `ai_review`, `closed`, `cancelled`.
+
+## Реализовано: создание и изменение
+
+`POST /orders` → `OrderDetail`, HTTP `201`; только `master|admin`:
+
+```text
+{title, description?, work_type, area_id, equipment_id,
+ assignee_id?, brigade_id?, priority?, deadline, normal_hours?, comment?}
+```
+
+`title`: 3–200 символов; `description`: до 5000, по умолчанию пустая строка (известный пробел в валидации); `comment`: до 3000, по умолчанию `""`; `normal_hours`: `(0,1000]`, по умолчанию 2; `priority`: по умолчанию `normal`. Идентификаторы положительные. Оборудование должно принадлежать участку, срок быть будущим.
+
+Нужно указать ровно одно из `assignee_id`/`brigade_id` (второе может отсутствовать или быть `null`). Индивидуальный исполнитель — работник на смене. При бригадном назначении сервер выбирает **одного** работника бригады на смене с наименьшим числом нарядов, кроме `closed|cancelled`, и сохраняет также `brigade_id`. Это ещё не полноценный общий наряд бригады. Создание даёт `issued` и событие `issue`.
+
+`PATCH /orders/{id}` → `OrderDetail`; только `master|admin`. Допустимы `assignee_id?, brigade_id?, priority?, deadline?, comment?`. Нужен хотя бы один параметр; явно переданный `null` запрещён. Нельзя менять `closed|cancelled`; переназначать нельзя в `in_progress|paused|completed|ai_review`. Переназначение возвращает `issued`, заменяет назначение и создаёт событие `edit`. Для перехода с бригады на человека достаточно передать `assignee_id`: сервер очистит `brigade_id`. Новый срок должен быть будущим. Остальные поля наряда PATCH не изменяет.
+
+## Реализовано: полная матрица переходов
+
+`POST /orders/{id}/transition` с `{action, reason?, comment?, score?}` → `OrderDetail`. `reason/comment` до 3000 символов; по умолчанию пустые. `score` допускает дробное число 1–5 или `null`; при `close` число обязательно. Недопустимый исходный статус — `409`.
+
+| Действие | Исходные статусы | Новый статус | Дополнительное правило |
+|---|---|---|---|
+| `accept` | `issued, queued, rework` | `accepted` | `worker/master/admin` |
+| `queue` | `issued, accepted, rework` | `queued` | `worker/master/admin` |
+| `reject` | `issued, accepted, queued` | `rejected` | Непустая `reason`; `worker/master/admin` |
+| `start` | `accepted, queued, rework` | `in_progress` | Исполнитель на смене и не имеет другого `in_progress` |
+| `pause` | `in_progress` | `paused` | Непустая `reason`; `worker/master/admin` |
+| `resume` | `paused` | `in_progress` | Те же условия, что у `start` |
+| `close` | `ai_review` | `closed` | Только `master/admin`, обязательна `score` |
+| `rework` | `ai_review` | `rework` | Только `master/admin`, непустая `reason` |
+| `cancel` | `issued, accepted, queued, rejected, in_progress, paused, completed, ai_review, rework` | `cancelled` | Только `master/admin`, непустая `reason` |
+
+Для `start/resume` роли также `worker|master|admin`; работник во всех действиях ограничен своим назначением. `rejected` не терминальный: возможны отмена или переназначение через PATCH. `closed/cancelled` терминальные. `queued` сейчас только статус: FIFO, позиции очереди и автоматического запуска следующего наряда нет. `started_at` записывается один раз, интервалы работы/пауз отдельно не хранятся. При `rework` очищаются `completed_at` и `score`.
+
+## Реализовано: сдача, фотографии и материалы
+
+`POST /orders/{id}/complete` → `OrderDetail`; роли `worker|master|admin`, только `in_progress`:
+
+```text
+{work_done, fault_code_id, materials?:[{material_id, quantity}], comment?}
+```
+
+`work_done`: 10–5000 символов; существующий `fault_code_id`; `materials` по умолчанию `[]`, до 100 разных материалов, без повторов идентификаторов; количество конечное и `0 < quantity <= 1000000`. `comment` до 3000 символов, по умолчанию `""`.
+
+Для внепланового наряда требуется хотя бы одно ранее загруженное фото `after`, иначе `422`. После сдачи в одной транзакции фиксируются события `completed → ai_review` и синхронная оценка заглушки. Ответ уже содержит `ai_review`; клиент не должен ожидать отдельного устойчивого состояния `completed` при штатной сдаче. Заглушка проверяет только наличие пары типов фото: `passed`/4.5 при паре, иначе `needs_attention`/4.0; `is_stub:true`. Анализа изображений и автоматического закрытия нет; итог принимает мастер.
+
+**Повторная сдача после доработки содержит только дополнительный расход материалов.** Сервер добавляет новые списания и суммирует их с предыдущими; передача прежнего общего количества удвоит расход. `completion.work_done`, `fault_code_id`, `comment` при этом заменяются; полноценные версии попыток сдачи не сохраняются. События и строки оценок существуют, но отдельного API их полных версий нет. Дедупликации повторно отправленного запроса нет.
+
+`POST /orders/{id}/photos`: multipart `file`, `kind=before|after` → объект фото, HTTP `201`. Роли `worker|master|admin`; запрещено для `ai_review|closed|cancelled`. До 5 фото каждого типа **на наряд**, не на попытку; максимум 10 МиБ входного файла. Pillow проверяет содержимое, применяет EXIF-поворот, уменьшает до 1920×1920 и сохраняет JPEG quality 82 в БД. Невалидное изображение — `422`, превышение размера — `413`.
+
+`GET /photos/{id}` → `image/jpeg` с Bearer-авторизацией и проверкой доступа к наряду, `Cache-Control: private, no-store`. `url` в объекте фото — `/api/photos/{id}`; это не публичная ссылка. Веб получает Blob через авторизованный запрос. Удаление/замена фото и привязка к попытке сдачи пока отсутствуют.
+
+## Реализовано: показатели и экспорт
+
+`GET /dashboard` → `{issued, completed, overdue, downtime_count, active, total, avg_rating, shift_label}`. Смена: 08:00–20:00 или 20:00–08:00 в `Asia/Almaty`. `issued` считает созданные с начала смены, `completed` — с `completed_at` с начала смены. `active` исключает только `closed|cancelled`; `total` и средняя оценка относятся ко всем доступным нарядам, а не только смене. `downtime_count` — число разных единиц оборудования с активными внеплановыми нарядами в `in_progress|paused|rework`.
+
+`GET /analytics` и `GET /reports/export` принимают `days` (по умолчанию 90, 1–731), `from_date, to_date, area_id, equipment_id, assignee_id, brigade_id`. Начало по умолчанию `now-days`, конец `now`; обратный период или период более 731 целого дня отвергается. **Вся выборка сейчас ограничивается `Order.created_at`, включая показатели закрытия и материалов. Это известная ошибка для переходящих работ, а не целевое правило.**
+
+```text
+Analytics = {
+ summary:{total, closed, on_time_percent, avg_score, downtime_hours},
+ trend:[{date, planned, unplanned}],
+ by_area:[{name, count, downtime_hours}],
+ rankings:[{id, name, specialty, brigade, score, quality, on_time, closed_count, rework_rate}],
+ equipment:[{id, name, area_name, orders, downtime_hours}],
+ materials:[{name, unit, quantity}],
+ insights:[{title, description, severity, is_stub}], ai_summary:string, is_stub:true
+}
+```
+
+Текущий рейтинг закрытых нарядов: `quality / 5 × 60 + on_time_percent × 0.3 + (100 - rework_rate_percent) × 0.1`; это демонстрационная формула, не окончательная модель личного/бригадного вклада. Материалы берутся из накопленного `completion`. Простой внеплановых работ считается от создания до сдачи/отмены либо текущего времени, затем суммируется по нарядам без объединения пересечений и без обрезки по периоду — известное завышение. Инсайты формируются правилами заглушки.
+
+Экспорт: `format=csv|xlsx` (по умолчанию CSV); CSV с UTF-8 BOM и `;`, XLSX с листами нарядов и сводки. Строки защищаются от интерпретации как формулы. Действуют те же фильтры и ограничения доступа, что у аналитики.
+
+## Реализовано: уведомления и обновление клиентов
+
+- `GET /notifications` → последние 200 собственных уведомлений: `{id, title, message, kind, order_id:int|null, created_at, read}`; сортировка по времени и id убывающе.
+- `POST /notifications/{id}/read` → `{ok:true}`; чужое/неизвестное уведомление даёт `404`.
+- Монитор запускается внутри API с интервалом ожидания 5 секунд; фактический интервал зависит от длительности обработки. Сохраняет дедуплицированные `due_soon`, `overdue`, `unaccepted` для исполнителя и мастера. По умолчанию предупреждение за 30 минут, принятие за 10 минут или 3 минуты для аварийного приоритета. Таймер принятия исходно привязан к `created_at`, поэтому переназначение старого наряда немедленно вызывает просрочку принятия — это исправляемый дефект.
+- Native push пока только запись в БД/журнал интеграции, отправки на устройство нет.
+- `GET /integrations` → `{ai:{mode,status,description}, native:{mode,status,description}, realtime:{mode,status,description}}`; AI и native отмечены `stub/demo`, realtime — `websocket/active`.
+- WebSocket `/api/ws?token=…`, также `/ws?token=…`: `{type:"connected"}` или `{type:"orders.updated"|"notifications.updated", order_id?}`. Нет подробного содержимого наряда; события рассылаются всем подключённым клиентам, HTTP повторно проверяет доступ. Недействительная сессия закрывает WS кодом `1008`; повторная проверка как минимум каждые 30 секунд.
+- Веб сейчас **постоянно** опрашивает справочники, наряды, работников, dashboard и уведомления каждые 5 секунд, даже при работающем WS. WS дополнительно запускает обновление; после разрыва автоматического reconnect нет. Открытая аналитика этим обновлением не перезагружается. События недолговечны, воспроизведения пропущенных событий нет.
+
+## Планируемый контракт: реализовывать по этапам
+
+Следующие пункты — согласованное направление разработки, **не существующие маршруты и поля**. До подключения клиента нужно зафиксировать конкретные схемы в OpenAPI и тестах, согласовать их с [решениями](decisions.md) и [планом](implementation-plan.md).
+
+1. Полные типизированные ответы/ошибки и проверка совместимости OpenAPI; клиентам React и Flutter давать общий серверный контракт. У изменений записи появятся версия и идентификатор команды, чтобы различать повтор, конфликт и новое действие. Точные названия полей/маршрутов определяются при реализации этапа API.
+2. Отдельные история назначений, время текущего назначения, участники бригады и ответственный за сдачу; общий доступ участников с серверной проверкой. Позиции очереди и явные правила изменения порядка. Назначение не должно автоматически приписывать одинаковый личный вклад всем участникам.
+3. Неизменяемые попытки сдачи со своими материалами, фото и оценкой. Расход каждой попытки добавочный; итог вычисляется по записям без повторного списания. Ответ ИИ применим только к породившей его версии попытки. Интервалы фактической работы, пауз и остановки оборудования ведутся отдельно.
+4. Стабильные локальные идентификаторы команд, черновиков, попыток и медиа; долговечное сопоставление локального фото с серверным ID, обнаружение повторной загрузки, восстановление очереди после перезапуска. Загрузка фото и сдача должны иметь явные зависимости и подтверждения. Хеш файла помогает идентификации, но не заменяет проверку прав.
+5. При синхронизации сервер заново проверяет сессию, текущую роль, назначение, статус и версию. Истёкшая сессия приостанавливает отправку до входа; переназначение/закрытие не обходятся правами, сохранёнными офлайн. Типизированный конфликт должен сообщать причину и доступное текущее состояние без раскрытия чужого наряда; пользователь сохраняет локальный отчёт и разрешает конфликт явно.
+6. Долговечные задания для ИИ, push и сводок; транзакционный outbox, повторы, дедупликация и контроль доставки. Уведомление в БД, доставка push и подтверждение исполнителем — разные события. WS с переподключением и согласованным восстановлением актуальных данных; пагинация и серверный поиск вместо ограничения первыми 1000 записями.
+7. Отчёты получают явные правила периода для выдачи, сдачи, приёмки, списаний и простоя. Пересекающиеся остановки одного оборудования объединяются и обрезаются границами отчёта. Источник каждого показателя остаётся проверяемым.
+8. Flutter: сначала Android, затем iOS; роли мастера/исполнителя, камера/галерея, сжатие фото, защищённая сессия, локальные данные, настоящий push и офлайн-синхронизация. `native-stub` — прежняя заготовка, не готовый мобильный продукт. React остаётся веб-клиентом; серверные правила едины.
+
+## Открытые решения
+
+- Внешний ИИ API или локальная модель: выбор и допустимость передачи текстов/фото ещё не подтверждены. Нужен заменяемый адаптер; интеграция внешнего провайдера не считается утверждённой.
+- Сохранять ли отчёт без обязательного фото как неполную попытку: рекомендация есть, решения нет. До принятия решения действует текущий `422` для внеплановой сдачи без `after`.
+- Вердикт ИИ «требует доработки»: автоматический возврат или подтверждение мастером не утверждены. Текущая реализация ждёт решения мастера; это нельзя незаметно менять при подключении настоящего ИИ.
+
+Открытые вопросы ведутся в [decisions.md](decisions.md); разработчик не закрывает их предположением в коде или клиенте.
