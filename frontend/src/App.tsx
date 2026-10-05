@@ -1,39 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
-  Activity,
-  ArrowDown,
   ArrowRight,
-  ArrowUpRight,
   Bell,
   BookOpen,
   CalendarDays,
-  ChartNoAxesCombined,
-  Check,
   CheckCheck,
-  ChevronDown,
   ChevronRight,
-  CircleHelp,
+  CircleCheck,
+  ClipboardCheck,
   ClipboardList,
   Factory,
-  Gauge,
-  Layers3,
   LayoutDashboard,
+  ChartNoAxesCombined,
   LogOut,
   Menu,
   Plus,
   Plug,
-  Radio,
-  Search,
-  Settings2,
+  RefreshCw,
   ShieldCheck,
-  Sparkles,
-  Users,
-  Wrench,
-  X,
-  CircleCheck,
-  TriangleAlert,
   Timer,
+  TriangleAlert,
+  Users,
+  X,
   Zap,
   LoaderCircle,
 } from "lucide-react";
@@ -57,7 +46,7 @@ import type {
   Reference,
   User,
 } from "./model";
-import { Empty, ErrorBox, Loading, Metric, SectionTitle } from "./ui";
+import { Empty, ErrorBox, Loading, Priority, SectionTitle, Status } from "./ui";
 import { OrderBoard, CreateOrder, OrderDialog } from "./Orders";
 import {
   AnalyticsPage,
@@ -65,6 +54,13 @@ import {
   IntegrationsPage,
   EmployeesPage,
 } from "./Pages";
+import {
+  attentionCounts,
+  isActive,
+  nextWorkAction,
+  shiftTeam,
+} from "./workspace";
+import type { BoardFocus } from "./workspace";
 
 type Page =
   | "dashboard"
@@ -73,31 +69,57 @@ type Page =
   | "analytics"
   | "reference"
   | "integrations";
-const navigation: { id: Page; name: string; icon: typeof Gauge }[] = [
-  { id: "dashboard", name: "Обзор смены", icon: LayoutDashboard },
-  { id: "orders", name: "Наряды", icon: ClipboardList },
-  { id: "employees", name: "Сотрудники", icon: Users },
-  { id: "analytics", name: "Аналитика", icon: ChartNoAxesCombined },
+type CreateContext = { assigneeId?: Id; equipmentId?: Id };
+type BoardContext = {
+  focus?: BoardFocus;
+  assigneeId?: Id;
+  equipmentId?: Id;
+  areaId?: Id;
+  brigadeId?: Id;
+  fromDate?: string;
+  toDate?: string;
+  revision: number;
+};
+const navigation = [
+  { id: "dashboard" as Page, name: "Обзор смены", icon: LayoutDashboard },
+  { id: "orders" as Page, name: "Наряды", icon: ClipboardList },
+  { id: "employees" as Page, name: "Сотрудники", icon: Users },
+  { id: "analytics" as Page, name: "Аналитика", icon: ChartNoAxesCombined },
 ];
 
+function Brand() {
+  return (
+    <div className="brand">
+      <div className="brand-symbol">
+        <ClipboardCheck size={25} strokeWidth={1.9} />
+      </div>
+      <span>
+        Наряд<span className="brand-ai">AI</span>
+        <small>УПРАВЛЕНИЕ РАБОТАМИ</small>
+      </span>
+    </div>
+  );
+}
+
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
-  const [login, setLogin] = useState("master");
-  const [pin, setPin] = useState("1234");
+  const [login, setLogin] = useState("");
+  const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function submit(e?: FormEvent, demo?: string) {
     e?.preventDefault();
+    if (busy) return;
     setBusy(true);
     setError("");
     try {
       const res = await post<{ token: string; user: User }>("/auth/login", {
-        login: demo || login,
+        login: demo || login.trim(),
         pin: demo ? "1234" : pin,
       });
       localStorage.setItem("naryad_token", res.token);
       onLogin(res.user);
-    } catch (e) {
-      setError((e as Error).message);
+    } catch (error) {
+      setError((error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -107,71 +129,43 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
       <aside className="login-story">
         <Brand />
         <div className="login-story-copy">
-          <div className="eyebrow light">КОСТАНАЙСКИЕ МИНЕРАЛЫ</div>
+          <div className="eyebrow">КОСТАНАЙСКИЕ МИНЕРАЛЫ</div>
           <h1>
-            Каждая задача.
+            Рабочая смена.
             <br />
-            Под контролем<span>.</span>
+            Всё под контролем.
           </h1>
           <p>
-            Единое рабочее пространство для смены,
-            <br />
-            оборудования и людей.
+            Назначайте работу, следите за выполнением и принимайте результат по
+            отчёту и фотографиям.
           </p>
-          <div className="login-illustration">
-            <div className="illustration-caption">
-              <span className="live-dot" /> ПРОИЗВОДСТВО В РИТМЕ
-            </div>
-            <div className="conveyor">
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
-            <div className="factory-blocks">
-              <div />
-              <div />
-              <div />
-              <div />
-            </div>
-            <div className="illustration-line">
-              <Factory size={34} />
-              <div />
-              <Wrench size={28} />
-              <div />
-              <CircleCheck size={28} />
-            </div>
-          </div>
           <div className="login-features">
             <span>
-              <ClipboardList size={17} /> Электронные наряды
+              <ClipboardList size={20} /> Наряды и сроки
             </span>
             <span>
-              <Activity size={17} /> Прозрачная смена
+              <Users size={20} /> Загрузка команды
             </span>
             <span>
-              <ShieldCheck size={17} /> Контроль качества
+              <ShieldCheck size={20} /> Приёмка мастером
             </span>
           </div>
         </div>
         <div className="login-footer">
-          ЦИФРОВОЕ ПРОИЗВОДСТВО <span>01 / ОПЕРАЦИОННАЯ ЭФФЕКТИВНОСТЬ</span>
+          Веб-панель · мастер, исполнитель, руководитель
         </div>
       </aside>
       <main className="login-main">
         <div className="login-top">
-          <span className="outlined-tag">ДЕМОНСТРАЦИОННАЯ СРЕДА</span>
+          <span className="outlined-tag">Демонстрационная среда</span>
           <span>RU</span>
         </div>
         <div className="login-form">
           <div className="login-mark">
-            <Factory size={27} />
+            <ClipboardCheck size={28} />
           </div>
-          <h2>С возвращением</h2>
-          <p>Войдите, чтобы начать работу со сменой.</p>
+          <h2>Вход в рабочее пространство</h2>
+          <p>Используйте свой логин и ПИН-код.</p>
           <form onSubmit={submit}>
             <label>
               Логин
@@ -180,66 +174,61 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
                 value={login}
                 onChange={(e) => setLogin(e.target.value)}
                 required
-                placeholder="Ваш логин"
+                disabled={busy}
+                placeholder="Введите логин"
               />
             </label>
             <label>
-              PIN-код
+              ПИН-код
               <input
                 autoComplete="current-password"
                 type="password"
+                inputMode="numeric"
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
                 required
-                placeholder="••••"
+                minLength={4}
+                disabled={busy}
+                placeholder="Введите ПИН"
               />
             </label>
             {error && <ErrorBox message={error} />}
             <button className="button primary login-submit" disabled={busy}>
               {busy ? (
-                <LoaderCircle size={18} className="spin" />
+                <LoaderCircle className="spin" size={18} />
               ) : (
                 <>
-                  Войти в систему
-                  <ArrowRight size={18} />
+                  Войти <ArrowRight size={18} />
                 </>
               )}
             </button>
           </form>
           <div className="login-demo">
-            <span>ПОСМОТРЕТЬ В РОЛИ</span>
+            <span>ДЕМО-АККАУНТЫ</span>
             <div>
-              {["master", "manager", "worker", "admin"].map((r) => (
+              {[
+                { login: "master", role: "master" },
+                { login: "worker2", role: "worker" },
+                { login: "manager", role: "manager" },
+                { login: "admin", role: "admin" },
+              ].map((account) => (
                 <button
-                  key={r}
+                  key={account.login}
                   disabled={busy}
-                  onClick={() => submit(undefined, r)}
+                  onClick={() => void submit(undefined, account.login)}
                 >
-                  {roleNames[r]}
-                  <ArrowUpRight size={14} />
+                  {roleNames[account.role]}
+                  <ArrowRight size={15} />
                 </button>
               ))}
             </div>
-            <p>Демо-аккаунты · PIN 1234 · Учебные данные</p>
+            <p>
+              ПИН 1234 · Учебные данные. Проверка ИИ пока имитируется сервером.
+            </p>
           </div>
         </div>
-        <div className="login-bottom">
-          НарядAI · Система управления обслуживанием <span>v1.0</span>
-        </div>
+        <div className="login-bottom">НарядAI · Техническое обслуживание</div>
       </main>
-    </div>
-  );
-}
-function Brand() {
-  return (
-    <div className="brand">
-      <div className="brand-symbol">
-        <Layers3 size={24} strokeWidth={2.2} />
-      </div>
-      <span>
-        наряд<span className="brand-ai">AI</span>
-        <small>УПРАВЛЕНИЕ ПРОИЗВОДСТВОМ</small>
-      </span>
     </div>
   );
 }
@@ -257,93 +246,177 @@ export default function App() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Id | null>(null);
   const [create, setCreate] = useState(false);
+  const [createContext, setCreateContext] = useState<CreateContext>({});
+  const [boardContext, setBoardContext] = useState<BoardContext>({
+    revision: 0,
+  });
   const [notifications, setNotifications] = useState(false);
   const [menu, setMenu] = useState(false);
   const [toast, setToast] = useState("");
   const [version, setVersion] = useState(0);
   const [online, setOnline] = useState(false);
-  const [quickSearch, setQuickSearch] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const session = useRef(0);
+  const refreshAgain = useRef(false);
+  const pending = useRef<{ token: string; promise: Promise<void> } | null>(
+    null,
+  );
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notify = useCallback((message: string) => {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(""), 4500);
+    toastTimer.current = setTimeout(() => setToast(""), 5500);
   }, []);
   const logout = useCallback(() => {
+    ++session.current;
+    pending.current = null;
+    refreshAgain.current = false;
     localStorage.removeItem("naryad_token");
     setUser(null);
     setOrders([]);
+    setEmployees([]);
     setNotices([]);
     setReference(emptyReference);
     setDashboard(null);
     setSelected(null);
     setCreate(false);
+    setCreateContext({});
     setMenu(false);
     setNotifications(false);
-    setQuickSearch("");
     setToast("");
     setError("");
     setAuthLoading(false);
     setPage("dashboard");
+    setOnline(false);
+    setLastUpdated(null);
+    setBoardContext((context) => ({ revision: context.revision + 1 }));
   }, []);
   useEffect(() => {
+    let active = true;
     if (token())
       api<User>("/auth/me")
-        .then(setUser)
-        .catch(() => logout())
-        .finally(() => setAuthLoading(false));
+        .then((value) => {
+          if (active) setUser(value);
+        })
+        .catch(() => {
+          if (active) logout();
+        })
+        .finally(() => {
+          if (active) setAuthLoading(false);
+        });
     window.addEventListener("naryad:unauthorized", logout);
-    return () => window.removeEventListener("naryad:unauthorized", logout);
+    const syncSession = (event: StorageEvent) => {
+      if (
+        event.key === null ||
+        (event.key === "naryad_token" && event.oldValue !== event.newValue)
+      )
+        window.location.reload();
+    };
+    window.addEventListener("storage", syncSession);
+    return () => {
+      active = false;
+      window.removeEventListener("naryad:unauthorized", logout);
+      window.removeEventListener("storage", syncSession);
+    };
   }, [logout]);
-  const refresh = useCallback(async () => {
-    if (!token()) return;
-    try {
-      const [r, o, e, d, n] = await Promise.all([
-        api<Reference>("/reference"),
-        api<Order[]>("/orders"),
-        api<Employee[]>("/employees"),
-        api<Dashboard>("/dashboard"),
-        api<Notice[]>("/notifications"),
-      ]);
-      setReference(r);
-      setOrders(o);
-      setEmployees(e);
-      setDashboard(d);
-      setNotices(n);
-      setError("");
-      setVersion((v) => v + 1);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
+
+  const refresh = useCallback((revalidate = true): Promise<void> => {
+    const capturedToken = token();
+    if (!capturedToken) return Promise.resolve();
+    if (pending.current?.token === capturedToken) {
+      if (revalidate) refreshAgain.current = true;
+      return pending.current.promise;
     }
+    const generation = session.current;
+    const current = () =>
+      generation === session.current && capturedToken === token();
+    const promise = (async () => {
+      try {
+        do {
+          refreshAgain.current = false;
+          const [r, o, e, d, n] = await Promise.all([
+            api<Reference>("/reference"),
+            api<Order[]>("/orders?limit=5000"),
+            api<Employee[]>("/employees"),
+            api<Dashboard>("/dashboard"),
+            api<Notice[]>("/notifications"),
+          ]);
+          if (!current()) return;
+          setReference(r);
+          setOrders(o);
+          setEmployees(e);
+          setDashboard(d);
+          setNotices(n);
+          setError("");
+          setLastUpdated(new Date().toISOString());
+          setVersion((v) => v + 1);
+        } while (current() && refreshAgain.current);
+      } catch (failure) {
+        if (current()) setError((failure as Error).message);
+      } finally {
+        if (current()) {
+          pending.current = null;
+          setLoading(false);
+        }
+      }
+    })();
+    pending.current = { token: capturedToken, promise };
+    return promise;
   }, []);
+
   useEffect(() => {
     if (!user) return;
+    let disposed = false;
+    let socket: WebSocket | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
     setLoading(true);
     void refresh();
-    const timer = setInterval(() => void refresh(), 5000);
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(
-      `${proto}//${location.host}/api/ws?token=${encodeURIComponent(token() || "")}`,
-    );
-    const heartbeat = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) ws.send("ping");
-    }, 30000);
-    ws.onopen = () => setOnline(true);
-    ws.onclose = () => setOnline(false);
-    ws.onerror = () => setOnline(false);
-    ws.onmessage = (e) => {
-      try {
-        const v = JSON.parse(e.data);
-        if (v.type !== "connected") void refresh();
-      } catch {}
+    const timer = setInterval(() => void refresh(false), 5000);
+    const connect = () => {
+      if (disposed || !token()) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(
+        `${proto}//${location.host}/api/ws?token=${encodeURIComponent(token() || "")}`,
+      );
+      socket.onopen = () => {
+        if (!disposed) {
+          attempts = 0;
+          setOnline(true);
+          void refresh();
+        }
+      };
+      socket.onerror = () => {
+        if (!disposed) setOnline(false);
+      };
+      socket.onclose = () => {
+        if (!disposed) {
+          setOnline(false);
+          retryTimer = setTimeout(
+            connect,
+            Math.min(15000, 1000 * 2 ** Math.min(attempts++, 4)),
+          );
+        }
+      };
+      socket.onmessage = (e) => {
+        if (disposed) return;
+        try {
+          if (JSON.parse(e.data).type !== "connected") void refresh();
+        } catch {
+          /* Ignore non-event heartbeats. */
+        }
+      };
     };
+    connect();
+    const heartbeat = setInterval(() => {
+      if (socket?.readyState === WebSocket.OPEN) socket.send("ping");
+    }, 30000);
     return () => {
+      disposed = true;
       clearInterval(timer);
       clearInterval(heartbeat);
-      ws.close();
-      setOnline(false);
+      clearTimeout(retryTimer);
+      socket?.close();
     };
   }, [user, refresh]);
   useEffect(
@@ -354,39 +427,59 @@ export default function App() {
   );
   const canManage = user?.role === "master" || user?.role === "admin";
   const title =
-    navigation.find((n) => n.id === page)?.name ||
-    (
-      { reference: "Справочники", integrations: "Интеграции" } as Record<
-        string,
-        string
-      >
-    )[page];
+    page === "dashboard" && user?.role === "worker"
+      ? "Моя работа"
+      : navigation.find((n) => n.id === page)?.name ||
+        { reference: "Справочники", integrations: "Интеграции" }[
+          page as "reference" | "integrations"
+        ];
   const unread = notices.filter((n) => !n.read).length;
-  async function signOut() {
-    try {
-      await post("/auth/logout", {});
-    } catch {
-    } finally {
-      logout();
-    }
+  const attention = attentionCounts(orders);
+  const team = shiftTeam(employees);
+  const currentWork = orders.filter((o) =>
+    ["in_progress", "paused"].includes(o.status),
+  );
+  const incoming = orders
+    .filter((o) => ["issued", "accepted", "rework"].includes(o.status))
+    .sort(
+      (a, b) =>
+        Number(b.priority === "emergency") - Number(a.priority === "emergency"),
+    );
+  function openCreate(context: CreateContext = {}) {
+    setCreateContext(context);
+    setCreate(true);
   }
-  function navigate(p: Page) {
-    setPage(p);
+  function navigate(next: Page) {
+    setPage(next);
     setMenu(false);
-    setQuickSearch("");
+    setBoardContext((context) => ({ revision: context.revision + 1 }));
   }
-  async function readNotice(n: Notice) {
+  function inspectOrders(filters: Omit<BoardContext, "revision">) {
+    setPage("orders");
+    setMenu(false);
+    setBoardContext((context) => ({
+      ...filters,
+      revision: context.revision + 1,
+    }));
+  }
+  function signOut() {
+    // post captures the current token synchronously; a slow revocation must not
+    // leave private data visible or clear a subsequent user's session.
+    void post("/auth/logout", {}).catch(() => {});
+    logout();
+  }
+  async function readNotice(notice: Notice) {
     try {
-      await post(`/notifications/${n.id}/read`, {});
-      setNotices((ns) =>
-        ns.map((v) => (v.id === n.id ? { ...v, read: true } : v)),
+      await post(`/notifications/${notice.id}/read`, {});
+      setNotices((all) =>
+        all.map((n) => (n.id === notice.id ? { ...n, read: true } : n)),
       );
-      if (n.order_id) {
-        setSelected(n.order_id);
+      if (notice.order_id) {
+        setSelected(notice.order_id);
         setNotifications(false);
       }
-    } catch (e) {
-      notify((e as Error).message);
+    } catch (failure) {
+      notify((failure as Error).message);
     }
   }
   if (authLoading)
@@ -398,28 +491,32 @@ export default function App() {
   if (!user)
     return (
       <Login
-        onLogin={(u) => {
+        onLogin={(value) => {
+          ++session.current;
           setLoading(true);
-          setUser(u);
+          setUser(value);
         }}
       />
     );
+
   return (
     <div className="app-shell">
       {menu && (
         <div className="sidebar-backdrop" onClick={() => setMenu(false)} />
       )}
-      <aside className={`sidebar ${menu ? "is-open" : ""}`}>
+      <aside
+        className={`sidebar ${menu ? "is-open" : ""}`}
+        aria-label="Основная навигация"
+      >
         <Brand />
         <div className="workspace-switch">
           <span className="workspace-avatar">
-            <Factory size={17} />
+            <Factory size={20} />
           </span>
           <div>
             <strong>Костанайские минералы</strong>
             <small>Производственный комплекс</small>
           </div>
-          <ChevronDown size={15} />
         </div>
         <div className="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</div>
         <nav>
@@ -427,10 +524,15 @@ export default function App() {
             <button
               key={id}
               className={page === id ? "active" : ""}
+              aria-current={page === id ? "page" : undefined}
               onClick={() => navigate(id)}
             >
-              <Icon size={19} />
-              <span>{name}</span>
+              <Icon size={20} />
+              <span>
+                {id === "dashboard" && user.role === "worker"
+                  ? "Моя работа"
+                  : name}
+              </span>
               {id === "orders" && (
                 <span className="nav-count">{dashboard?.active || 0}</span>
               )}
@@ -444,25 +546,26 @@ export default function App() {
               className={page === "reference" ? "active" : ""}
               onClick={() => navigate("reference")}
             >
-              <BookOpen size={19} />
+              <BookOpen size={20} />
               <span>Справочники</span>
             </button>
             <button
               className={page === "integrations" ? "active" : ""}
               onClick={() => navigate("integrations")}
             >
-              <Plug size={19} />
+              <Plug size={20} />
               <span>Интеграции</span>
-              <span className="tiny-dot" />
             </button>
           </nav>
           <div className="sidebar-status">
-            <span className="live-dot" />
+            <span className={`live-dot ${error ? "is-stale" : ""}`} />
             <div>
               <strong>
-                {online
-                  ? "Данные в реальном времени"
-                  : "Обновление каждые 5 секунд"}
+                {error
+                  ? "Нет свежих данных"
+                  : online
+                    ? "Связь с сервером"
+                    : "Опрос сервера"}
               </strong>
               <small>Демонстрационная среда</small>
             </div>
@@ -478,7 +581,7 @@ export default function App() {
               aria-label="Выйти"
               onClick={() => void signOut()}
             >
-              <LogOut size={17} />
+              <LogOut size={19} />
             </button>
           </div>
         </div>
@@ -491,30 +594,38 @@ export default function App() {
               onClick={() => setMenu(true)}
               aria-label="Открыть меню"
             >
-              <Menu size={21} />
+              <Menu size={22} />
             </button>
             <span>Рабочее пространство</span>
-            <ChevronRight size={14} />
+            <ChevronRight size={15} />
             <strong>{title}</strong>
           </div>
           <div className="topbar-right">
-            <span className="topbar-date">
-              <CalendarDays size={15} />
-              {new Intl.DateTimeFormat("ru-RU", {
-                timeZone: "Asia/Almaty",
-                day: "numeric",
-                month: "long",
-                year: "numeric",
-              }).format(new Date())}
+            <span className="outlined-tag">ДЕМО</span>
+            <span className={`connection-label ${error ? "is-stale" : ""}`}>
+              <span className="live-dot" />
+              {error
+                ? "Данные не обновлены"
+                : lastUpdated
+                  ? `Обновлено ${formatTime(lastUpdated)}`
+                  : "Подключение…"}
             </span>
-            <span className="top-divider" />
+            <button
+              className="icon-button"
+              onClick={() => void refresh()}
+              aria-label="Обновить данные"
+              disabled={loading}
+            >
+              <RefreshCw size={19} />
+            </button>
             <div className="notification-wrap">
               <button
                 className={`icon-button ${notifications ? "selected" : ""}`}
-                onClick={() => setNotifications((v) => !v)}
-                aria-label="Уведомления"
+                onClick={() => setNotifications((value) => !value)}
+                aria-label={`Уведомления, непрочитанных: ${unread}`}
+                aria-expanded={notifications}
               >
-                <Bell size={19} />
+                <Bell size={20} />
                 {unread > 0 && <span className="notification-dot" />}
               </button>
               {notifications && (
@@ -528,33 +639,33 @@ export default function App() {
                       onClick={() => setNotifications(false)}
                       aria-label="Закрыть уведомления"
                     >
-                      <X size={17} />
+                      <X size={19} />
                     </button>
                   </div>
                   {notices.length ? (
-                    notices.slice(0, 40).map((n) => (
+                    notices.slice(0, 40).map((notice) => (
                       <button
-                        key={n.id}
-                        className={`notice ${n.read ? "read" : ""}`}
-                        onClick={() => readNotice(n)}
+                        key={notice.id}
+                        className={`notice ${notice.read ? "read" : ""}`}
+                        onClick={() => void readNotice(notice)}
                       >
                         <span
-                          className={`notice-icon ${n.kind.includes("overdue") ? "red" : ""}`}
+                          className={`notice-icon ${notice.kind.includes("overdue") ? "red" : ""}`}
                         >
-                          <Bell size={17} />
+                          <Bell size={18} />
                         </span>
                         <span>
-                          <strong>{n.title}</strong>
-                          <p>{n.message}</p>
-                          <small>{formatDate(n.created_at, true)}</small>
+                          <strong>{notice.title}</strong>
+                          <p>{notice.message}</p>
+                          <small>{formatDate(notice.created_at, true)}</small>
                         </span>
-                        {!n.read && <i />}
+                        {!notice.read && <i />}
                       </button>
                     ))
                   ) : (
                     <Empty
-                      title="Всё спокойно"
-                      text="Новые события появятся здесь."
+                      title="Новых событий пока нет"
+                      text="Здесь появятся назначения и напоминания по нарядам."
                     />
                   )}
                 </div>
@@ -563,188 +674,334 @@ export default function App() {
             <span className="avatar top-avatar">{initials(user.name)}</span>
           </div>
         </header>
-        <main className="main-content">
+        <main className="main-content" id="workspace">
           <div className="page-heading">
             <div>
               <div className="eyebrow">
                 {page === "dashboard"
-                  ? "ПРОИЗВОДСТВО НА ЛАДОНИ"
-                  : page === "analytics"
-                    ? "ОТ ДАННЫХ К РЕШЕНИЯМ"
-                    : page === "orders"
-                      ? "ЕДИНЫЙ ЖУРНАЛ РАБОТ"
-                      : "РАБОЧЕЕ ПРОСТРАНСТВО"}
+                  ? "ТЕКУЩАЯ СМЕНА"
+                  : page === "orders"
+                    ? "ЗАДАНИЯ И ИСТОРИЯ"
+                    : "РАБОЧЕЕ ПРОСТРАНСТВО"}
               </div>
-              <h1>
-                {page === "dashboard" ? "Обзор смены" : title}
-                <span className="heading-dot">.</span>
-              </h1>
+              <h1>{title}</h1>
               <p>
                 {page === "dashboard"
-                  ? "Всё, что происходит на производстве, — в одном месте."
+                  ? user.role === "worker"
+                    ? "Текущее задание и следующие действия."
+                    : "Приоритеты, ход работ и решения мастера."
                   : page === "orders"
-                    ? "Планируйте работы, назначайте исполнителей и контролируйте результат."
+                    ? "Назначение, выполнение и приёмка — в одном журнале."
                     : page === "employees"
-                      ? "Команда смены, текущая загрузка и результаты работы."
+                      ? "Кто свободен, что выполняет и сколько назначений ожидает."
                       : page === "analytics"
-                        ? "Эффективность обслуживания в цифрах и фактах."
+                        ? "Результаты за период, показатели и исходные наряды."
                         : page === "reference"
-                          ? "Единые данные для точной постановки производственных задач."
-                          : "Подключения и готовность системы к расширению."}
+                          ? "Участки, оборудование, сотрудники и материалы."
+                          : "Текущее состояние подключений."}
               </p>
             </div>
             <div className="page-actions">
               {(page === "dashboard" || page === "orders") && (
                 <div className="shift-badge">
-                  <span className="live-dot" />
+                  <CalendarDays size={17} />
                   <span>{dashboard?.shift_label || "Текущая смена"}</span>
                 </div>
               )}
               {canManage && (page === "dashboard" || page === "orders") && (
-                <button
-                  className="button primary"
-                  onClick={() => setCreate(true)}
-                >
-                  <Plus size={18} />
-                  Создать наряд
+                <button className="button primary" onClick={() => openCreate()}>
+                  <Plus size={19} />
+                  Выдать наряд
                 </button>
               )}
             </div>
           </div>
-          {user.role === "worker" && (
-            <div className="simulation-banner">
-              <Radio size={17} />
-              <span>
-                <strong>Веб-симулятор исполнителя.</strong> Мобильное приложение
-                — заглушка. Здесь доступны действия с назначенными вам нарядами.
-              </span>
-            </div>
+          {error && (
+            <ErrorBox
+              message={`${error}${lastUpdated ? ` Последнее обновление: ${formatTime(lastUpdated)}.` : ""}`}
+              retry={() => void refresh()}
+            />
           )}
-          {error && <ErrorBox message={error} retry={() => void refresh()} />}
           {loading ? (
             <Loading />
           ) : page === "dashboard" || page === "orders" ? (
             <>
-              {page === "dashboard" && (
-                <>
-                  <div className="metrics-grid">
-                    <Metric
-                      label="Выдано за смену"
-                      value={number(dashboard?.issued)}
-                      icon={<ClipboardList size={20} />}
-                      detail={
-                        <>
-                          <span className="metric-neutral">Текущая смена</span>
-                          <span>нарядов в системе</span>
-                        </>
-                      }
-                    />
-                    <Metric
-                      label="Завершено"
-                      value={number(dashboard?.completed)}
-                      icon={<CircleCheck size={20} />}
-                      detail={
-                        <>
-                          <span className="metric-green">
-                            <Check size={13} />
-                            Работа выполнена
-                          </span>
-                          <span>за текущую смену</span>
-                        </>
-                      }
-                    />
-                    <Metric
-                      label="Просрочено"
-                      value={number(dashboard?.overdue)}
-                      icon={<Timer size={20} />}
-                      accent
-                      detail={
-                        <>
-                          <span className="metric-red">Требуют внимания</span>
-                          <span>срок исполнения истёк</span>
-                        </>
-                      }
-                    />
-                    <Metric
-                      label="Простои оборудования"
-                      value={number(dashboard?.downtime_count)}
-                      icon={<Factory size={20} />}
-                      detail={
-                        <>
-                          <span className="metric-neutral">На контроле</span>
-                          <span>аварийные работы</span>
-                        </>
-                      }
-                    />
-                  </div>
-                  <section className="workforce-section">
+              {page === "dashboard" &&
+                (user.role === "worker" ? (
+                  <>
                     <SectionTitle
-                      title="Команда смены"
-                      caption={`${employees.filter((e) => e.on_shift && e.role === "worker").length} сотрудников на смене`}
-                      action={
-                        <button
-                          className="text-button"
-                          onClick={() => navigate("employees")}
-                        >
-                          Все сотрудники
-                          <ArrowUpRight size={15} />
-                        </button>
-                      }
+                      title="Сейчас в работе"
+                      caption="Откройте наряд, чтобы продолжить работу или заполнить отчёт."
                     />
-                    <div className="workforce-strip">
-                      {employees
-                        .filter((e) => e.on_shift && e.role === "worker")
-                        .slice(0, 7)
-                        .map((e, i) => (
-                          <button
-                            className="worker-card"
-                            key={e.id}
-                            onClick={() => {
-                              setQuickSearch(e.name);
-                              setPage("orders");
-                            }}
-                          >
-                            <span
-                              className={`avatar worker-avatar avatar-${i % 4}`}
+                    <div className="current-work-grid">
+                      {currentWork.length ? (
+                        currentWork.map((order) => (
+                          <article className="current-task" key={order.id}>
+                            <div className="section-topline">
+                              <span>{order.number}</span>
+                              <Status value={order.status} />
+                            </div>
+                            <h2>{order.title}</h2>
+                            <p>
+                              {order.equipment_name} · {order.area_name}
+                            </p>
+                            <div className="task-flags">
+                              <Priority value={order.priority} />
+                              {order.is_overdue && (
+                                <span className="overdue">Срок истёк</span>
+                              )}
+                            </div>
+                            <p>До {formatDate(order.deadline, true)}</p>
+                            <button
+                              className="button primary"
+                              onClick={() => setSelected(order.id)}
                             >
-                              {initials(e.name)}
-                              <i className={`employee-dot ${e.status}`} />
-                            </span>
-                            <strong>
-                              {e.name.split(" ").slice(0, 2).join(" ")}
-                            </strong>
-                            <small>{e.specialty}</small>
-                            <span className={`worker-status ${e.status}`}>
-                              {e.status === "busy"
-                                ? "В работе"
-                                : e.status === "queued"
-                                  ? "В очереди"
-                                  : e.status === "free"
-                                    ? "Свободен"
-                                    : "Вне смены"}
-                            </span>
-                          </button>
-                        ))}
+                              {nextWorkAction(order.status)}
+                              <ArrowRight size={17} />
+                            </button>
+                          </article>
+                        ))
+                      ) : (
+                        <Empty
+                          title="Нет работы в исполнении"
+                          text="Примите поступивший наряд или выберите задание из очереди."
+                        />
+                      )}
                     </div>
-                  </section>
-                </>
+                    {incoming.length > 0 && (
+                      <section className="incoming-section">
+                        <SectionTitle
+                          title={`Поступления и доработка · ${incoming.length}`}
+                        />
+                        <div className="current-work-grid">
+                          {incoming.slice(0, 3).map((order) => (
+                            <article className="current-task" key={order.id}>
+                              <div className="section-topline">
+                                <span>{order.number}</span>
+                                <Priority value={order.priority} />
+                              </div>
+                              <h3>{order.title}</h3>
+                              <p>
+                                {order.equipment_name} · {order.area_name}
+                              </p>
+                              <Status value={order.status} />
+                              <button
+                                className="button secondary"
+                                onClick={() => setSelected(order.id)}
+                              >
+                                {nextWorkAction(order.status)}
+                                <ArrowRight size={16} />
+                              </button>
+                            </article>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <SectionTitle
+                      title="Требуют внимания"
+                      caption="Выберите группу, чтобы сразу перейти к нужным нарядам."
+                    />
+                    <div className="attention-grid">
+                      {[
+                        {
+                          focus: "emergency" as const,
+                          title: "Аварийные",
+                          hint: "Приоритетное реагирование",
+                          icon: Zap,
+                          tone: "danger",
+                        },
+                        {
+                          focus: "overdue" as const,
+                          title: "Нарушен срок",
+                          hint: "Уточнить причину и ход работ",
+                          icon: Timer,
+                          tone: "danger",
+                        },
+                        {
+                          focus: "issued" as const,
+                          title: "Не приняты",
+                          hint: "Ожидают ответа исполнителя",
+                          icon: ClipboardList,
+                          tone: "warning",
+                        },
+                        {
+                          focus: "ai_review" as const,
+                          title: "На приёмке",
+                          hint: "Проверить отчёт и результат",
+                          icon: ClipboardCheck,
+                          tone: "primary",
+                        },
+                      ].map(
+                        ({ focus, title: label, hint, icon: Icon, tone }) => (
+                          <button
+                            className={`attention-card tone-${tone}`}
+                            key={focus}
+                            onClick={() => inspectOrders({ focus })}
+                          >
+                            <div className="attention-copy">
+                              <Icon size={21} />
+                              <strong>{label}</strong>
+                              <span>{hint}</span>
+                            </div>
+                            <span className="attention-count">
+                              {attention[focus]}
+                            </span>
+                            <ChevronRight size={18} />
+                          </button>
+                        ),
+                      )}
+                    </div>
+                    {attention.rejected > 0 && (
+                      <button
+                        className="text-button attention-followup"
+                        onClick={() => inspectOrders({ focus: "rejected" })}
+                      >
+                        <TriangleAlert size={17} />
+                        Отклонено назначений: {attention.rejected}. Нужны
+                        причина и решение мастера.
+                        <ArrowRight size={16} />
+                      </button>
+                    )}
+                    <div className="shift-strip">
+                      <div>
+                        <ClipboardList size={19} />
+                        <strong>{number(dashboard?.issued)}</strong>
+                        <span>выдано за смену</span>
+                      </div>
+                      <div>
+                        <CircleCheck size={19} />
+                        <strong>{number(dashboard?.completed)}</strong>
+                        <span>исполнено за смену</span>
+                      </div>
+                      <div>
+                        <Users size={19} />
+                        <strong>
+                          {
+                            team.filter(
+                              (e) => e.on_shift && e.status === "free",
+                            ).length
+                          }
+                        </strong>
+                        <span>свободных исполнителей</span>
+                      </div>
+                      <div>
+                        <Factory size={19} />
+                        <strong>{number(dashboard?.downtime_count)}</strong>
+                        <span>ед. оборудования в активном ремонте</span>
+                      </div>
+                    </div>
+                  </>
+                ))}
+              {orders.length >= 5000 && (
+                <div className="simulation-banner">
+                  <TriangleAlert size={18} />
+                  <span>
+                    Загружены последние 5000 нарядов. Счётчики групп и фильтры
+                    относятся к этой выборке; полная серверная пагинация ещё не
+                    подключена.
+                  </span>
+                </div>
               )}
               <OrderBoard
+                key={`${page}-${boardContext.revision}`}
                 orders={orders}
                 reference={reference}
                 onSelect={setSelected}
                 compact={page === "dashboard"}
-                initialSearch={quickSearch}
+                initialFocus={boardContext.focus}
+                initialAssignee={boardContext.assigneeId}
+                initialEquipment={boardContext.equipmentId}
+                initialArea={boardContext.areaId}
+                initialBrigade={boardContext.brigadeId}
+                initialFromDate={boardContext.fromDate}
+                initialToDate={boardContext.toDate}
                 user={user}
-                onCreate={() => setCreate(true)}
+                onCreate={() => openCreate()}
               />
+              {page === "dashboard" && user.role !== "worker" && (
+                <section className="workforce-section">
+                  <SectionTitle
+                    title="Команда смены"
+                    caption={`${team.filter((e) => e.on_shift).length} на смене · сначала свободные`}
+                    action={
+                      <button
+                        className="text-button"
+                        onClick={() => navigate("employees")}
+                      >
+                        Все сотрудники
+                        <ArrowRight size={16} />
+                      </button>
+                    }
+                  />
+                  <div className="team-table">
+                    {team.slice(0, 6).map((employee) => (
+                      <div className="team-person" key={employee.id}>
+                        <div className="avatar worker-avatar">
+                          {initials(employee.name)}
+                        </div>
+                        <div className="team-identity">
+                          <strong>{employee.name}</strong>
+                          <small>
+                            {employee.specialty} · {employee.grade} разряд
+                          </small>
+                        </div>
+                        <span className={`worker-status ${employee.status}`}>
+                          {employee.status === "free"
+                            ? "Свободен"
+                            : employee.status === "busy"
+                              ? "В работе"
+                              : employee.status === "queued"
+                                ? "Есть назначения"
+                                : "Вне смены"}
+                        </span>
+                        <div className="team-load">
+                          <span>
+                            {employee.current_order || "Нет текущей работы"}
+                          </span>
+                          <small>
+                            Других назначений: {employee.queue_count}
+                          </small>
+                        </div>
+                        <div className="team-actions">
+                          <button
+                            className="button secondary"
+                            onClick={() =>
+                              inspectOrders({
+                                focus: "all",
+                                assigneeId: employee.id,
+                              })
+                            }
+                          >
+                            Наряды
+                          </button>
+                          {canManage && (
+                            <button
+                              className="button secondary"
+                              disabled={!employee.on_shift}
+                              onClick={() =>
+                                openCreate({ assigneeId: employee.id })
+                              }
+                            >
+                              <Plus size={16} />
+                              Выдать
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
               {page === "dashboard" && (
                 <div className="dashboard-bottom">
                   <div>
-                    <ShieldCheck size={16} />
-                    <span>Каждое действие сохраняется в истории наряда</span>
+                    <ShieldCheck size={17} />
+                    <span>Действия сохраняются в истории наряда</span>
                   </div>
-                  <span>Часовой пояс: Алматы (UTC+5)</span>
+                  <span>Время предприятия · Asia/Almaty</span>
                 </div>
               )}
             </>
@@ -754,37 +1011,46 @@ export default function App() {
               orders={orders}
               reference={reference}
               onSelect={setSelected}
+              onCreate={canManage ? openCreate : undefined}
             />
           ) : page === "analytics" ? (
-            <AnalyticsPage reference={reference} notify={notify} />
+            <AnalyticsPage
+              reference={reference}
+              notify={notify}
+              version={version}
+              onInspectOrders={(filters) =>
+                inspectOrders({ focus: "all", ...filters })
+              }
+            />
           ) : page === "reference" ? (
             <ReferencePage
               reference={reference}
               user={user}
               refresh={refresh}
               notify={notify}
+              onCreate={canManage ? openCreate : undefined}
             />
           ) : (
             <IntegrationsPage />
           )}
         </main>
         <footer className="main-footer">
-          <span>
-            НАРЯДAI <i /> КОСТАНАЙСКИЕ МИНЕРАЛЫ
-          </span>
-          <span>Работаем слаженно. Действуем точно.</span>
+          <span>НарядAI · Костанайские минералы</span>
+          <span>Демо · учебные данные · ИИ-заглушка</span>
         </footer>
       </div>
       {create && (
         <CreateOrder
           reference={reference}
           employees={employees}
+          initialAssigneeId={createContext.assigneeId}
+          initialEquipmentId={createContext.equipmentId}
           onClose={() => setCreate(false)}
-          onCreated={(o) => {
+          onCreated={(order) => {
             setCreate(false);
-            setSelected(o.id);
+            setSelected(order.id);
             void refresh();
-            notify(`Наряд ${o.number} создан`);
+            notify(`Наряд ${order.number} выдан`);
           }}
         />
       )}
@@ -798,13 +1064,13 @@ export default function App() {
           onChange={() => void refresh()}
           notify={notify}
         />
-      )}{" "}
+      )}
       {toast && (
         <div className="toast" role="status">
-          <CheckCheck size={18} />
+          <CheckCheck size={19} />
           {toast}
-          <button onClick={() => setToast("")} aria-label="Закрыть">
-            <X size={16} />
+          <button onClick={() => setToast("")} aria-label="Закрыть сообщение">
+            <X size={18} />
           </button>
         </div>
       )}

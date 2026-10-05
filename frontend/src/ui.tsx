@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   X,
@@ -81,9 +81,48 @@ export function Modal({
   children: ReactNode;
   wide?: boolean;
 }) {
+  const panel = useRef<HTMLElement>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const focusable = () =>
+      Array.from(
+        panel.current?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+        ) || [],
+      ).filter((element) => element.getClientRects().length > 0);
+    panel.current?.focus();
     const fn = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close.current();
+      }
+      if (e.key === "Tab") {
+        const elements = focusable();
+        const first = elements[0],
+          last = elements.at(-1);
+        if (!first) {
+          e.preventDefault();
+          panel.current?.focus();
+          return;
+        }
+        if (
+          e.shiftKey &&
+          (document.activeElement === first ||
+            document.activeElement === panel.current)
+        ) {
+          e.preventDefault();
+          last?.focus();
+        } else if (
+          !e.shiftKey &&
+          (document.activeElement === last ||
+            !panel.current?.contains(document.activeElement))
+        ) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     document.addEventListener("keydown", fn);
     const old = document.body.style.overflow;
@@ -91,8 +130,9 @@ export function Modal({
     return () => {
       document.removeEventListener("keydown", fn);
       document.body.style.overflow = old;
+      if (previous?.isConnected) previous.focus();
     };
-  }, [onClose]);
+  }, []);
   return (
     <div
       className="modal-overlay"
@@ -101,6 +141,8 @@ export function Modal({
       }}
     >
       <section
+        ref={panel}
+        tabIndex={-1}
         className={`modal ${wide ? "modal-wide" : ""}`}
         role="dialog"
         aria-modal="true"

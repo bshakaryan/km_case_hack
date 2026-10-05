@@ -148,14 +148,14 @@ export type Analytics = {
 };
 export const statusNames: Record<string, string> = {
   issued: "Выдан",
-  accepted: "Принят",
+  accepted: "Принят в работу",
   queued: "В очереди",
   rejected: "Отклонён",
   in_progress: "В работе",
   paused: "Приостановлен",
-  completed: "Завершён",
-  ai_review: "На проверке",
-  rework: "На доработке",
+  completed: "Исполнено",
+  ai_review: "Проверка ИИ",
+  rework: "На доработку",
   closed: "Закрыт",
   cancelled: "Отменён",
 };
@@ -198,15 +198,57 @@ export const number = (n: number | undefined, digits = 0) =>
   );
 export const idValue = (v: string): Id => (/^\d+$/.test(v) ? Number(v) : v);
 export const token = () => localStorage.getItem("naryad_token");
+export class ApiError extends Error {
+  readonly statusCode: number | undefined;
+  readonly requestMayHaveSucceeded: boolean;
+  constructor(
+    message: string,
+    statusCode?: number,
+    requestMayHaveSucceeded = false,
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.statusCode = statusCode;
+    this.requestMayHaveSucceeded = requestMayHaveSucceeded;
+  }
+}
 export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
   const headers = new Headers(options.headers);
-  if (token()) headers.set("Authorization", `Bearer ${token()}`);
+  const sessionToken = token();
+  const writing = !["GET", "HEAD"].includes(
+    (options.method || "GET").toUpperCase(),
+  );
+  if (sessionToken) headers.set("Authorization", `Bearer ${sessionToken}`);
   if (options.body && !(options.body instanceof FormData))
     headers.set("Content-Type", "application/json");
-  const res = await fetch(`/api${path}`, { ...options, headers });
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, { ...options, headers });
+  } catch (error) {
+    if (
+      !writing &&
+      error instanceof DOMException &&
+      error.name === "AbortError"
+    )
+      throw error;
+    throw new ApiError(
+      writing
+        ? "Сервер не подтвердил результат. Проверьте наряд перед повторной отправкой."
+        : "Нет связи с сервером. Проверьте подключение и повторите обновление.",
+      undefined,
+      writing,
+    );
+  }
+  if (sessionToken !== token()) {
+    throw new ApiError(
+      "Сессия изменилась. Обновите данные под текущим пользователем.",
+      401,
+      writing,
+    );
+  }
   if (!res.ok) {
     let error: any;
     try {
@@ -214,19 +256,35 @@ export async function api<T>(
     } catch {
       error = { detail: res.statusText };
     }
+    if (sessionToken !== token())
+      throw new ApiError("Сессия изменилась. Обновите данные.", 401, writing);
     if (res.status === 401 && path != "/auth/login")
       window.dispatchEvent(new Event("naryad:unauthorized"));
     const detail = error.detail;
-    throw new Error(
+    throw new ApiError(
       Array.isArray(detail)
         ? detail.map((v: any) => v.msg).join("; ")
         : typeof detail === "string"
           ? detail
           : `Ошибка запроса (${res.status})`,
+      res.status,
+      writing && res.status >= 500,
     );
   }
   if (res.status === 204) return undefined as T;
-  return res.json();
+  try {
+    const data = await res.json();
+    if (sessionToken !== token())
+      throw new ApiError("Сессия изменилась. Обновите данные.", 401, writing);
+    return data as T;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError(
+      "Ответ сервера не удалось прочитать. Проверьте результат обновлением.",
+      res.status,
+      writing,
+    );
+  }
 }
 export const post = <T>(path: string, body: any) =>
   api<T>(path, { method: "POST", body: JSON.stringify(body) });

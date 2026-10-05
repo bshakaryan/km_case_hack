@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Area,
@@ -40,6 +40,7 @@ import {
   Pencil,
   Plus,
   Radio,
+  RefreshCw,
   Search,
   ShieldCheck,
   Smartphone,
@@ -84,25 +85,40 @@ export function EmployeesPage({
   orders,
   reference,
   onSelect,
+  onCreate,
 }: {
   employees: Employee[];
   orders: Order[];
   reference: Reference;
   onSelect: (id: Id) => void;
+  onCreate?: (context: { assigneeId?: Id; equipmentId?: Id }) => void;
 }) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [brigade, setBrigade] = useState("");
   const workers = employees.filter((e) => e.role === "worker");
-  const filtered = workers.filter(
-    (e) =>
-      (!search ||
-        `${e.name} ${e.specialty}`
-          .toLowerCase()
-          .includes(search.toLowerCase())) &&
-      (!status || e.status === status) &&
-      (!brigade || String(e.brigade_id) === brigade),
-  );
+  const filtered = workers
+    .filter(
+      (e) =>
+        (!search ||
+          `${e.name} ${e.specialty}`
+            .toLowerCase()
+            .includes(search.toLowerCase())) &&
+        (!status || e.status === status) &&
+        (!brigade || String(e.brigade_id) === brigade),
+    )
+    .sort((a, b) => {
+      const rank: Record<string, number> = {
+        free: 0,
+        queued: 1,
+        busy: 2,
+        off_shift: 3,
+      };
+      return (
+        (rank[a.status] ?? 4) - (rank[b.status] ?? 4) ||
+        a.name.localeCompare(b.name, "ru")
+      );
+    });
   return (
     <>
       <div className="metrics-grid">
@@ -116,7 +132,7 @@ export function EmployeesPage({
           label="На смене"
           value={workers.filter((e) => e.on_shift).length}
           icon={<HardHat size={20} />}
-          detail={<span className="metric-green">Готовы к работе</span>}
+          detail={<span>включая занятых исполнителей</span>}
         />
         <Metric
           label="Выполняют наряды"
@@ -133,8 +149,8 @@ export function EmployeesPage({
       </div>
       <section className="panel">
         <SectionTitle
-          title="Люди, на которых всё держится"
-          caption="Текущая загрузка исполнителей и личные результаты."
+          title="Загрузка исполнителей"
+          caption="Свободные первыми. Текущая работа и очередь показаны одновременно."
         />
         <div className="employee-filters">
           <label className="search-box">
@@ -170,6 +186,18 @@ export function EmployeesPage({
             <option value="off_shift">Вне смены</option>
           </select>
           <span className="muted">Найдено {filtered.length}</span>
+          {(search || status || brigade) && (
+            <button
+              className="text-button"
+              onClick={() => {
+                setSearch("");
+                setStatus("");
+                setBrigade("");
+              }}
+            >
+              Сбросить фильтры
+            </button>
+          )}
         </div>
         {filtered.length ? (
           <div className="table-wrap">
@@ -181,8 +209,9 @@ export function EmployeesPage({
                   <th>Статус</th>
                   <th>Текущий наряд</th>
                   <th>В очереди</th>
-                  <th>Выполнено</th>
-                  <th>Рейтинг</th>
+                  <th>Закрыто</th>
+                  <th>Рейтинг / 100</th>
+                  {onCreate && <th>Назначение</th>}
                 </tr>
               </thead>
               <tbody>
@@ -206,8 +235,9 @@ export function EmployeesPage({
                         </div>
                       </td>
                       <td>
-                        {reference.brigades.find((b) => b.id === e.brigade_id)
-                          ?.name || "—"}
+                        {reference.brigades.find(
+                          (b) => String(b.id) === String(e.brigade_id),
+                        )?.name || "—"}
                         <small>{e.grade ? `${e.grade} разряд` : "—"}</small>
                       </td>
                       <td>
@@ -227,25 +257,52 @@ export function EmployeesPage({
                       </td>
                       <td>
                         {current ? (
-                          <button
-                            className="text-button"
-                            onClick={() => onSelect(current.id)}
-                          >
-                            {current.number}
-                            <ArrowUpRight size={13} />
-                          </button>
+                          <>
+                            <button
+                              className="text-button"
+                              onClick={() => onSelect(current.id)}
+                            >
+                              {current.number}
+                              <ArrowUpRight size={13} />
+                            </button>
+                            <small>{current.equipment_name}</small>
+                          </>
                         ) : (
                           e.current_order || "—"
                         )}
                       </td>
-                      <td>{e.queue_count}</td>
+                      <td>
+                        {e.queue_count}
+                        <small>
+                          {e.on_shift === false || e.status === "off_shift"
+                            ? "Не на смене"
+                            : "других заданий"}
+                        </small>
+                      </td>
                       <td>{e.completed_count}</td>
                       <td>
                         <span className="rating-pill">
-                          <Star size={13} />
                           {number(e.rating, 1)}
                         </span>
                       </td>
+                      {onCreate && (
+                        <td className="employee-assignment">
+                          <button
+                            className="button secondary"
+                            disabled={
+                              e.on_shift === false || e.status === "off_shift"
+                            }
+                            title={
+                              e.on_shift === false || e.status === "off_shift"
+                                ? "Нельзя назначить сотруднику вне смены"
+                                : `Выдать наряд: ${e.name}`
+                            }
+                            onClick={() => onCreate({ assigneeId: e.id })}
+                          >
+                            <Plus size={16} /> Выдать наряд
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -259,10 +316,43 @@ export function EmployeesPage({
           />
         )}
       </section>
+      <div className="panel-note">
+        <Info size={16} />
+        <span>
+          Очередь — остальные незакрытые назначения, её порядок пока не задан.
+          Закрытые работы и рейтинг здесь показаны по всей доступной истории;
+          для выбора периода откройте аналитику.
+        </span>
+      </div>
     </>
   );
 }
 type PresetBounds = { from_date: string; to_date: string };
+type SourceFilters = {
+  assigneeId?: Id;
+  equipmentId?: Id;
+  areaId?: Id;
+  brigadeId?: Id;
+  fromDate?: string;
+  toDate?: string;
+};
+function reportDate(value: string, end = false) {
+  const date = new Date(
+    /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? `${value}T${end ? "23:59:59" : "00:00:00"}+05:00`
+      : value,
+  );
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Asia/Almaty",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(date);
+}
 function productionPeriod(preset: "shift" | "day"): PresetBounds {
   const now = new Date();
   const parts = Object.fromEntries(
@@ -288,15 +378,26 @@ function productionPeriod(preset: "shift" | "day"): PresetBounds {
 export function AnalyticsPage({
   reference: r,
   notify,
+  version = 0,
+  onInspectOrders,
 }: {
   reference: Reference;
   notify: (s: string) => void;
+  version?: number;
+  onInspectOrders?: (filters: SourceFilters) => void;
 }) {
   const [data, setData] = useState<Analytics | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [days, setDays] = useState("90");
-  const [presetBounds, setPresetBounds] = useState<PresetBounds | null>(null);
+  const [refreshCount, setRefreshCount] = useState(0);
+  const [loaded, setLoaded] = useState<{
+    query: string;
+    bounds: PresetBounds;
+    at: string;
+    selection: string;
+  } | null>(null);
+  const loadedSelection = useRef("");
   const [filters, setFilters] = useState({
     area_id: "",
     equipment_id: "",
@@ -308,25 +409,42 @@ export function AnalyticsPage({
   const [advanced, setAdvanced] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [tab, setTab] = useState("overview");
-  const query = useMemo(() => {
+  const selection = JSON.stringify([days, filters]);
+  const request = useMemo(() => {
+    const now = new Date();
+    const duration = ["7", "30", "90"].includes(days) ? Number(days) : 90;
+    const bounds =
+      days === "shift" || days === "day"
+        ? productionPeriod(days)
+        : {
+            from_date:
+              filters.from_date ||
+              new Date(now.getTime() - duration * 86400000).toISOString(),
+            to_date: filters.to_date || now.toISOString(),
+          };
     const p = new URLSearchParams();
-    p.set("days", ["7", "30", "90"].includes(days) ? days : "90");
-    if (presetBounds) {
-      p.set("from_date", presetBounds.from_date);
-      p.set("to_date", presetBounds.to_date);
-    }
+    p.set("from_date", bounds.from_date);
+    p.set("to_date", bounds.to_date);
     Object.entries(filters).forEach(([k, v]) => {
-      if (v) p.set(k, v);
+      if (v && k !== "from_date" && k !== "to_date") p.set(k, v);
     });
-    return p.toString();
-  }, [days, filters, presetBounds]);
+    return { query: p.toString(), bounds };
+  }, [days, filters, version, refreshCount]);
   useEffect(() => {
     let alive = true;
+    const controller = new AbortController();
     setBusy(true);
-    api<Analytics>(`/analytics?${query}`)
+    setError("");
+    if (loadedSelection.current !== selection) {
+      setData(null);
+      setLoaded(null);
+    }
+    api<Analytics>(`/analytics?${request.query}`, { signal: controller.signal })
       .then((d) => {
         if (alive) {
           setData(d);
+          loadedSelection.current = selection;
+          setLoaded({ ...request, at: new Date().toISOString(), selection });
           setError("");
         }
       })
@@ -338,39 +456,48 @@ export function AnalyticsPage({
       });
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [query]);
+  }, [request, selection]);
   async function download(format: string) {
+    if (!loaded || loaded.selection !== selection || busy || exporting) return;
+    const sessionToken = token();
     setExporting(true);
     try {
-      const res = await fetch(`/api/reports/export?${query}&format=${format}`, {
-        headers: { Authorization: `Bearer ${token()}` },
-      });
+      const res = await fetch(
+        `/api/reports/export?${loaded.query}&format=${format}`,
+        {
+          headers: { Authorization: `Bearer ${sessionToken}` },
+        },
+      );
+      if (sessionToken !== token()) return;
+      if (res.status === 401)
+        window.dispatchEvent(new Event("naryad:unauthorized"));
       if (!res.ok) throw new Error("Не удалось сформировать отчёт");
-      const url = URL.createObjectURL(await res.blob());
+      const blob = await res.blob();
+      if (sessionToken !== token()) return;
+      const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `НарядAI-${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.append(a);
       a.click();
+      a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       notify("Отчёт сформирован");
     } catch (e) {
-      notify((e as Error).message);
+      if (sessionToken === token()) notify((e as Error).message);
     } finally {
       setExporting(false);
     }
   }
   function choosePeriod(period: string) {
     setDays(period);
-    setPresetBounds(
-      period === "shift" || period === "day" ? productionPeriod(period) : null,
-    );
     setFilters((current) => ({ ...current, from_date: "", to_date: "" }));
   }
   function filter(key: string, value: string) {
     if (key === "from_date" || key === "to_date") {
       setDays("custom");
-      setPresetBounds(null);
     }
     setFilters((current) => ({
       ...current,
@@ -378,6 +505,20 @@ export function AnalyticsPage({
       ...(key === "area_id" ? { equipment_id: "" } : {}),
     }));
   }
+  function inspectOrders(extra: SourceFilters = {}) {
+    if (!loaded || !onInspectOrders) return;
+    const params = new URLSearchParams(loaded.query);
+    onInspectOrders({
+      areaId: params.get("area_id") || undefined,
+      brigadeId: params.get("brigade_id") || undefined,
+      assigneeId: params.get("assignee_id") || undefined,
+      equipmentId: params.get("equipment_id") || undefined,
+      fromDate: loaded.bounds.from_date,
+      toDate: loaded.bounds.to_date,
+      ...extra,
+    });
+  }
+  const visibleBounds = loaded?.bounds ?? request.bounds;
   return (
     <>
       <div className="analytics-toolbar">
@@ -391,6 +532,7 @@ export function AnalyticsPage({
           ].map(([value, label]) => (
             <button
               className={days === value ? "active" : ""}
+              aria-pressed={days === value}
               key={value}
               onClick={() => choosePeriod(value)}
             >
@@ -412,6 +554,7 @@ export function AnalyticsPage({
         </select>
         <button
           className="button secondary"
+          aria-expanded={advanced}
           onClick={() => setAdvanced((v) => !v)}
         >
           <CalendarDays size={16} />
@@ -420,7 +563,9 @@ export function AnalyticsPage({
         <div className="filter-spacer" />
         <button
           className="button secondary"
-          disabled={exporting}
+          disabled={
+            exporting || busy || !loaded || loaded.selection !== selection
+          }
           onClick={() => download("csv")}
         >
           <Download size={16} />
@@ -428,7 +573,9 @@ export function AnalyticsPage({
         </button>
         <button
           className="button primary"
-          disabled={exporting}
+          disabled={
+            exporting || busy || !loaded || loaded.selection !== selection
+          }
           onClick={() => download("xlsx")}
         >
           {exporting ? (
@@ -518,17 +665,49 @@ export function AnalyticsPage({
                 to_date: "",
               });
               setDays("90");
-              setPresetBounds(null);
             }}
           >
             Сбросить
           </button>
         </div>
       )}
+      <div className="report-context">
+        <div>
+          <strong>
+            {reportDate(visibleBounds.from_date)} —{" "}
+            {reportDate(visibleBounds.to_date, true)}
+          </strong>
+          <small>
+            Время предприятия · Asia/Almaty
+            {loaded
+              ? ` · Получено ${new Intl.DateTimeFormat("ru-RU", { timeZone: "Asia/Almaty", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(loaded.at))}`
+              : ""}
+            {busy ? " · Обновляем…" : ""}
+          </small>
+        </div>
+        <button
+          className="button secondary"
+          disabled={busy}
+          onClick={() => setRefreshCount((value) => value + 1)}
+        >
+          <RefreshCw size={16} className={busy ? "spin" : ""} /> Обновить отчёт
+        </button>
+        {onInspectOrders && (
+          <button
+            className="button secondary"
+            disabled={!loaded || busy || loaded.selection !== selection}
+            onClick={() => inspectOrders()}
+          >
+            <ArrowUpRight size={16} /> Наряды выборки
+          </button>
+        )}
+      </div>
       <div className="panel-note">
         <Info size={15} />
         <span>
-          Статистика по нарядам, выданным за выбранный период.
+          Выборка по дате создания наряда. Закрытие и расход относятся к этим
+          нарядам, а не к дате приёмки или списания; переходящие работы могут не
+          попасть в отчёт.
           {days === "shift"
             ? " Текущая смена: 08:00–20:00 или 20:00–08:00, время Алматы."
             : days === "day"
@@ -536,37 +715,52 @@ export function AnalyticsPage({
               : ""}
         </span>
       </div>
-      {error && <ErrorBox message={error} />}{" "}
+      {error && (
+        <ErrorBox
+          message={`${error}${data ? " Показан предыдущий подтверждённый результат." : ""}`}
+          retry={() => setRefreshCount((value) => value + 1)}
+        />
+      )}{" "}
       {busy && !data ? (
         <Loading />
       ) : (
         data && (
-          <div className={busy ? "data-refreshing" : ""}>
+          <div className={busy ? "data-refreshing" : ""} aria-busy={busy}>
+            {data.summary.total === 0 && (
+              <Empty
+                title="В выбранном периоде нет нарядов"
+                text="Измените период или фильтры. Это не означает, что на участке нет текущих работ."
+              />
+            )}
             <div className="metrics-grid analytics-metrics">
               <Metric
                 label="Всего нарядов"
                 value={number(data.summary.total)}
                 icon={<ClipboardIcon />}
                 detail={
-                  <span>{number(data.summary.closed)} закрыто за период</span>
+                  <span>из них {number(data.summary.closed)} закрыто</span>
                 }
               />
               <Metric
                 label="Выполнено в срок"
                 value={
                   <>
-                    {number(data.summary.on_time_percent, 1)}
+                    {data.summary.closed
+                      ? number(data.summary.on_time_percent, 1)
+                      : "—"}
                     <small>%</small>
                   </>
                 }
                 icon={<Timer size={20} />}
-                detail={<span className="metric-green">Соблюдение сроков</span>}
+                detail={<span>среди закрытых нарядов выборки</span>}
               />
               <Metric
                 label="Средняя оценка"
                 value={
                   <>
-                    {number(data.summary.avg_score, 2)}
+                    {data.summary.closed
+                      ? number(data.summary.avg_score, 2)
+                      : "—"}
                     <small> / 5</small>
                   </>
                 }
@@ -574,7 +768,7 @@ export function AnalyticsPage({
                 detail={<span>по результатам приёмки</span>}
               />
               <Metric
-                label="Время простоя"
+                label="Простой по нарядам"
                 value={
                   <>
                     {number(data.summary.downtime_hours, 1)}
@@ -582,9 +776,35 @@ export function AnalyticsPage({
                   </>
                 }
                 icon={<Factory size={20} />}
-                detail={<span>по нарядам за период</span>}
+                detail={<span>расчётная сумма длительностей</span>}
               />
             </div>
+            <details className="report-definition">
+              <summary>Как читать показатели и рейтинг</summary>
+              <p>
+                Количество и динамика — по времени выдачи. Своевременность
+                сравнивает завершение работ со сроком; ожидание приёмки мастером
+                не ухудшает оценку. Качество — итоговая оценка мастера по
+                закрытым нарядам.
+              </p>
+              <p>
+                <strong>
+                  Рейтинг / 100 = (средняя оценка / 5 × 60) + (доля в срок, % ×
+                  0,30) + ((100 − доля с доработкой, %) × 0,10).
+                </strong>{" "}
+                Это текущая формула команды. Сложность работ, повторные дефекты
+                за 7 дней, причины отказов и личный вклад в бригадную работу
+                пока не включены.
+              </p>
+              <p>
+                Простой сейчас складывается по нарядам: пересекающиеся работы
+                одного оборудования могут завышать итог, а интервалы не
+                обрезаются границами периода. Это не подтверждённое время
+                фактической остановки. Материалы — накопленный расход из отчётов
+                выбранных нарядов; единицы не складываются между разными
+                материалами.
+              </p>
+            </details>
             <div className="analytics-tabs tabs">
               {[
                 ["overview", "Обзор"],
@@ -593,6 +813,7 @@ export function AnalyticsPage({
               ].map(([v, l]) => (
                 <button
                   className={tab === v ? "active" : ""}
+                  aria-pressed={tab === v}
                   key={v}
                   onClick={() => setTab(v)}
                 >
@@ -605,8 +826,8 @@ export function AnalyticsPage({
                 <div className="charts-grid">
                   <section className="panel trend-panel">
                     <SectionTitle
-                      title="Динамика работ"
-                      caption="Плановые и внеплановые наряды за период"
+                      title="Выдача нарядов по дням"
+                      caption="Количество созданных плановых и внеплановых нарядов"
                       action={
                         <span className="outlined-tag">НАРЯДЫ / ДЕНЬ</span>
                       }
@@ -628,13 +849,13 @@ export function AnalyticsPage({
                             axisLine={false}
                             tickLine={false}
                             minTickGap={35}
-                            tick={{ fontSize: 10, fill: "#8a9391" }}
+                            tick={{ fontSize: 12, fill: "#536779" }}
                           />
                           <YAxis
                             allowDecimals={false}
                             axisLine={false}
                             tickLine={false}
-                            tick={{ fontSize: 10, fill: "#8a9391" }}
+                            tick={{ fontSize: 12, fill: "#536779" }}
                           />
                           <Tooltip
                             labelFormatter={(v) => formatDate(String(v))}
@@ -647,14 +868,14 @@ export function AnalyticsPage({
                           <Legend
                             iconType="circle"
                             iconSize={7}
-                            wrapperStyle={{ fontSize: 11, paddingTop: 16 }}
+                            wrapperStyle={{ fontSize: 13, paddingTop: 16 }}
                           />
                           <Area
                             type="monotone"
                             dataKey="planned"
                             name="Плановые"
-                            stroke="#367d6d"
-                            fill="#e3eee8"
+                            stroke="#164b80"
+                            fill="#e5edf5"
                             strokeWidth={2}
                             fillOpacity={0.8}
                           />
@@ -662,8 +883,8 @@ export function AnalyticsPage({
                             type="monotone"
                             dataKey="unplanned"
                             name="Внеплановые"
-                            stroke="#ed6c35"
-                            fill="#fff0e8"
+                            stroke="#8d6400"
+                            fill="#f9f0dc"
                             strokeWidth={2}
                             fillOpacity={0.7}
                           />
@@ -693,21 +914,39 @@ export function AnalyticsPage({
                               }}
                             />
                           </div>
-                          <small>{number(a.downtime_hours, 1)} ч простоя</small>
+                          <small>
+                            {number(a.downtime_hours, 1)} ч · простой по нарядам
+                          </small>
                         </div>
                       ))}
                     </div>
+                    {!data.by_area.length && (
+                      <Empty
+                        title="Нет данных по участкам"
+                        text="Измените период или фильтры."
+                      />
+                    )}
                   </section>
                 </div>
                 <section className="insights-section">
                   <SectionTitle
-                    title="На что обратить внимание"
-                    caption="Примеры аналитических сигналов на данных демонстрационной системы"
+                    title={
+                      data.is_stub
+                        ? "Демонстрационные подсказки"
+                        : "Сигналы по истории"
+                    }
+                    caption={
+                      data.is_stub
+                        ? "Правила на данных выборки. Настоящий анализ ИИ ещё не подключён."
+                        : "Выводы по выбранному периоду"
+                    }
                     action={
-                      <span className="stub-tag">
-                        <Sparkles size={12} />
-                        ИИ · ЗАГЛУШКА
-                      </span>
+                      data.is_stub ? (
+                        <span className="stub-tag">
+                          <Sparkles size={12} />
+                          ИИ · ЗАГЛУШКА
+                        </span>
+                      ) : undefined
                     }
                   />
                   <div className="insights-grid">
@@ -728,7 +967,9 @@ export function AnalyticsPage({
                         <h3>{ins.title}</h3>
                         <p>{ins.description}</p>
                         <span className="insight-foot">
-                          Демонстрационный алгоритм
+                          {ins.is_stub
+                            ? "Правило демонстрации"
+                            : "По данным выбранной выборки"}
                           <Info size={13} />
                         </span>
                       </article>
@@ -740,7 +981,9 @@ export function AnalyticsPage({
                   <div>
                     <strong>
                       Краткий обзор периода{" "}
-                      <span className="stub-tag">ЗАГЛУШКА</span>
+                      {data.is_stub && (
+                        <span className="stub-tag">ЗАГЛУШКА</span>
+                      )}
                     </strong>
                     <p>{data.ai_summary}</p>
                   </div>
@@ -750,30 +993,27 @@ export function AnalyticsPage({
               <section className="panel">
                 <SectionTitle
                   title="Результаты команды"
-                  caption="Итоговый рейтинг: 60% качество, 30% сроки, 10% отсутствие доработок."
+                  caption="Закрытые наряды выбранной выборки. Компоненты оценки показаны отдельно."
                 />
                 <div className="table-wrap">
                   <table className="data-table">
                     <thead>
                       <tr>
-                        <th>Место</th>
+                        <th>№</th>
                         <th>Сотрудник</th>
                         <th>Бригада</th>
                         <th>Закрыто</th>
                         <th>Качество</th>
                         <th>В срок</th>
                         <th>Доработки</th>
-                        <th>Рейтинг</th>
+                        <th>Рейтинг / 100</th>
+                        {onInspectOrders && <th>Источник</th>}
                       </tr>
                     </thead>
                     <tbody>
                       {data.rankings.map((e, i) => (
                         <tr key={e.id}>
-                          <td>
-                            <span className={`rank ${i < 3 ? "rank-top" : ""}`}>
-                              {i < 3 ? <Award size={17} /> : i + 1}
-                            </span>
-                          </td>
+                          <td>{i + 1}</td>
                           <td>
                             <div className="table-person">
                               <span className={`avatar avatar-${i % 4}`}>
@@ -792,19 +1032,40 @@ export function AnalyticsPage({
                           <td>{number(e.rework_rate, 1)}%</td>
                           <td>
                             <span className="rating-pill">
-                              <Star size={13} />
                               {number(e.score, 1)}
                             </span>
                           </td>
+                          {onInspectOrders && (
+                            <td>
+                              <button
+                                className="text-button"
+                                onClick={() =>
+                                  inspectOrders({ assigneeId: e.id })
+                                }
+                                title="Все наряды сотрудника за период; рейтинг учитывает только закрытые"
+                              >
+                                Наряды <ArrowUpRight size={15} />
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+                {!data.rankings.length && (
+                  <Empty
+                    title="Недостаточно закрытых работ для рейтинга"
+                    text="Расширьте период или измените фильтры."
+                  />
+                )}
                 <div className="panel-note">
                   <Info size={15} />
-                  Рейтинг рассчитан на закрытых нарядах за выбранный период; это
-                  справочный показатель.
+                  Рейтинг учитывает только закрытые наряды, созданные в
+                  выбранном периоде.{" "}
+                  {onInspectOrders &&
+                    "По ссылке доступны все наряды сотрудника этой выборки. "}
+                  Показатель не учитывает пока все факторы качества из кейса.
                 </div>
               </section>
             ) : (
@@ -812,7 +1073,7 @@ export function AnalyticsPage({
                 <section className="panel">
                   <SectionTitle
                     title="Оборудование"
-                    caption="Нагрузка обслуживания и суммарные простои"
+                    caption="Наряды в выборке и расчётные длительности. Реальные интервалы остановок ещё не учитываются."
                   />
                   <div className="table-wrap">
                     <table className="data-table">
@@ -822,6 +1083,7 @@ export function AnalyticsPage({
                           <th>Участок</th>
                           <th>Наряды</th>
                           <th>Простой, ч</th>
+                          {onInspectOrders && <th>Источник</th>}
                         </tr>
                       </thead>
                       <tbody>
@@ -833,16 +1095,34 @@ export function AnalyticsPage({
                             <td>{e.area_name}</td>
                             <td>{e.orders}</td>
                             <td>{number(e.downtime_hours, 1)}</td>
+                            {onInspectOrders && (
+                              <td>
+                                <button
+                                  className="text-button"
+                                  onClick={() =>
+                                    inspectOrders({ equipmentId: e.id })
+                                  }
+                                >
+                                  Наряды <ArrowUpRight size={15} />
+                                </button>
+                              </td>
+                            )}
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
+                  {!data.equipment.length && (
+                    <Empty
+                      title="Нет данных по оборудованию"
+                      text="Измените период или фильтры."
+                    />
+                  )}
                 </section>
                 <section className="panel">
                   <SectionTitle
                     title="Расход материалов"
-                    caption="По отчётам исполнителей"
+                    caption="Накопленный расход в отчётах выбранных нарядов, включая доработки"
                   />
                   <div className="table-wrap">
                     <table className="data-table">
@@ -867,7 +1147,7 @@ export function AnalyticsPage({
                   {!data.materials.length && (
                     <Empty
                       title="Нет расхода материалов"
-                      text="За выбранный период материалы не использовались."
+                      text="В выбранных нарядах нет зарегистрированных списаний."
                     />
                   )}
                 </section>
@@ -965,11 +1245,13 @@ export function ReferencePage({
   user,
   refresh,
   notify,
+  onCreate,
 }: {
   reference: Reference;
   user: User;
   refresh: () => Promise<void>;
   notify: (s: string) => void;
+  onCreate?: (context: { assigneeId?: Id; equipmentId?: Id }) => void;
 }) {
   const [collection, setCollection] = useState("equipment");
   const [search, setSearch] = useState("");
@@ -986,6 +1268,10 @@ export function ReferencePage({
   );
   const label = collections.find((c) => c.key === collection)?.label;
   const fields = schemas[collection];
+  const canIssue =
+    !!onCreate &&
+    collection === "equipment" &&
+    ["master", "admin"].includes(user.role);
 
   function openEdit(item: RefItem | true) {
     setEdit(item);
@@ -1149,6 +1435,7 @@ export function ReferencePage({
                   <th key={field.key}>{field.label}</th>
                 ))}
                 {user.role === "admin" && <th />}
+                {canIssue && <th>Наряд на оборудование</th>}
               </tr>
             </thead>
             <tbody>
@@ -1165,6 +1452,16 @@ export function ReferencePage({
                         onClick={() => openEdit(item)}
                       >
                         <Pencil size={15} />
+                      </button>
+                    </td>
+                  )}
+                  {canIssue && (
+                    <td className="employee-assignment">
+                      <button
+                        className="button secondary"
+                        onClick={() => onCreate?.({ equipmentId: item.id })}
+                      >
+                        <Plus size={16} /> Выдать наряд
                       </button>
                     </td>
                   )}
@@ -1305,31 +1602,49 @@ export function IntegrationsPage() {
     { mode: string; status: string; description: string }
   > | null>(null);
   const [error, setError] = useState("");
+  const [refreshCount, setRefreshCount] = useState(0);
   useEffect(() => {
+    let alive = true;
+    const controller = new AbortController();
+    setError("");
     api<Record<string, { mode: string; status: string; description: string }>>(
       "/integrations",
+      { signal: controller.signal },
     )
-      .then(setData)
-      .catch((e) => setError(e.message));
-  }, []);
+      .then((result) => {
+        if (alive) setData(result);
+      })
+      .catch((e) => {
+        if (alive) setError(e.message);
+      });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [refreshCount]);
   return (
     <>
-      {error && <ErrorBox message={error} />}{" "}
-      {!data ? (
+      {error && (
+        <ErrorBox
+          message={error}
+          retry={() => setRefreshCount((value) => value + 1)}
+        />
+      )}{" "}
+      {!data && !error ? (
         <Loading />
-      ) : (
+      ) : data ? (
         <>
           <div className="integration-intro">
             <div className="integration-logo">
               <PlugIcon />
             </div>
             <div>
-              <span className="eyebrow">ОТКРЫТАЯ АРХИТЕКТУРА</span>
-              <h2>Готова к следующему шагу</h2>
+              <span className="eyebrow">СОСТОЯНИЕ СИСТЕМЫ</span>
+              <h2>Что работает сейчас</h2>
               <p>
-                Рабочая веб-панель, API и база данных. Нативное приложение и
-                интеллектуальные сервисы подключаются через выделенные
-                интерфейсы.
+                Веб-панель и мобильный клиент Flutter работают с общим API и
+                базой. Настоящий ИИ, push на устройства и офлайн-синхронизация
+                остаются отдельными этапами.
               </p>
             </div>
             <span className="outlined-tag">DEMO / V1.0</span>
@@ -1345,9 +1660,9 @@ export function IntegrationsPage() {
               },
               {
                 key: "native",
-                title: "Приложение исполнителя",
+                title: "Push на устройства",
                 icon: Smartphone,
-                subtitle: "NATIVE ADAPTER",
+                subtitle: "ДОСТАВКА УВЕДОМЛЕНИЙ",
                 stub: true,
               },
               {
@@ -1369,7 +1684,11 @@ export function IntegrationsPage() {
                 </div>
                 <div className="eyebrow">{subtitle}</div>
                 <h3>{title}</h3>
-                <p>{data[key]?.description}</p>
+                <p>
+                  {key === "native"
+                    ? "События уведомлений сохраняются на сервере. Отправка push на телефон ещё не подключена."
+                    : data[key]?.description}
+                </p>
                 <div className="integration-meta">
                   <span>Режим</span>
                   <code>{data[key]?.mode}</code>
@@ -1389,8 +1708,9 @@ export function IntegrationsPage() {
                   <div className="integration-note">
                     <Info size={15} />
                     <span>
-                      Действия доступны через веб-симулятор. Push-события
-                      сохраняются на сервере; реальная отправка не выполняется.
+                      Flutter-клиент уже поддерживает основной сценарий через
+                      API. Статус этой заглушки относится к доставке push, а не
+                      к наличию приложения.
                     </span>
                   </div>
                 )}
@@ -1398,8 +1718,9 @@ export function IntegrationsPage() {
                   <div className="integration-note">
                     <ShieldCheck size={15} />
                     <span>
-                      WebSocket с авторизацией. При разрыве соединения данные
-                      обновляются каждые 5 секунд.
+                      WebSocket с авторизацией и резервное обновление. Интервал
+                      опроса — 5 секунд; время доставки под нагрузкой ещё не
+                      измерено.
                     </span>
                   </div>
                 )}
@@ -1414,8 +1735,8 @@ export function IntegrationsPage() {
             <div className="architecture-flow">
               <div>
                 <Layers3 size={25} />
-                <strong>Веб-панель</strong>
-                <small>React · TypeScript</small>
+                <strong>Веб и приложение</strong>
+                <small>React · Flutter</small>
               </div>
               <ArrowRight size={22} />
               <div>
@@ -1437,7 +1758,7 @@ export function IntegrationsPage() {
             </div>
           </section>
         </>
-      )}
+      ) : null}
     </>
   );
 }

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { periodInputDate, withinCreatedPeriod } from "./workspace";
 import type { FormEvent } from "react";
 import {
   AlertTriangle,
@@ -41,6 +42,7 @@ import {
 } from "lucide-react";
 import {
   api,
+  ApiError,
   formatDate,
   formatTime,
   idValue,
@@ -95,6 +97,13 @@ export function OrderBoard({
   onSelect,
   compact = false,
   initialSearch = "",
+  initialFocus,
+  initialAssignee,
+  initialEquipment,
+  initialArea,
+  initialBrigade,
+  initialFromDate,
+  initialToDate,
   user,
   onCreate,
 }: {
@@ -103,6 +112,14 @@ export function OrderBoard({
   onSelect: (id: Id) => void;
   compact?: boolean;
   initialSearch?: string;
+  initialFocus?:
+    "all" | "emergency" | "overdue" | "issued" | "ai_review" | "rejected";
+  initialAssignee?: Id;
+  initialEquipment?: Id;
+  initialArea?: Id;
+  initialBrigade?: Id;
+  initialFromDate?: string;
+  initialToDate?: string;
   user: User;
   onCreate: () => void;
 }) {
@@ -113,7 +130,33 @@ export function OrderBoard({
   const [filters, setFilters] = useState<Filters>(emptyFilters);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [sort, setSort] = useState("priority");
+  const [focus, setFocus] = useState(initialFocus ?? "all");
+  const [mobileGroup, setMobileGroup] = useState("all");
   useEffect(() => setSearch(initialSearch), [initialSearch]);
+  useEffect(() => {
+    setFocus(initialFocus ?? "all");
+    setScope(initialFocus === "all" ? "all" : "active");
+    setMobileGroup("all");
+  }, [initialFocus]);
+  useEffect(() => {
+    setFilters({
+      ...emptyFilters,
+      area: initialArea === undefined ? "" : String(initialArea),
+      brigade: initialBrigade === undefined ? "" : String(initialBrigade),
+      assignee: initialAssignee === undefined ? "" : String(initialAssignee),
+      equipment: initialEquipment === undefined ? "" : String(initialEquipment),
+      from: initialFromDate ?? "",
+      to: initialToDate ?? "",
+    });
+    setMobileGroup("all");
+  }, [
+    initialAssignee,
+    initialEquipment,
+    initialArea,
+    initialBrigade,
+    initialFromDate,
+    initialToDate,
+  ]);
   const filter = (key: keyof Filters, value: string) =>
     setFilters((f) => ({
       ...f,
@@ -127,6 +170,13 @@ export function OrderBoard({
           const isClosed = ["closed", "cancelled"].includes(o.status);
           if (scope === "active" && isClosed) return false;
           if (scope === "closed" && !isClosed) return false;
+          if (focus === "overdue" && !o.is_overdue) return false;
+          if (focus === "emergency" && o.priority !== "emergency") return false;
+          if (
+            ["issued", "ai_review", "rejected"].includes(focus) &&
+            o.status !== focus
+          )
+            return false;
           const q = search.toLocaleLowerCase().trim();
           if (
             q &&
@@ -148,12 +198,7 @@ export function OrderBoard({
             (!filters.brigade || String(o.brigade_id) === filters.brigade) &&
             (!filters.priority || o.priority === filters.priority) &&
             (!filters.status || o.status === filters.status) &&
-            (!filters.from ||
-              new Date(o.created_at) >=
-                new Date(`${filters.from}T00:00:00+05:00`)) &&
-            (!filters.to ||
-              new Date(o.created_at) <=
-                new Date(`${filters.to}T23:59:59+05:00`))
+            withinCreatedPeriod(o.created_at, filters.from, filters.to)
           );
         })
         .sort((a, b) =>
@@ -165,7 +210,7 @@ export function OrderBoard({
               : ["emergency", "high", "normal", "planned"].indexOf(a.priority) -
                 ["emergency", "high", "normal", "planned"].indexOf(b.priority),
         ),
-    [orders, scope, search, filters, sort],
+    [orders, scope, search, filters, sort, focus],
   );
   const columns = [
     {
@@ -188,7 +233,7 @@ export function OrderBoard({
     },
     {
       id: "rework",
-      title: "Доработка",
+      title: "Требует решения",
       color: "red",
       statuses: ["rework", "rejected"],
     },
@@ -211,7 +256,7 @@ export function OrderBoard({
         caption={
           compact
             ? "От назначения до приёмки — весь путь работы."
-            : `${orders.length} нарядов в системе`
+            : `${orders.length} загруженных нарядов`
         }
         action={
           <div className="view-switch">
@@ -244,7 +289,11 @@ export function OrderBoard({
             <button
               key={v}
               className={scope === v ? "active" : ""}
-              onClick={() => setScope(v)}
+              onClick={() => {
+                setScope(v);
+                setFocus("all");
+                setMobileGroup("all");
+              }}
             >
               {l}
               {scope === v && <span>{results.length}</span>}
@@ -274,6 +323,31 @@ export function OrderBoard({
             Фильтры{activeFilters > 0 && <span>{activeFilters}</span>}
           </button>
         </div>
+      </div>
+      <div className="attention-filters" aria-label="Требуют внимания">
+        {(
+          [
+            ["all", "Без ограничений"],
+            ["emergency", "Аварийные"],
+            ["overdue", "Просроченные"],
+            ["issued", "Не приняты"],
+            ["ai_review", "На приёмку"],
+            ["rejected", "Отказы"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            className={focus === value ? "active" : ""}
+            aria-pressed={focus === value}
+            onClick={() => {
+              setFocus(value);
+              if (value !== "all") setScope("active");
+              setMobileGroup("all");
+            }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
       <div className="quick-filters">
         <select
@@ -380,7 +454,7 @@ export function OrderBoard({
             Создан с
             <input
               type="date"
-              value={filters.from}
+              value={periodInputDate(filters.from)}
               onChange={(e) => filter("from", e.target.value)}
             />
           </label>
@@ -388,7 +462,7 @@ export function OrderBoard({
             По
             <input
               type="date"
-              value={filters.to}
+              value={periodInputDate(filters.to)}
               onChange={(e) => filter("to", e.target.value)}
             />
           </label>
@@ -397,124 +471,189 @@ export function OrderBoard({
             onClick={() => {
               setFilters(emptyFilters);
               setSearch("");
+              setFocus("all");
+              setMobileGroup("all");
             }}
           >
             Сбросить
           </button>
         </div>
       )}
-      {results.length === 0 ? (
-        <Empty
-          title="Наряды не найдены"
-          text="Измените условия поиска или выберите другой период."
-        />
-      ) : view === "board" ? (
-        <div className={`kanban ${columns.length > 4 ? "kanban-five" : ""}`}>
-          {columns.map((c) => {
-            const items = results.filter((o) => c.statuses.includes(o.status));
-            const shown = expanded.includes(c.id)
-              ? items
-              : items.slice(0, compact ? 3 : 6);
-            return (
-              <div key={c.id} className="kanban-column">
-                <div className="kanban-title">
-                  <span className={`column-dot ${c.color}`} />
-                  <h3>{c.title}</h3>
-                  <span className="column-count">{items.length}</span>
-                  <MoreHorizontal size={17} />
-                </div>
-                <div className="kanban-cards">
-                  {shown.map((o) => (
-                    <OrderCard
-                      key={o.id}
-                      order={o}
-                      onClick={() => onSelect(o.id)}
-                    />
-                  ))}
-                  {!items.length && (
-                    <div className="column-empty">
-                      <CircleCheck size={21} />
-                      <span>Нет нарядов</span>
-                    </div>
-                  )}
-                  {shown.length < items.length && (
-                    <button
-                      className="show-more"
-                      onClick={() => setExpanded((v) => [...v, c.id])}
-                    >
-                      Показать ещё {items.length - shown.length}
-                      <ChevronDown size={15} />
-                    </button>
-                  )}
-                  {c.id === "todo" &&
-                    ["master", "admin"].includes(user.role) && (
-                      <button className="new-card" onClick={onCreate}>
-                        <Plus size={16} />
-                        Новый наряд
+      <div className="order-context">
+        <span>
+          Найдено: {results.length}
+          {filters.from || filters.to
+            ? ` · созданные ${filters.from.includes("T") ? formatDate(filters.from, true) : filters.from || "без начала"} — ${filters.to.includes("T") ? formatDate(filters.to, true) : filters.to || "без конца"}`
+            : ""}
+        </span>
+        {(activeFilters > 0 || search || focus !== "all") && (
+          <button
+            className="text-button"
+            onClick={() => {
+              setFilters(emptyFilters);
+              setSearch("");
+              setFocus("all");
+              setMobileGroup("all");
+            }}
+          >
+            Сбросить отбор
+          </button>
+        )}
+      </div>
+      <div className="order-board-desktop">
+        {results.length === 0 ? (
+          <Empty
+            title="Наряды не найдены"
+            text="Измените условия поиска или выберите другой период."
+          />
+        ) : view === "board" ? (
+          <div className={`kanban ${columns.length > 4 ? "kanban-five" : ""}`}>
+            {columns.map((c) => {
+              const items = results.filter((o) =>
+                c.statuses.includes(o.status),
+              );
+              const shown = expanded.includes(c.id)
+                ? items
+                : items.slice(0, compact ? 3 : 6);
+              return (
+                <div key={c.id} className="kanban-column">
+                  <div className="kanban-title">
+                    <span className={`column-dot ${c.color}`} />
+                    <h3>{c.title}</h3>
+                    <span className="column-count">{items.length}</span>
+                    <MoreHorizontal size={17} />
+                  </div>
+                  <div className="kanban-cards">
+                    {shown.map((o) => (
+                      <OrderCard
+                        key={o.id}
+                        order={o}
+                        onClick={() => onSelect(o.id)}
+                      />
+                    ))}
+                    {!items.length && (
+                      <div className="column-empty">
+                        <CircleCheck size={21} />
+                        <span>Нет нарядов</span>
+                      </div>
+                    )}
+                    {shown.length < items.length && (
+                      <button
+                        className="show-more"
+                        onClick={() => setExpanded((v) => [...v, c.id])}
+                      >
+                        Показать ещё {items.length - shown.length}
+                        <ChevronDown size={15} />
                       </button>
                     )}
+                    {c.id === "todo" &&
+                      ["master", "admin"].includes(user.role) && (
+                        <button className="new-card" onClick={onCreate}>
+                          <Plus size={16} />
+                          Новый наряд
+                        </button>
+                      )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="table-wrap">
-          <table className="data-table orders-table">
-            <thead>
-              <tr>
-                <th>Наряд / оборудование</th>
-                <th>Участок</th>
-                <th>Исполнитель</th>
-                <th>Приоритет</th>
-                <th>Статус</th>
-                <th>Срок</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((o) => (
-                <tr
-                  key={o.id}
-                  onClick={() => onSelect(o.id)}
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") onSelect(o.id);
-                  }}
-                >
-                  <td>
-                    <span className="table-eyebrow">{o.number}</span>
-                    <strong>{o.title}</strong>
-                    <small>{o.equipment_name}</small>
-                  </td>
-                  <td>{o.area_name}</td>
-                  <td>
-                    <div className="table-person">
-                      <span className="avatar mini-avatar">
-                        {initials(o.assignee_name || "?")}
-                      </span>
-                      {o.assignee_name || "Не назначен"}
-                    </div>
-                  </td>
-                  <td>
-                    <Priority value={o.priority} />
-                  </td>
-                  <td>
-                    <Status value={o.status} />
-                  </td>
-                  <td className={o.is_overdue ? "overdue" : ""}>
-                    {formatDate(o.deadline, true)}
-                    {o.is_overdue && <small>Просрочено</small>}
-                  </td>
-                  <td>
-                    <ChevronRight size={16} />
-                  </td>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table className="data-table orders-table">
+              <thead>
+                <tr>
+                  <th>Наряд / оборудование</th>
+                  <th>Участок</th>
+                  <th>Исполнитель</th>
+                  <th>Приоритет</th>
+                  <th>Статус</th>
+                  <th>Срок</th>
+                  <th />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {results.map((o) => (
+                  <tr
+                    key={o.id}
+                    onClick={() => onSelect(o.id)}
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") onSelect(o.id);
+                    }}
+                  >
+                    <td>
+                      <span className="table-eyebrow">{o.number}</span>
+                      <strong>{o.title}</strong>
+                      <small>{o.equipment_name}</small>
+                    </td>
+                    <td>{o.area_name}</td>
+                    <td>
+                      <div className="table-person">
+                        <span className="avatar mini-avatar">
+                          {initials(o.assignee_name || "?")}
+                        </span>
+                        {o.assignee_name || "Не назначен"}
+                      </div>
+                    </td>
+                    <td>
+                      <Priority value={o.priority} />
+                    </td>
+                    <td>
+                      <Status value={o.status} />
+                    </td>
+                    <td className={o.is_overdue ? "overdue" : ""}>
+                      {formatDate(o.deadline, true)}
+                      {o.is_overdue && <small>Просрочено</small>}
+                    </td>
+                    <td>
+                      <ChevronRight size={16} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      <div className="order-board-mobile">
+        <label className="mobile-order-groups">
+          Этап работы
+          <select
+            value={mobileGroup}
+            onChange={(event) => setMobileGroup(event.target.value)}
+          >
+            <option value="all">Все этапы · {results.length}</option>
+            {Object.entries(statusNames).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label} ·{" "}
+                {results.filter((order) => order.status === value).length}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="mobile-order-list">
+          {results
+            .filter(
+              (order) => mobileGroup === "all" || order.status === mobileGroup,
+            )
+            .map((order) => (
+              <OrderCard
+                key={order.id}
+                order={order}
+                onClick={() => onSelect(order.id)}
+              />
+            ))}
+          {!results.some(
+            (order) => mobileGroup === "all" || order.status === mobileGroup,
+          ) && (
+            <Empty
+              title="В этой группе нет нарядов"
+              text="Выберите другой этап или сбросьте отбор."
+            />
+          )}
         </div>
-      )}
+      </div>
     </section>
   );
 }
@@ -543,11 +682,10 @@ function OrderCard({
         <span>{o.area_name}</span>
         <span>{o.work_type === "planned" ? "Плановая" : "Внеплановая"}</span>
       </div>
-      {["paused", "queued", "rejected", "accepted"].includes(o.status) && (
-        <div className="card-substatus">
-          <Status value={o.status} />
-        </div>
-      )}
+      <div className="card-substatus">
+        <Status value={o.status} />
+        {o.is_overdue && <span className="overdue">Просрочен</span>}
+      </div>
       <div className="order-card-bottom">
         <span className="card-assignee">
           <span className="avatar tiny-avatar">
@@ -562,60 +700,250 @@ function OrderCard({
           title={formatDate(o.deadline, true)}
         >
           {o.is_overdue ? <AlertTriangle size={13} /> : <Clock3 size={13} />}{" "}
-          {formatTime(o.deadline)}
+          {formatDate(o.deadline, true)}
         </span>
       </div>
     </button>
   );
 }
 const defaultDeadline = () =>
-  new Date(Date.now() + 5 * 60 * 60 * 1000 + 4 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 16);
+  new Date(Date.now() + 5 * 3600000 + 2 * 3600000).toISOString().slice(0, 16);
+
+type DraftPhoto = {
+  id: number;
+  file: File;
+  state: "queued" | "uploading" | "uploaded" | "failed" | "uncertain";
+  error?: string;
+};
+const uploadLabels: Record<DraftPhoto["state"], string> = {
+  queued: "Ожидает отправки",
+  uploading: "Сжатие и отправка…",
+  uploaded: "Получено сервером",
+  failed: "Не отправлено",
+  uncertain: "Результат неизвестен",
+};
+
+async function compressedPhoto(file: File): Promise<File> {
+  if (!file.type.startsWith("image/") || file.size > 10 * 1024 * 1024)
+    throw new Error("Выберите изображение до 10 МБ.");
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const ratio = Math.min(
+      1,
+      1920 / Math.max(image.naturalWidth, image.naturalHeight),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Браузер не смог подготовить изображение.");
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(
+        (value) =>
+          value ? resolve(value) : reject(new Error("Не удалось сжать фото.")),
+        "image/jpeg",
+        0.82,
+      ),
+    );
+    return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", {
+      type: "image/jpeg",
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export function CreateOrder({
   reference: r,
   employees,
   onClose,
   onCreated,
+  initialAssigneeId,
+  initialEquipmentId,
 }: {
   reference: Reference;
   employees: Employee[];
   onClose: () => void;
   onCreated: (order: OrderDetail) => void;
+  initialAssigneeId?: Id;
+  initialEquipmentId?: Id;
 }) {
+  const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [unknownCreate, setUnknownCreate] = useState(false);
   const [created, setCreated] = useState<OrderDetail | null>(null);
-  const [photo, setPhoto] = useState<File | null>(null);
+  const [photos, setPhotos] = useState<DraftPhoto[]>([]);
+  const nextPhotoId = useRef(0);
+  const requestLock = useRef(false);
   const [assignment, setAssignment] = useState("employee");
-  const [form, setForm] = useState({
-    title: "",
-    description: "",
-    work_type: "unplanned",
-    area_id: "",
-    equipment_id: "",
-    assignee_id: "",
-    brigade_id: "",
-    priority: "normal",
-    deadline: defaultDeadline(),
-    normal_hours: "2",
-    comment: "",
+  const [form, setForm] = useState(() => {
+    const equipment = r.equipment.find(
+      (item) => String(item.id) === String(initialEquipmentId),
+    );
+    return {
+      title: "",
+      description: "",
+      work_type: "unplanned",
+      area_id: equipment ? String(equipment.area_id) : "",
+      equipment_id: equipment ? String(equipment.id) : "",
+      assignee_id:
+        initialAssigneeId === undefined ? "" : String(initialAssigneeId),
+      brigade_id: "",
+      priority: "normal",
+      deadline: defaultDeadline(),
+      normal_hours: "2",
+      comment: "",
+    };
   });
-  const update = (k: string, v: string) =>
-    setForm((f) => ({
-      ...f,
-      [k]: v,
-      ...(k === "area_id" ? { equipment_id: "" } : {}),
+  const selectedEmployee = employees.find(
+    (person) => String(person.id) === form.assignee_id,
+  );
+  const update = (key: string, value: string) =>
+    setForm((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === "area_id" ? { equipment_id: "" } : {}),
     }));
-  async function submit(e: FormEvent) {
-    e.preventDefault();
+  const close = () => {
+    if (requestLock.current) return;
+    if (created) {
+      onCreated(created);
+      return;
+    }
+    if (
+      !unknownCreate &&
+      (form.title || form.description || photos.length) &&
+      !window.confirm(
+        "Закрыть форму? Несохранённый текст и выбранные фото будут потеряны.",
+      )
+    )
+      return;
+    onClose();
+  };
+  function addPhotos(files: FileList | null) {
+    if (!files || busy || created) return;
+    const incoming = Array.from(files);
+    if (photos.length + incoming.length > 5) {
+      setError("Можно выбрать не более пяти фотографий до начала работ.");
+      return;
+    }
+    if (
+      incoming.some(
+        (file) =>
+          !["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
+          file.size > 10 * 1024 * 1024,
+      )
+    ) {
+      setError("Допустимы JPEG, PNG или WebP, каждый файл не более 10 МБ.");
+      return;
+    }
+    const additions = incoming.map((file) => ({
+      id: ++nextPhotoId.current,
+      file,
+      state: "queued" as const,
+    }));
+    setPhotos((current) => [...current, ...additions]);
+    setError("");
+  }
+  async function sendPhotos(order: OrderDetail) {
+    for (const photo of photos.filter(
+      (item) => item.state === "queued" || item.state === "failed",
+    )) {
+      const updatePhoto = (changes: Partial<DraftPhoto>) =>
+        setPhotos((current) =>
+          current.map((item) =>
+            item.id === photo.id ? { ...item, ...changes } : item,
+          ),
+        );
+      updatePhoto({ state: "uploading", error: undefined });
+      let requestSent = false;
+      try {
+        const file = await compressedPhoto(photo.file);
+        const data = new FormData();
+        data.append("file", file);
+        data.append("kind", "before");
+        requestSent = true;
+        await api(`/orders/${order.id}/photos`, { method: "POST", body: data });
+        updatePhoto({ state: "uploaded" });
+      } catch (failure) {
+        const unknown =
+          requestSent &&
+          (!(failure instanceof ApiError) || failure.requestMayHaveSucceeded);
+        updatePhoto({
+          state: unknown ? "uncertain" : "failed",
+          error: (failure as Error).message,
+        });
+        setError(
+          unknown
+            ? "Наряд создан, но результат загрузки фото неизвестен. Откройте карточку и проверьте снимки; автоматического повтора нет."
+            : "Наряд создан. Неотправленное фото можно загрузить повторно; уже принятые снимки не повторяются.",
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (
+      requestLock.current ||
+      unknownCreate ||
+      photos.some((photo) => photo.state === "uncertain")
+    )
+      return;
+    if (
+      !form.title.trim() ||
+      form.title.trim().length < 3 ||
+      !form.description.trim() ||
+      !form.area_id ||
+      !form.equipment_id
+    ) {
+      setStep(1);
+      setError(
+        "Укажите задачу (от 3 символов), описание, участок и оборудование.",
+      );
+      return;
+    }
+    if (step === 1 && !created) {
+      setStep(2);
+      setError("");
+      return;
+    }
+    requestLock.current = true;
     setBusy(true);
     setError("");
+    let creating = false;
     try {
       let order = created;
       if (!order) {
+        const deadline = new Date(form.deadline + ":00+05:00");
+        if (
+          !Number.isFinite(deadline.getTime()) ||
+          deadline.getTime() <= Date.now()
+        )
+          throw new Error("Срок исполнения должен быть в будущем.");
+        if (assignment === "employee") {
+          const fresh = await api<Employee[]>("/employees");
+          const person = fresh.find(
+            (entry) => String(entry.id) === form.assignee_id,
+          );
+          if (!person || !person.on_shift || person.status === "off_shift")
+            throw new Error(
+              "Выбранный исполнитель недоступен на смене. Выберите другого сотрудника.",
+            );
+        } else if (!form.brigade_id) throw new Error("Выберите бригаду.");
+        creating = true;
         order = await post<OrderDetail>("/orders", {
           ...form,
+          title: form.title.trim(),
+          description: form.description.trim(),
           area_id: idValue(form.area_id),
           equipment_id: idValue(form.equipment_id),
           assignee_id:
@@ -623,257 +951,435 @@ export function CreateOrder({
           brigade_id:
             assignment === "brigade" ? idValue(form.brigade_id) : undefined,
           normal_hours: Number(form.normal_hours),
-          deadline: new Date(form.deadline + ":00+05:00").toISOString(),
+          deadline: deadline.toISOString(),
         });
+        creating = false;
         setCreated(order);
       }
-      if (photo) {
-        const data = new FormData();
-        data.append("file", photo);
-        data.append("kind", "before");
-        await api(`/orders/${order.id}/photos`, { method: "POST", body: data });
-      }
-      onCreated(order);
-    } catch (e) {
-      setError((e as Error).message);
+      if (await sendPhotos(order)) onCreated(order);
+    } catch (failure) {
+      if (
+        creating &&
+        (!(failure instanceof ApiError) || failure.requestMayHaveSucceeded)
+      )
+        setUnknownCreate(true);
+      setError((failure as Error).message);
     } finally {
+      requestLock.current = false;
       setBusy(false);
     }
   }
   return (
     <Modal
-      title="Новый наряд"
+      title={created ? `Наряд ${created.number} выдан` : "Выдать наряд"}
       subtitle="ПОСТАНОВКА ЗАДАЧИ"
-      onClose={onClose}
+      onClose={close}
       wide
     >
       <form onSubmit={submit}>
         <div className="modal-body">
-          <fieldset disabled={!!created || busy}>
-            <div className="form-section-heading">
-              <span>01</span>
-              <h3>Что необходимо сделать</h3>
-            </div>
-            <label>
-              Название работы <b>*</b>
-              <input
-                value={form.title}
-                onChange={(e) => update("title", e.target.value)}
-                required
-                maxLength={200}
-                placeholder="Например, заменить подшипник конвейера"
-              />
-            </label>
-            <label>
-              Описание задачи <b>*</b>
-              <textarea
-                value={form.description}
-                onChange={(e) => update("description", e.target.value)}
-                required
-                rows={3}
-                placeholder="Опишите неисправность, объём работ и ожидаемый результат"
-              />
-            </label>
-            <div className="form-grid">
-              <label>
-                Участок <b>*</b>
-                <select
-                  required
-                  value={form.area_id}
-                  onChange={(e) => update("area_id", e.target.value)}
-                >
-                  <option value="">Выберите участок</option>
-                  {r.areas.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Оборудование <b>*</b>
-                <select
-                  required
-                  value={form.equipment_id}
-                  onChange={(e) => update("equipment_id", e.target.value)}
-                  disabled={!form.area_id}
-                >
-                  <option value="">Выберите оборудование</option>
-                  {r.equipment
-                    .filter((v) => String(v.area_id) === form.area_id)
-                    .map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} · {v.inventory_number}
-                      </option>
-                    ))}
-                </select>
-              </label>
-              <label>
-                Тип работы
-                <select
-                  value={form.work_type}
-                  onChange={(e) => update("work_type", e.target.value)}
-                >
-                  <option value="unplanned">Внеплановая</option>
-                  <option value="planned">Плановая</option>
-                </select>
-              </label>
-              <label>
-                Приоритет
-                <select
-                  value={form.priority}
-                  onChange={(e) => update("priority", e.target.value)}
-                >
-                  {Object.entries(priorityNames).map(([v, l]) => (
-                    <option key={v} value={v}>
-                      {l}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="form-section-heading">
-              <span>02</span>
-              <h3>Исполнитель и сроки</h3>
-            </div>
-            <div className="segmented assignment-toggle">
+          <nav className="create-steps" aria-label="Этапы выдачи">
+            {[1, 2].map((value) => (
               <button
+                key={value}
                 type="button"
-                className={assignment === "employee" ? "active" : ""}
-                onClick={() => setAssignment("employee")}
+                disabled={busy || !!created || unknownCreate || value > step}
+                className={step === value ? "active" : ""}
+                aria-current={step === value ? "step" : undefined}
+                onClick={() => setStep(value)}
               >
-                <UserRound size={15} />
-                Сотрудник
+                <span>{value}</span>
+                {value === 1 ? "Задача и оборудование" : "Назначение и срок"}
               </button>
-              <button
-                type="button"
-                className={assignment === "brigade" ? "active" : ""}
-                onClick={() => setAssignment("brigade")}
-              >
-                <Users size={15} />
-                Бригада
-              </button>
-            </div>
-            <label>
-              {assignment === "employee" ? "Исполнитель" : "Бригада"} <b>*</b>
-              <select
-                required
-                value={
-                  assignment === "employee" ? form.assignee_id : form.brigade_id
-                }
-                onChange={(e) =>
-                  update(
-                    assignment === "employee" ? "assignee_id" : "brigade_id",
-                    e.target.value,
-                  )
-                }
-              >
-                <option value="">
-                  Выберите{" "}
-                  {assignment === "employee" ? "сотрудника" : "бригаду"}
-                </option>
-                {(assignment === "employee"
-                  ? r.employees.filter((v) => v.role === "worker")
-                  : r.brigades
-                ).map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.name}
-                    {v.specialty ? ` · ${v.specialty}` : ""}
-                    {assignment === "employee"
-                      ? ` · ${({ busy: "В работе", free: "Свободен", queued: "В очереди", off_shift: "Вне смены" } as Record<string, string>)[employees.find((e) => String(e.id) === String(v.id))?.status || "off_shift"]} · в очереди: ${employees.find((e) => String(e.id) === String(v.id))?.queue_count || 0}`
-                      : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="form-grid">
-              <label>
-                Срок исполнения, Алматы <b>*</b>
-                <input
-                  required
-                  type="datetime-local"
-                  value={form.deadline}
-                  onChange={(e) => update("deadline", e.target.value)}
-                />
-              </label>
-              <label>
-                Норма времени, часов
-                <input
-                  required
-                  type="number"
-                  min="0.1"
-                  max="1000"
-                  step="0.1"
-                  value={form.normal_hours}
-                  onChange={(e) => update("normal_hours", e.target.value)}
-                  list="time-norms"
-                />
-                <datalist id="time-norms">
-                  {r.time_norms.map((v) => (
-                    <option key={v.id} value={v.hours}>
-                      {v.name}
-                    </option>
-                  ))}
-                </datalist>
-              </label>
-            </div>
-            <label>
-              Комментарий мастера
-              <textarea
-                value={form.comment}
-                onChange={(e) => update("comment", e.target.value)}
-                rows={2}
-                placeholder="Дополнительные указания или требования"
-              />
-            </label>
-          </fieldset>
-          <label className="upload-area">
-            <Camera size={24} />
-            <strong>
-              {photo ? photo.name : "Добавить фото до начала работ"}
-            </strong>
-            <small>JPEG, PNG или WebP · до 10 МБ</small>
-            <input
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f && f.size > 10 * 1024 * 1024) {
-                  setError("Фото должно быть не более 10 МБ");
-                  return;
-                }
-                setPhoto(f || null);
-              }}
-            />
-          </label>
-          {created && (
-            <div className="info-banner">
-              <CircleCheck size={17} />
-              Наряд {created.number} уже создан. Можно повторить загрузку фото.
+            ))}
+          </nav>
+          {error && <ErrorBox message={error} />}
+          {unknownCreate && (
+            <div className="info-banner" role="status">
+              <AlertTriangle size={18} />
+              <p>
+                Ответ о создании не получен. Наряд мог сохраниться. Повторная
+                выдача заблокирована — закройте форму и проверьте журнал.
+              </p>
             </div>
           )}
-          {error && <ErrorBox message={error} />}
+          {created && (
+            <div className="info-banner" role="status">
+              <CircleCheck size={18} />
+              <p>
+                Выдача подтверждена сервером. Дальнейшая отправка относится
+                только к фото этого наряда.
+              </p>
+            </div>
+          )}
+          <fieldset disabled={busy || !!created || unknownCreate}>
+            {step === 1 ? (
+              <>
+                <div className="form-grid">
+                  <label>
+                    Участок <b>*</b>
+                    <select
+                      required
+                      value={form.area_id}
+                      onChange={(event) =>
+                        update("area_id", event.target.value)
+                      }
+                    >
+                      <option value="">Выберите участок</option>
+                      {r.areas.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Оборудование <b>*</b>
+                    <select
+                      required
+                      disabled={!form.area_id}
+                      value={form.equipment_id}
+                      onChange={(event) =>
+                        update("equipment_id", event.target.value)
+                      }
+                    >
+                      <option value="">
+                        {form.area_id
+                          ? "Выберите оборудование"
+                          : "Сначала выберите участок"}
+                      </option>
+                      {r.equipment
+                        .filter((item) => String(item.area_id) === form.area_id)
+                        .map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name} · {item.inventory_number}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  Тип работ
+                  <select
+                    value={form.work_type}
+                    onChange={(event) =>
+                      update("work_type", event.target.value)
+                    }
+                  >
+                    <option value="unplanned">Внеплановый ремонт</option>
+                    <option value="planned">Плановые работы</option>
+                  </select>
+                </label>
+                <label>
+                  Краткая задача <b>*</b>
+                  <input
+                    required
+                    minLength={3}
+                    maxLength={200}
+                    value={form.title}
+                    onChange={(event) => update("title", event.target.value)}
+                    placeholder="Например, устранить течь масла на насосе"
+                  />
+                </label>
+                <label>
+                  Проблема и ожидаемый результат <b>*</b>
+                  <textarea
+                    required
+                    maxLength={5000}
+                    rows={4}
+                    value={form.description}
+                    onChange={(event) =>
+                      update("description", event.target.value)
+                    }
+                    placeholder="Что неисправно, что требуется сделать и как проверить результат"
+                  />
+                </label>
+                <label className="upload-area">
+                  <Camera size={24} />
+                  <strong>Фото до начала работ · необязательно</strong>
+                  <small>
+                    Выберите до 5 снимков · JPEG, PNG, WebP · до 10 МБ каждый
+                  </small>
+                  <input
+                    type="file"
+                    multiple
+                    accept="image/jpeg,image/png,image/webp"
+                    onChange={(event) => {
+                      addPhotos(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                <div className="create-context">
+                  <strong>{form.title}</strong>
+                  <span>
+                    {
+                      r.equipment.find(
+                        (item) => String(item.id) === form.equipment_id,
+                      )?.name
+                    }{" "}
+                    ·{" "}
+                    {
+                      r.areas.find((item) => String(item.id) === form.area_id)
+                        ?.name
+                    }
+                  </span>
+                  <small>
+                    {form.work_type === "unplanned"
+                      ? "Внеплановый ремонт"
+                      : "Плановая работа"}{" "}
+                    · фото: {photos.length}
+                  </small>
+                </div>
+                <div className="segmented assignment-toggle">
+                  <button
+                    type="button"
+                    className={assignment === "employee" ? "active" : ""}
+                    onClick={() => setAssignment("employee")}
+                  >
+                    <UserRound size={16} />
+                    Сотрудник
+                  </button>
+                  <button
+                    type="button"
+                    className={assignment === "brigade" ? "active" : ""}
+                    onClick={() => setAssignment("brigade")}
+                  >
+                    <Users size={16} />
+                    Бригада
+                  </button>
+                </div>
+                <label>
+                  {assignment === "employee" ? "Исполнитель" : "Бригада"}{" "}
+                  <b>*</b>
+                  <select
+                    required
+                    value={
+                      assignment === "employee"
+                        ? form.assignee_id
+                        : form.brigade_id
+                    }
+                    onChange={(event) =>
+                      update(
+                        assignment === "employee"
+                          ? "assignee_id"
+                          : "brigade_id",
+                        event.target.value,
+                      )
+                    }
+                  >
+                    <option value="">
+                      {assignment === "employee"
+                        ? "Выберите сотрудника"
+                        : "Выберите бригаду"}
+                    </option>
+                    {assignment === "employee"
+                      ? employees.map((person) => (
+                          <option
+                            key={person.id}
+                            value={person.id}
+                            disabled={
+                              !person.on_shift || person.status === "off_shift"
+                            }
+                          >
+                            {person.name} ·{" "}
+                            {person.specialty || "Специальность не указана"} ·{" "}
+                            {!person.on_shift
+                              ? "Вне смены"
+                              : person.current_order
+                                ? `В работе: ${person.current_order}`
+                                : person.status === "free"
+                                  ? "Свободен"
+                                  : "Есть назначения"}{" "}
+                            · очередь {person.queue_count}
+                          </option>
+                        ))
+                      : r.brigades.map((brigade) => (
+                          <option key={brigade.id} value={brigade.id}>
+                            {brigade.name}
+                          </option>
+                        ))}
+                  </select>
+                </label>
+                {assignment === "employee" && selectedEmployee && (
+                  <div
+                    className={`employee-preview ${!selectedEmployee.on_shift ? "off-shift" : selectedEmployee.current_order ? "busy" : "available"}`}
+                  >
+                    <strong>{selectedEmployee.name}</strong>
+                    <span>
+                      {selectedEmployee.specialty} ·{" "}
+                      {!selectedEmployee.on_shift
+                        ? "Вне смены"
+                        : selectedEmployee.current_order
+                          ? "В работе"
+                          : selectedEmployee.status === "free"
+                            ? "Свободен"
+                            : "Есть назначения"}
+                    </span>
+                    <span>
+                      Текущий наряд: {selectedEmployee.current_order || "нет"} ·
+                      в очереди: {selectedEmployee.queue_count}
+                    </span>
+                  </div>
+                )}
+                {assignment === "brigade" && (
+                  <p className="field-hint">
+                    Сервер выберет одного работника бригады на смене. Совместное
+                    исполнение всей бригадой пока не реализовано.
+                  </p>
+                )}
+                <div className="form-grid">
+                  <label>
+                    Приоритет
+                    <select
+                      value={form.priority}
+                      onChange={(event) =>
+                        update("priority", event.target.value)
+                      }
+                    >
+                      {Object.entries(priorityNames).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Срок, время предприятия <b>*</b>
+                    <input
+                      required
+                      type="datetime-local"
+                      value={form.deadline}
+                      onChange={(event) =>
+                        update("deadline", event.target.value)
+                      }
+                    />
+                    <small>Asia/Almaty · предварительно через 2 часа</small>
+                  </label>
+                  <label>
+                    Норматив, часы
+                    <input
+                      required
+                      type="number"
+                      min="0.1"
+                      max="1000"
+                      step="0.1"
+                      value={form.normal_hours}
+                      list="time-norms"
+                      onChange={(event) =>
+                        update("normal_hours", event.target.value)
+                      }
+                    />
+                    <datalist id="time-norms">
+                      {r.time_norms.map((item) => (
+                        <option key={item.id} value={item.hours}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </datalist>
+                  </label>
+                </div>
+                <label>
+                  Комментарий мастера
+                  <textarea
+                    rows={2}
+                    maxLength={3000}
+                    value={form.comment}
+                    onChange={(event) => update("comment", event.target.value)}
+                    placeholder="Допуск, особые условия или дополнительные указания"
+                  />
+                </label>
+              </>
+            )}
+          </fieldset>
+          {photos.length > 0 && (
+            <ul className="upload-list" aria-label="Отправка фотографий">
+              {photos.map((photo) => (
+                <li className={`upload-item ${photo.state}`} key={photo.id}>
+                  <div className="upload-item-main">
+                    <Camera size={18} />
+                    <div>
+                      <strong>{photo.file.name}</strong>
+                      <span className="upload-state" role="status">
+                        {uploadLabels[photo.state]}
+                      </span>
+                      {photo.error && <small>{photo.error}</small>}
+                    </div>
+                  </div>
+                  {!created && !busy && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={`Убрать фото ${photo.file.name}`}
+                      onClick={() =>
+                        setPhotos((current) =>
+                          current.filter((item) => item.id !== photo.id),
+                        )
+                      }
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="field-hint">
+            Номер и время выдачи формирует сервер. Текст и выбранные файлы
+            хранятся только в открытой форме.
+          </p>
         </div>
         <footer className="modal-footer">
           <span>
             <ShieldCheckSmall />
-            История действий сохраняется
+            {created ? "Выдача подтверждена" : `Шаг ${step} из 2`}
           </span>
+          {step === 2 && !created && !unknownCreate && (
+            <button
+              type="button"
+              className="button secondary"
+              disabled={busy}
+              onClick={() => setStep(1)}
+            >
+              Назад
+            </button>
+          )}
           <button
             type="button"
             className="button secondary"
-            onClick={() => (created ? onCreated(created) : onClose())}
+            disabled={busy}
+            onClick={close}
           >
-            {created ? "Открыть наряд" : "Отмена"}
+            {created
+              ? "Открыть наряд"
+              : unknownCreate
+                ? "Закрыть и проверить журнал"
+                : "Отмена"}
           </button>
-          <button className="button primary" disabled={busy}>
-            {busy ? (
-              <LoaderCircle className="spin" size={17} />
-            ) : (
-              <Plus size={17} />
-            )}{" "}
-            {created ? "Загрузить фото" : "Создать наряд"}
-          </button>
+          {!unknownCreate &&
+            !photos.some((photo) => photo.state === "uncertain") && (
+              <button className="button primary" disabled={busy}>
+                {busy ? (
+                  <LoaderCircle size={18} className="spin" />
+                ) : created ? (
+                  <Upload size={18} />
+                ) : step === 1 ? (
+                  <ArrowRight size={18} />
+                ) : (
+                  <Plus size={18} />
+                )}
+                {busy
+                  ? "Отправка…"
+                  : created
+                    ? "Повторить неотправленные фото"
+                    : step === 1
+                      ? "Далее · назначение"
+                      : "Выдать наряд"}
+              </button>
+            )}
         </footer>
       </form>
     </Modal>
@@ -908,7 +1414,12 @@ export function OrderDialog({
   );
   const [action, setAction] = useState("");
   const [reason, setReason] = useState("");
-  const [score, setScore] = useState("5");
+  const [score, setScore] = useState("");
+  const [completionUncertain, setCompletionUncertain] = useState(false);
+  const [photoUncertain, setPhotoUncertain] = useState(false);
+  const [materialSearch, setMaterialSearch] = useState("");
+  const mutationLock = useRef(false);
+  const revision = useRef(0);
   const [complete, setComplete] = useState({
     work_done: "",
     fault_code_id: "",
@@ -924,16 +1435,18 @@ export function OrderDialog({
     comment: "",
   });
   useEffect(() => {
+    if (mutationLock.current) return;
     let valid = true;
+    const requestRevision = revision.current;
     api<OrderDetail>(`/orders/${id}`)
       .then((o) => {
-        if (valid) {
+        if (valid && requestRevision === revision.current) {
           setOrder(o);
           setError("");
         }
       })
       .catch((e) => {
-        if (valid) setError(e.message);
+        if (valid && requestRevision === revision.current) setError(e.message);
       });
     return () => {
       valid = false;
@@ -958,7 +1471,66 @@ export function OrderDialog({
       "closed",
       "cancelled",
     ].includes(order.status);
+  function closeDialog() {
+    if (mutationLock.current) return;
+    if (
+      mode === "complete" &&
+      (complete.work_done ||
+        complete.comment ||
+        materials.length ||
+        completionUncertain) &&
+      !window.confirm(
+        completionUncertain
+          ? "Результат отправки неизвестен. Проверьте карточку перед повторной сдачей, чтобы не списать материалы дважды. Закрыть форму?"
+          : "Закрыть форму отчёта? Несохранённые текст и материалы будут потеряны.",
+      )
+    )
+      return;
+    onClose();
+  }
+  async function reloadDetail() {
+    if (mutationLock.current) return;
+    setBusy(true);
+    try {
+      const latest = await api<OrderDetail>(`/orders/${id}`);
+      setOrder(latest);
+      if (
+        completionUncertain &&
+        ["ai_review", "completed", "closed", "rework"].includes(latest.status)
+      ) {
+        setMode("none");
+        setCompletionUncertain(false);
+        setComplete({ work_done: "", fault_code_id: "", comment: "" });
+        setMaterials([]);
+        setError("");
+        notify("На сервере есть сданный отчёт. Проверьте его содержимое.");
+      } else
+        setError(
+          completionUncertain
+            ? "Сдача пока не подтверждена. Повторная отправка заблокирована; проверьте состояние позже."
+            : "",
+        );
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   async function execute(actionName: string) {
+    if (mutationLock.current) return;
+    if (actionName === "close" && !score) {
+      setError("Выберите итоговую оценку качества.");
+      return;
+    }
+    if (
+      ["pause", "reject", "rework", "cancel"].includes(actionName) &&
+      !reason.trim()
+    ) {
+      setError("Укажите причину действия.");
+      return;
+    }
+    mutationLock.current = true;
+    revision.current++;
     setBusy(true);
     setError("");
     try {
@@ -980,6 +1552,7 @@ export function OrderDialog({
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      mutationLock.current = false;
       setBusy(false);
     }
   }
@@ -987,33 +1560,77 @@ export function OrderDialog({
     if (["pause", "reject", "rework", "cancel", "close"].includes(name)) {
       setAction(name);
       setReason("");
+      if (name === "close") setScore("");
       setMode("action");
     } else void execute(name);
   }
   async function upload(file: File, kind: string) {
+    if (mutationLock.current || photoUncertain) return;
+    mutationLock.current = true;
+    revision.current++;
     setBusy(true);
     setError("");
+    let sent = false;
     try {
       const data = new FormData();
-      data.append("file", file);
+      data.append("file", await compressedPhoto(file));
       data.append("kind", kind);
+      sent = true;
       await api(`/orders/${id}/photos`, { method: "POST", body: data });
-      setOrder(await api<OrderDetail>(`/orders/${id}`));
       onChange();
       notify("Фото добавлено к наряду");
+      try {
+        setOrder(await api<OrderDetail>(`/orders/${id}`));
+      } catch {
+        setError(
+          "Фото сохранено. Не удалось обновить карточку — обновите данные, не загружая снимок повторно.",
+        );
+      }
     } catch (e) {
-      setError((e as Error).message);
+      const unknown =
+        sent && (!(e instanceof ApiError) || e.requestMayHaveSucceeded);
+      setPhotoUncertain(unknown);
+      setError(
+        unknown
+          ? "Результат загрузки фото неизвестен. Обновите карточку и проверьте снимки; повторная загрузка в этой форме заблокирована."
+          : (e as Error).message,
+      );
     } finally {
+      mutationLock.current = false;
       setBusy(false);
     }
   }
   async function submitComplete(e: FormEvent) {
     e.preventDefault();
+    if (mutationLock.current || completionUncertain) return;
+    if (complete.work_done.trim().length < 10) {
+      setError("Опишите выполненные работы: не менее 10 символов.");
+      return;
+    }
+    if (
+      order?.work_type === "unplanned" &&
+      !order.photos.some((photo) => photo.kind === "after")
+    ) {
+      setError(
+        "Для внепланового ремонта обязательно фото после выполнения. Добавьте снимок выше.",
+      );
+      return;
+    }
+    if (
+      new Set(materials.map((material) => material.material_id)).size !==
+      materials.length
+    ) {
+      setError("Укажите каждый материал один раз, суммируя его количество.");
+      return;
+    }
+    mutationLock.current = true;
+    revision.current++;
     setBusy(true);
     setError("");
     try {
       const o = await post<OrderDetail>(`/orders/${id}/complete`, {
         ...complete,
+        work_done: complete.work_done.trim(),
         fault_code_id: idValue(complete.fault_code_id),
         materials: materials.map((m) => ({
           material_id: idValue(m.material_id),
@@ -1022,16 +1639,24 @@ export function OrderDialog({
       });
       setOrder(o);
       setMode("none");
+      setComplete({ work_done: "", fault_code_id: "", comment: "" });
+      setMaterials([]);
       onChange();
       notify("Отчёт сохранён и передан мастеру на приёмку");
     } catch (e) {
+      if (!(e instanceof ApiError) || e.requestMayHaveSucceeded)
+        setCompletionUncertain(true);
       setError((e as Error).message);
     } finally {
+      mutationLock.current = false;
       setBusy(false);
     }
   }
   async function submitEdit(e: FormEvent) {
     e.preventDefault();
+    if (mutationLock.current) return;
+    mutationLock.current = true;
+    revision.current++;
     setBusy(true);
     setError("");
     try {
@@ -1064,6 +1689,7 @@ export function OrderDialog({
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      mutationLock.current = false;
       setBusy(false);
     }
   }
@@ -1093,27 +1719,41 @@ export function OrderDialog({
   const actions = order
     ? order.status === "issued"
       ? ["accept", "queue", "reject"]
-      : order.status === "accepted" || order.status === "queued"
-        ? ["start", "reject"]
-        : order.status === "in_progress"
-          ? ["pause"]
-          : order.status === "paused"
-            ? ["resume"]
-            : order.status === "rework"
-              ? ["start"]
-              : []
+      : order.status === "accepted"
+        ? ["start", "queue", "reject"]
+        : order.status === "queued"
+          ? ["start", "accept", "reject"]
+          : order.status === "in_progress"
+            ? ["pause"]
+            : order.status === "paused"
+              ? ["resume"]
+              : order.status === "rework"
+                ? ["start", "queue", "accept"]
+                : []
     : [];
   return (
     <Modal
       title={order ? order.number : "Наряд"}
       subtitle="КАРТОЧКА РАБОТЫ"
-      onClose={onClose}
+      onClose={closeDialog}
       wide
     >
       <div className="modal-body order-detail-body">
-        {error && <ErrorBox message={error} />}{" "}
+        {error && (
+          <ErrorBox
+            message={error}
+            retry={busy ? undefined : () => void reloadDetail()}
+          />
+        )}{" "}
         {!order ? (
-          <Loading />
+          error ? (
+            <Empty
+              title="Не удалось открыть наряд"
+              text="Проверьте подключение и обновите данные."
+            />
+          ) : (
+            <Loading />
+          )
         ) : (
           <>
             <div className="detail-title-line">
@@ -1137,7 +1777,61 @@ export function OrderDialog({
             <h2 className="detail-work-title">{order.title}</h2>
             <div className="detail-layout">
               <div className="detail-main">
-                <div className="detail-description">{order.description}</div>
+                <div className={order.completion ? "review-comparison" : ""}>
+                  <section className="review-problem">
+                    <h3>Исходная задача</h3>
+                    <p className="detail-description">
+                      {order.description || "Описание не указано"}
+                    </p>
+                  </section>{" "}
+                  {order.completion && (
+                    <section className="completion-report review-result">
+                      <h3>
+                        <FileCheck2 size={17} />
+                        Отчёт исполнителя
+                      </h3>
+                      <p>{order.completion.work_done}</p>
+                      <div className="report-fault">
+                        <span>Код неисправности</span>
+                        <strong>
+                          {
+                            r.fault_codes.find(
+                              (f) =>
+                                String(f.id) ===
+                                String(order.completion?.fault_code_id),
+                            )?.code
+                          }{" "}
+                          ·{" "}
+                          {
+                            r.fault_codes.find(
+                              (f) =>
+                                String(f.id) ===
+                                String(order.completion?.fault_code_id),
+                            )?.name
+                          }
+                        </strong>
+                      </div>
+                      {order.completion.materials.length > 0 && (
+                        <div className="materials-report">
+                          {order.completion.materials.map((m, i) => (
+                            <div key={i}>
+                              <span>
+                                <Package size={14} />
+                                {m.name}
+                              </span>
+                              <strong>
+                                {m.quantity} {m.unit}
+                              </strong>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {order.completion.comment && (
+                        <p className="muted">{order.completion.comment}</p>
+                      )}
+                    </section>
+                  )}
+                </div>
                 <div className="detail-info-grid">
                   <div>
                     <small>
@@ -1178,8 +1872,41 @@ export function OrderDialog({
                       Норма времени
                     </small>
                     <strong>{number(order.normal_hours, 1)} ч</strong>
-                    <span>Простой: {number(order.downtime_minutes)} мин</span>
+                    <span>
+                      Расчёт простоя: {number(order.downtime_minutes)} мин
+                    </span>
                   </div>
+                </div>
+                <div className="detail-timing">
+                  <span>
+                    Начало:{" "}
+                    <strong>{formatDate(order.started_at, true)}</strong>
+                  </span>
+                  <span>
+                    Сдача:{" "}
+                    <strong>{formatDate(order.completed_at, true)}</strong>
+                  </span>
+                  {order.started_at && order.completed_at && (
+                    <span>
+                      От начала до сдачи:{" "}
+                      <strong>
+                        {number(
+                          (new Date(order.completed_at).getTime() -
+                            new Date(order.started_at).getTime()) /
+                            3600000,
+                          1,
+                        )}{" "}
+                        ч
+                      </strong>{" "}
+                      · включая паузы
+                    </span>
+                  )}
+                  {order.work_type === "unplanned" && (
+                    <small>
+                      Простой в текущем API считается от выдачи. Фактические
+                      остановки отдельно не измеряются.
+                    </small>
+                  )}
                 </div>
                 {order.comment && (
                   <div className="comment-block">
@@ -1209,8 +1936,13 @@ export function OrderDialog({
                         {r.employees
                           .filter((e) => e.role === "worker")
                           .map((e) => (
-                            <option key={e.id} value={e.id}>
-                              {e.name}
+                            <option
+                              key={e.id}
+                              value={e.id}
+                              disabled={e.on_shift === false}
+                            >
+                              {e.name} · {e.specialty}
+                              {e.on_shift === false ? " · вне смены" : ""}
                             </option>
                           ))}
                       </select>
@@ -1304,12 +2036,12 @@ export function OrderDialog({
                             order.photos.filter((p) => p.kind === kind).length <
                               5 && (
                               <label
-                                className={`photo-add ${busy ? "disabled" : ""}`}
+                                className={`photo-add ${busy || photoUncertain ? "disabled" : ""}`}
                               >
                                 <Plus size={20} />
                                 <span>Добавить</span>
                                 <input
-                                  disabled={busy}
+                                  disabled={busy || photoUncertain}
                                   type="file"
                                   accept="image/jpeg,image/png,image/webp"
                                   onChange={(e) => {
@@ -1334,65 +2066,47 @@ export function OrderDialog({
                       выполнения».
                     </p>
                   )}
+                  {photoUncertain && (
+                    <p className="field-hint" role="status">
+                      Ответ о загрузке потерян. Проверьте сохранённые фотографии
+                      перед новой отправкой; повтор в этой форме заблокирован.
+                    </p>
+                  )}
                 </div>
-                {order.completion && (
-                  <section className="completion-report">
-                    <h3>
-                      <FileCheck2 size={17} />
-                      Отчёт исполнителя
-                    </h3>
-                    <p>{order.completion.work_done}</p>
-                    <div className="report-fault">
-                      <span>Код неисправности</span>
-                      <strong>
-                        {
-                          r.fault_codes.find(
-                            (f) =>
-                              String(f.id) ===
-                              String(order.completion?.fault_code_id),
-                          )?.code
-                        }{" "}
-                        ·{" "}
-                        {
-                          r.fault_codes.find(
-                            (f) =>
-                              String(f.id) ===
-                              String(order.completion?.fault_code_id),
-                          )?.name
-                        }
-                      </strong>
-                    </div>
-                    {order.completion.materials.length > 0 && (
-                      <div className="materials-report">
-                        {order.completion.materials.map((m, i) => (
-                          <div key={i}>
-                            <span>
-                              <Package size={14} />
-                              {m.name}
-                            </span>
-                            <strong>
-                              {m.quantity} {m.unit}
-                            </strong>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {order.completion.comment && (
-                      <p className="muted">{order.completion.comment}</p>
-                    )}
-                  </section>
-                )}
                 {order.ai_review && (
                   <section className="ai-review">
                     <div>
                       <Sparkles size={18} />
-                      <h3>Предварительная проверка</h3>
-                      <span className="stub-tag">ИИ · ЗАГЛУШКА</span>
+                      <h3>
+                        {order.ai_review.is_stub
+                          ? "Формальная проверка"
+                          : "Проверка ИИ"}
+                      </h3>
+                      {order.ai_review.is_stub && (
+                        <span className="stub-tag">ДЕМО · ЗАГЛУШКА</span>
+                      )}
+                    </div>
+                    <div className="review-verdict">
+                      <strong>
+                        {(
+                          {
+                            passed: "Принято",
+                            needs_attention: "Принято с замечаниями",
+                            needs_rework: "Требует доработки",
+                            rework: "Требует доработки",
+                          } as Record<string, string>
+                        )[order.ai_review.verdict] || "Нужна проверка мастером"}
+                      </strong>
+                      <span>
+                        Предварительная оценка: {order.ai_review.score} / 5
+                      </span>
                     </div>
                     <p>{order.ai_review.explanation}</p>
                     <small>
-                      Демонстрационный алгоритм. Окончательное решение принимает
-                      мастер.
+                      {order.ai_review.is_stub
+                        ? "Проверяется наличие фотографий. Содержимое снимков не анализируется. "
+                        : ""}
+                      Окончательное решение принимает мастер.
                     </small>
                     {order.score !== null && (
                       <strong className="final-score">
@@ -1403,135 +2117,201 @@ export function OrderDialog({
                 )}
                 {mode === "complete" && (
                   <form className="inline-form" onSubmit={submitComplete}>
-                    <h3>
-                      <FileCheck2 size={18} />
-                      Завершение работы
-                    </h3>
-                    <label>
-                      Выполненные работы <b>*</b>
-                      <textarea
-                        required
-                        minLength={10}
-                        rows={3}
-                        placeholder="Что было сделано и какой результат получен"
-                        value={complete.work_done}
-                        onChange={(e) =>
-                          setComplete({
-                            ...complete,
-                            work_done: e.target.value,
-                          })
-                        }
-                      />
-                    </label>
-                    <label>
-                      Код неисправности <b>*</b>
-                      <select
-                        required
-                        value={complete.fault_code_id}
-                        onChange={(e) =>
-                          setComplete({
-                            ...complete,
-                            fault_code_id: e.target.value,
-                          })
-                        }
-                      >
-                        <option value="">Выберите неисправность</option>
-                        {r.fault_codes.map((f) => (
-                          <option key={f.id} value={f.id}>
-                            {f.code} · {f.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <div className="materials-form-title">
-                      <strong>Использованные материалы</strong>
-                      <button
-                        type="button"
-                        className="text-button"
-                        onClick={() =>
-                          setMaterials((m) => [
-                            ...m,
-                            { material_id: "", quantity: "1" },
-                          ])
-                        }
-                      >
-                        <Plus size={14} />
-                        Добавить
-                      </button>
-                    </div>
-                    {materials.map((m, i) => (
-                      <div className="material-row" key={i}>
+                    <fieldset disabled={busy || completionUncertain}>
+                      <h3>
+                        <FileCheck2 size={18} />
+                        Завершение работы
+                      </h3>
+                      <label>
+                        Выполненные работы <b>*</b>
+                        <textarea
+                          required
+                          minLength={10}
+                          maxLength={5000}
+                          rows={3}
+                          placeholder="Что было сделано и какой результат получен"
+                          value={complete.work_done}
+                          onChange={(e) =>
+                            setComplete({
+                              ...complete,
+                              work_done: e.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                      <label>
+                        Код неисправности <b>*</b>
                         <select
                           required
-                          value={m.material_id}
+                          value={complete.fault_code_id}
                           onChange={(e) =>
-                            setMaterials((ms) =>
-                              ms.map((v, j) =>
-                                j === i
-                                  ? { ...v, material_id: e.target.value }
-                                  : v,
-                              ),
-                            )
+                            setComplete({
+                              ...complete,
+                              fault_code_id: e.target.value,
+                            })
                           }
                         >
-                          <option value="">Материал</option>
-                          {r.materials.map((v) => (
-                            <option key={v.id} value={v.id}>
-                              {v.name}, {v.unit}
+                          <option value="">Выберите неисправность</option>
+                          {r.fault_codes.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.code} · {f.name}
                             </option>
                           ))}
                         </select>
-                        <input
-                          aria-label="Количество"
-                          required
-                          type="number"
-                          min="0.01"
-                          step="0.01"
-                          value={m.quantity}
-                          onChange={(e) =>
-                            setMaterials((ms) =>
-                              ms.map((v, j) =>
-                                j === i
-                                  ? { ...v, quantity: e.target.value }
-                                  : v,
-                              ),
-                            )
-                          }
-                        />
+                      </label>
+                      <div className="materials-form-title">
+                        <strong>Использованные материалы</strong>
                         <button
                           type="button"
-                          className="icon-button"
+                          className="text-button"
                           onClick={() =>
-                            setMaterials((ms) => ms.filter((_, j) => j !== i))
+                            setMaterials((m) => [
+                              ...m,
+                              { material_id: "", quantity: "1" },
+                            ])
                           }
-                          aria-label="Удалить материал"
                         >
-                          <Trash2 size={16} />
+                          <Plus size={14} />
+                          Добавить
                         </button>
                       </div>
-                    ))}
-                    <label>
-                      Комментарий
-                      <textarea
-                        rows={2}
-                        value={complete.comment}
-                        onChange={(e) =>
-                          setComplete({ ...complete, comment: e.target.value })
-                        }
-                      />
-                    </label>
+                      {order.completion && (
+                        <p className="field-hint">
+                          При доработке указывайте только дополнительный расход.
+                          Предыдущие списания уже учтены.
+                        </p>
+                      )}
+                      <label>
+                        Поиск материала
+                        <input
+                          type="search"
+                          value={materialSearch}
+                          onChange={(event) =>
+                            setMaterialSearch(event.target.value)
+                          }
+                          placeholder="Название материала или запчасти"
+                        />
+                      </label>
+                      {materials.map((m, i) => (
+                        <div className="material-row" key={i}>
+                          <select
+                            aria-label={`Материал ${i + 1}`}
+                            required
+                            value={m.material_id}
+                            onChange={(e) =>
+                              setMaterials((ms) =>
+                                ms.map((v, j) =>
+                                  j === i
+                                    ? { ...v, material_id: e.target.value }
+                                    : v,
+                                ),
+                              )
+                            }
+                          >
+                            <option value="">Материал</option>
+                            {r.materials
+                              .filter(
+                                (value) =>
+                                  String(value.id) === m.material_id ||
+                                  value.name
+                                    .toLocaleLowerCase()
+                                    .includes(
+                                      materialSearch.toLocaleLowerCase(),
+                                    ),
+                              )
+                              .map((v) => (
+                                <option
+                                  key={v.id}
+                                  value={v.id}
+                                  disabled={materials.some(
+                                    (other, index) =>
+                                      index !== i &&
+                                      other.material_id === String(v.id),
+                                  )}
+                                >
+                                  {v.name}, {v.unit}
+                                </option>
+                              ))}
+                          </select>
+                          <input
+                            aria-label="Количество"
+                            required
+                            type="number"
+                            min="0.01"
+                            max="1000000"
+                            step="0.01"
+                            value={m.quantity}
+                            onChange={(e) =>
+                              setMaterials((ms) =>
+                                ms.map((v, j) =>
+                                  j === i
+                                    ? { ...v, quantity: e.target.value }
+                                    : v,
+                                ),
+                              )
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="icon-button"
+                            onClick={() =>
+                              setMaterials((ms) => ms.filter((_, j) => j !== i))
+                            }
+                            aria-label="Удалить материал"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      ))}
+                      <label>
+                        Комментарий
+                        <textarea
+                          rows={2}
+                          maxLength={3000}
+                          value={complete.comment}
+                          onChange={(e) =>
+                            setComplete({
+                              ...complete,
+                              comment: e.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    </fieldset>
+                    {completionUncertain && (
+                      <div className="info-banner" role="status">
+                        <AlertTriangle size={18} />
+                        <p>
+                          Результат отправки неизвестен. Повтор заблокирован,
+                          чтобы не списать материалы дважды. Поля остаются в
+                          открытой форме.
+                        </p>
+                      </div>
+                    )}
                     <div className="inline-actions">
                       <button
                         type="button"
                         className="button secondary"
+                        disabled={busy}
                         onClick={() => setMode("none")}
                       >
                         Отмена
                       </button>
-                      <button className="button primary" disabled={busy}>
-                        <Send size={16} />
-                        На проверку
-                      </button>
+                      {completionUncertain ? (
+                        <button
+                          type="button"
+                          className="button primary"
+                          disabled={busy}
+                          onClick={() => void reloadDetail()}
+                        >
+                          Проверить отправку
+                        </button>
+                      ) : (
+                        <button className="button primary" disabled={busy}>
+                          <Send size={16} />
+                          Отправить на приёмку
+                        </button>
+                      )}
                     </div>
                   </form>
                 )}
@@ -1549,9 +2329,11 @@ export function OrderDialog({
                         <label>
                           Оценка качества работы
                           <select
+                            required
                             value={score}
                             onChange={(e) => setScore(e.target.value)}
                           >
+                            <option value="">Выберите оценку</option>
                             {[5, 4, 3, 2, 1].map((s) => (
                               <option key={s} value={s}>
                                 {s} —{" "}
@@ -1580,6 +2362,7 @@ export function OrderDialog({
                         <textarea
                           required
                           minLength={3}
+                          maxLength={3000}
                           value={reason}
                           onChange={(e) => setReason(e.target.value)}
                           rows={3}
@@ -1622,14 +2405,25 @@ export function OrderDialog({
                         className={`timeline-point ${i === order.events.length - 1 ? "latest" : ""}`}
                       />
                       <strong>
-                        {statusNames[e.to_status] ||
-                          (
-                            {
-                              created: "Наряд создан",
-                              updated: "Наряд изменён",
-                              photo_uploaded: "Фото добавлено",
-                            } as Record<string, string>
-                          )[e.action] ||
+                        {(
+                          {
+                            issue: "Наряд выдан",
+                            edit: "Назначение или условия изменены",
+                            photo: "Добавлено фото",
+                            accept: "Задание принято",
+                            queue: "Поставлен в очередь",
+                            reject: "Задание отклонено",
+                            start: "Начато исполнение",
+                            pause: "Работа приостановлена",
+                            resume: "Работа продолжена",
+                            complete: "Отчёт отправлен",
+                            ai_review: "Отчёт проверен",
+                            rework: "Возвращён на доработку",
+                            close: "Принят мастером",
+                            cancel: "Отменён",
+                          } as Record<string, string>
+                        )[e.action] ||
+                          statusNames[e.to_status] ||
                           e.action}
                       </strong>
                       <span>{e.actor_name}</span>
@@ -1648,7 +2442,11 @@ export function OrderDialog({
       </div>
       {order && (
         <footer className="modal-footer detail-footer">
-          <button className="button secondary" onClick={onClose}>
+          <button
+            className="button secondary"
+            disabled={busy}
+            onClick={closeDialog}
+          >
             Закрыть
           </button>
           <div className="footer-spacer" />
@@ -1666,7 +2464,7 @@ export function OrderDialog({
               {actions.map((a, i) => (
                 <button
                   key={a}
-                  className={`button ${i === 0 ? "primary" : "secondary"}`}
+                  className={`button ${i === 0 && order.status !== "in_progress" ? "primary" : "secondary"}`}
                   disabled={busy}
                   onClick={() => actionClick(a)}
                 >
