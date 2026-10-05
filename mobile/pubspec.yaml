@@ -1,0 +1,24 @@
+name: naryad_ai
+description: Мобильное рабочее место НарядAI для мастера и исполнителя.
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: ^3.13.0
+dependencies:
+  cupertino_icons: ^2.0.0
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  flutter_secure_storage: ^11.2.0
+  http: ^1.6.0
+  image: ^4.10.1
+  image_picker: ^1.2.3
+  intl: ^0.20.3
+  timezone: ^0.11.1
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true

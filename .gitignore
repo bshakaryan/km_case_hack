@@ -13,6 +13,8 @@ dist/
 .DS_Store
 *.log
 data/
+!/mobile/lib/data/
+!/mobile/lib/data/*.dart
 uploads/
 *.db
 *.db-journal
