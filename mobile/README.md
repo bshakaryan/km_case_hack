@@ -47,6 +47,65 @@ flutter test test/live_api_test.dart --dart-define=LIVE_API_URL=http://127.0.0.1
 
 Последняя команда работает из Flutter test на компьютере, поэтому использует `127.0.0.1`, а не адрес эмулятора. Обычный прогон пропускает live-тест. Фактические результаты и границы — в [verification](../docs/verification.md).
 
+### Связанный тест Android Emulator и веб-клиента API
+
+Физический телефон не нужен. Заранее запустите Android Emulator `emulator-5556`, API на `8000` и Vite на `5174` с прокси к этому API. Используйте отдельную демобазу с исходными справочниками: у `worker2` не должно быть текущей работы (`in_progress` или `paused`). Тест создаёт синтетические данные и не исправляет чужие назначения.
+
+Оба терминала открываются из корня репозитория. Выберите **новый уникальный `BRIDGE_TITLE` для каждого запуска** и подставьте одинаковое значение в оба блока. Пример PowerShell, терминал 1:
+
+```powershell
+cd mobile
+$bridgeTitle = 'bridge-20261006-153000'
+flutter test integration_test/web_bridge_test.dart -d emulator-5556 --dart-define=API_BASE_URL=http://10.0.2.2:8000 "--dart-define=BRIDGE_TITLE=$bridgeTitle"
+$LASTEXITCODE
+```
+
+Дождитесь строки `BRIDGE_STEP WAIT_WEB_CREATE` в первом терминале, затем запустите терминал 2. Не запускайте координатор во время сборки Android: ожидания ограничены.
+
+```powershell
+cd frontend
+$env:LIVE_DEMO = '1'
+$env:LIVE_WEB_URL = 'http://127.0.0.1:5174'
+$env:BRIDGE_TITLE = 'bridge-20261006-153000'
+node --experimental-strip-types tests/live_bridge.mjs
+$LASTEXITCODE
+```
+
+Дальше сценарий идёт автоматически: мастер через настоящий веб-клиент API выдаёт наряд, Flutter UI принимает, начинает, приостанавливает и продолжает работу, отправляет отчёт; мастер возвращает на доработку и принимает повторный результат. Проверяются итоговая оценка 5, расход материалов 2 + 1 = 3, приватные JPEG и запреты чужого доступа. Оставьте `BRIDGE_PAUSE` включённым: координатор ожидает события паузы и продолжения. Наряд ожидается до 90 секунд, каждая внешняя приёмка — до 120 секунд; последнее можно изменить через `--dart-define=BRIDGE_WAIT_SECONDS=240`.
+
+Успех требует **кода завершения 0 у обеих команд и `BRIDGE_STEP PASS` у Flutter**. Успех только веб-координатора не подтверждает мобильный UI. Без `BRIDGE_TITLE` тест пропускается. Эта инструкция не является результатом прогона.
+
+Фотографии создаются синтетически и загружаются настоящим `AppController`/API; камера и системная галерея не проверяются. Координатор импортирует `frontend/src/model.ts`, но не управляет React-интерфейсом браузера. Эмулятор также не подтверждает работу на физическом телефоне, фоновой push или офлайн.
+
+#### Вариант при недостатке RAM: сборка и запуск отдельно
+
+При 6 ГБ RAM совместная работа Gradle и Android Emulator может вызвать интенсивный обмен с диском. Остановите тестовый эмулятор на время сборки. Из `mobile/` соберите APK с новым уникальным заголовком:
+
+```powershell
+$bridgeTitle = 'bridge-20261006-154000'
+flutter build apk --debug --target=integration_test/web_bridge_test.dart --target-platform=android-x64 --dart-define=API_BASE_URL=http://10.0.2.2:8000 "--dart-define=BRIDGE_TITLE=$bridgeTitle"
+```
+
+Не добавляйте `INTEGRATION_TEST_SHOULD_REPORT_RESULTS_TO_NATIVE`: этот вариант передаёт результаты SDK-драйверу. После успешной сборки снова запустите `emulator-5556` и дождитесь загрузки Android, затем из того же каталога:
+
+```powershell
+flutter drive --no-pub --no-dds --driver=test_driver/web_bridge_test.dart --target=integration_test/web_bridge_test.dart --use-application-binary=build/app/outputs/flutter-apk/app-debug.apk -d emulator-5556
+$LASTEXITCODE
+```
+
+SDK-драйвер ждёт результат до 12 минут; он не управляет браузером. Если увеличиваете `BRIDGE_WAIT_SECONDS`, при необходимости согласованно увеличьте timeout в `test_driver/web_bridge_test.dart`: определение не меняет лимит драйвера. `API_BASE_URL` и `BRIDGE_TITLE` уже встроены в APK: для другого заголовка пересоберите его. Во втором терминале запускайте тот же Node-координатор после `BRIDGE_STEP WAIT_WEB_CREATE`, установив `BRIDGE_TITLE` из сборки. Критерии успеха и границы проверки остаются прежними.
+
+Для раннего обнаружения сбоя Android координатору можно передать `BRIDGE_NATIVE_LOG` — абсолютный путь к **UTF-8 логу текущего Android-прогона**. Перед каждым запуском очищайте файл или выбирайте новый путь: старый `PASS`/`TEARDOWN` исказит результат. Например, в первом терминале PowerShell 7 задайте `$bridgeNativeLog = Join-Path $env:TEMP "$bridgeTitle-android.log"` и добавьте к команде `flutter drive` перенаправление `2>&1 | Tee-Object -FilePath $bridgeNativeLog`. Для других версий PowerShell обеспечьте запись именно UTF-8.
+
+Во втором терминале перед `node` можно задать оба необязательных пути:
+
+```powershell
+$env:BRIDGE_NATIVE_LOG = Join-Path $env:TEMP ($env:BRIDGE_TITLE + '-android.log')
+$env:BRIDGE_REPORT = Join-Path $env:TEMP ($env:BRIDGE_TITLE + '-web.json')
+```
+
+При `TEARDOWN` без `PASS` координатор прекращает ожидание, не дожидаясь шестиминутного таймаута, и отменяет **только свой созданный наряд**, если тот ещё не `closed`/`cancelled`. Без `BRIDGE_NATIVE_LOG` действует ограниченное ожидание с такой же очисткой незавершённого тестового наряда. `BRIDGE_REPORT` сохраняет JSON результата веб-координатора; этот файл сам по себе не подтверждает Android `PASS` и не заменяет проверку обоих кодов завершения.
+
 ## Устройство и границы
 
 - `lib/data/`: HTTP API, основные типы, сессия и общие данные. `lib/screens/`: рабочие экраны. `lib/ui.dart`: тема, карточки и производственное время `Asia/Almaty`.
