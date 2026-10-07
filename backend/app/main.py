@@ -31,7 +31,7 @@ from .push import StubSender, dispatch_push, env_int, get_sender
 from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPatch, Transition
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
-from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, audit, aware, downtime_minutes, effective_queue_statuses, employee_dict, iso, monitor_deadlines, notify, order_dict, photo_dict, queue_positions, shift_start, waiting_orders
+from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, append_assignment, append_submission, append_submission_decision, audit, aware, downtime_minutes, effective_queue_statuses, employee_dict, end_current_assignment, iso, monitor_deadlines, notify, order_dict, photo_dict, queue_positions, shift_start, waiting_orders
 
 log = logging.getLogger(__name__)
 STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "completed", "ai_review", "rework", "closed", "cancelled"}
@@ -472,6 +472,7 @@ def create_app(database_url=None, seed=True, monitor=True):
                         raise HTTPException(503, "Не удалось выделить номер наряда. Повторите запрос позже.", headers={"Retry-After": "1"})
                 else:
                     break
+            append_assignment(db, order, user.id)
             audit(db, order, "issue", user.id, comment=payload.comment)
             notify(db, [order.assignee_id], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
             return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
@@ -495,6 +496,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             order.status = "issued"
             assigned = utcnow()
             order.assigned_at = max(assigned, aware(order.assigned_at) + timedelta(microseconds=1))
+            append_assignment(db, order, user.id)
             notify(db, [order.assignee_id], "Наряд переназначен вам", order.number, "assigned", order.id)
         if payload.deadline is not None and payload.deadline <= utcnow():
             raise HTTPException(422, "Новый срок должен быть в будущем")
@@ -569,6 +571,10 @@ def create_app(database_url=None, seed=True, monitor=True):
                 order.score = None
             if action == "cancel":
                 order.closed_at = utcnow()
+            if action in {"close", "cancel"}:
+                end_current_assignment(db, order, order.closed_at)
+            if action in {"close", "rework"}:
+                append_submission_decision(db, order, user.id, action, payload.score if action == "close" else None, payload.reason or payload.comment)
             audit(db, order, action, user.id, old_status, payload.reason or payload.comment)
             notice = "Наряд добавлен в очередь" if action == "queue" else "Статус наряда изменён"
             notify(db, [order.assignee_id, order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
@@ -590,12 +596,16 @@ def create_app(database_url=None, seed=True, monitor=True):
             if order.work_type == "unplanned" and not db.scalar(select(Photo.id).where(Photo.order_id == order.id, Photo.kind == "after")):
                 raise HTTPException(422, "Для внеплановой работы добавьте фото после выполнения")
             materials = []
+            writeoffs = []
             for usage in payload.materials:
                 material = db.get(Material, usage.material_id)
                 if not material:
                     raise HTTPException(422, f"Материал {usage.material_id} не найден")
                 materials.append({"material_id": material.id, "name": material.name, "unit": material.unit, "quantity": usage.quantity})
-                db.add(MaterialWriteoff(order_id=order.id, material_id=material.id, quantity=usage.quantity, author_id=user.id))
+                writeoff = MaterialWriteoff(order_id=order.id, material_id=material.id, quantity=usage.quantity, author_id=user.id)
+                db.add(writeoff)
+                writeoffs.append(writeoff)
+            submission_payload = {**payload.model_dump(exclude={"materials"}), "materials": [dict(material) for material in materials]}
             previous_materials = (order.completion or {}).get("materials", [])
             accumulated = {m["material_id"]: dict(m) for m in previous_materials}
             for material in materials:
@@ -610,7 +620,10 @@ def create_app(database_url=None, seed=True, monitor=True):
             order.status = "completed"
             audit(db, order, "complete", user.id, "in_progress", payload.work_done)
             order.ai_review = AIReviewStub.review(db, order)
-            db.add(AIAssessment(order_id=order.id, **order.ai_review))
+            assessment = AIAssessment(order_id=order.id, **order.ai_review)
+            db.add(assessment)
+            db.flush()
+            append_submission(db, order, user.id, submission_payload, writeoffs, assessment)
             order.status = "ai_review"
             audit(db, order, "ai_review", user.id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
             notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)

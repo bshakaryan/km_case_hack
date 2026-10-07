@@ -21,6 +21,27 @@ class WorkOrder {
     : data = Map<String, dynamic>.unmodifiable(json);
 
   final Json data;
+  Json toJson() => Map<String, dynamic>.from(data);
+
+  List<Json> get assignmentHistory => _historyRows(data['assignment_history']);
+  List<Json> get submissionAttempts =>
+      _historyRows(data['submission_attempts']);
+
+  // Lists and historical command replays may omit detail-only fields. A new
+  // explicit empty array is authoritative; only missing fields use the cache.
+  WorkOrder withCachedHistory(WorkOrder? previous) => WorkOrder.fromJson({
+    for (final key in ['assignment_history', 'submission_attempts'])
+      if (!data.containsKey(key) && previous?.data.containsKey(key) == true)
+        key: previous!.data[key],
+    ...data,
+  });
+
+  static List<Json> _historyRows(Object? value) => value is List
+      ? value
+            .whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .toList()
+      : [];
   int get id => (data['id'] as num).toInt();
   String get number => data['number'] as String;
   String get title => data['title'] as String;

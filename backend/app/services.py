@@ -1,10 +1,11 @@
 import logging
 import os
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from sqlalchemy import select
-from .models import Area, Brigade, Employee, Equipment, IntegrationLog, Notification, Order, OrderEvent, Photo, utcnow
+from .models import Area, Brigade, Employee, Equipment, IntegrationLog, Material, MaterialWriteoff, Notification, Order, OrderAssignment, OrderEvent, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
 from .push import enqueue_push
 
 LOG = logging.getLogger(__name__)
@@ -107,7 +108,82 @@ def order_dict(db, order, detail=False, refs=None, positions=None, statuses=None
         result["photos"] = [photo_dict(db, p) for p in db.scalars(select(Photo).where(Photo.order_id == order.id).order_by(Photo.id))]
         result["completion"] = order.completion
         result["ai_review"] = order.ai_review
+        result["assignment_history"], result["submission_attempts"] = order_history(db, order.id)
     return result
+
+
+def end_current_assignment(db, order, ended_at):
+    latest = db.scalar(select(OrderAssignment).where(OrderAssignment.order_id == order.id).order_by(OrderAssignment.sequence.desc()).limit(1))
+    if latest is not None and latest.ended_at is None:
+        latest.ended_at = ended_at
+
+
+def append_assignment(db, order, actor_id):
+    """Caller holds the order lock, or has just inserted the new order."""
+    latest = db.scalar(select(OrderAssignment).where(OrderAssignment.order_id == order.id).order_by(OrderAssignment.sequence.desc()).limit(1))
+    if latest is not None and latest.ended_at is None:
+        latest.ended_at = order.assigned_at
+    assignment = OrderAssignment(order_id=order.id, sequence=latest.sequence + 1 if latest else 1,
+        assignee_id=order.assignee_id, brigade_id=order.brigade_id, assigned_at=order.assigned_at,
+        assigned_by_id=actor_id, source="live")
+    db.add(assignment)
+    db.flush()
+    return assignment
+
+
+def append_submission(db, order, author_id, payload, writeoffs, assessment):
+    """Freeze this report before aggregate materials or master scores change."""
+    latest = db.scalar(select(SubmissionAttempt).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
+    assignment = db.scalar(select(OrderAssignment).where(OrderAssignment.order_id == order.id).order_by(OrderAssignment.sequence.desc()).limit(1))
+    attempt = SubmissionAttempt(order_id=order.id, sequence=latest.sequence + 1 if latest else 1,
+        assignment_id=assignment.id, submitted_at=order.completed_at, author_id=author_id,
+        payload=deepcopy(payload), ai_review=deepcopy(order.ai_review), assessment_id=assessment.id, source="live")
+    db.add(attempt)
+    db.flush()
+    db.add_all([SubmissionPhoto(attempt_id=attempt.id, photo_id=id_) for id_ in db.scalars(select(Photo.id).where(Photo.order_id == order.id).order_by(Photo.id))])
+    db.add_all([SubmissionWriteoff(attempt_id=attempt.id, writeoff_id=row.id) for row in writeoffs])
+    return attempt
+
+
+def append_submission_decision(db, order, actor_id, action, score, comment):
+    latest = db.scalar(select(SubmissionAttempt).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
+    if latest is not None:
+        db.add(SubmissionDecision(attempt_id=latest.id, actor_id=actor_id, action=action, score=score,
+            comment=comment, created_at=order.closed_at if action == "close" else utcnow()))
+
+
+def order_history(db, order_id):
+    def name(model, id_):
+        row = db.get(model, id_) if id_ is not None else None
+        return row.name if row else None
+
+    assignments = [{"id": row.id, "number": row.sequence, "source": row.source,
+        "assignee_id": row.assignee_id, "assignee_name": name(Employee, row.assignee_id),
+        "brigade_id": row.brigade_id, "brigade_name": name(Brigade, row.brigade_id),
+        "assigned_by_id": row.assigned_by_id, "assigned_by_name": name(Employee, row.assigned_by_id),
+        "assigned_at": iso(row.assigned_at), "ended_at": iso(row.ended_at)}
+        for row in db.scalars(select(OrderAssignment).where(OrderAssignment.order_id == order_id).order_by(OrderAssignment.sequence))]
+    attempts = []
+    for row in db.scalars(select(SubmissionAttempt).where(SubmissionAttempt.order_id == order_id).order_by(SubmissionAttempt.sequence)):
+        material_snapshots = {m["material_id"]: m for m in (row.payload or {}).get("materials", [])}
+        materials = []
+        for writeoff in db.scalars(select(MaterialWriteoff).join(SubmissionWriteoff, SubmissionWriteoff.writeoff_id == MaterialWriteoff.id).where(SubmissionWriteoff.attempt_id == row.id).order_by(MaterialWriteoff.id)):
+            material = material_snapshots.get(writeoff.material_id, {})
+            current = db.get(Material, writeoff.material_id)
+            materials.append({"id": writeoff.id, "material_id": writeoff.material_id,
+                "name": material.get("name", current.name), "unit": material.get("unit", current.unit),
+                "quantity": writeoff.quantity, "author_id": writeoff.author_id,
+                "author_name": name(Employee, writeoff.author_id), "created_at": iso(writeoff.created_at)})
+        decisions = [{"id": decision.id, "actor_id": decision.actor_id, "actor_name": name(Employee, decision.actor_id),
+            "action": decision.action, "score": decision.score, "comment": decision.comment, "created_at": iso(decision.created_at)}
+            for decision in db.scalars(select(SubmissionDecision).where(SubmissionDecision.attempt_id == row.id).order_by(SubmissionDecision.created_at, SubmissionDecision.id))]
+        attempts.append({"id": row.id, "number": row.sequence, "source": row.source,
+            "assignment_id": row.assignment_id, "submitted_at": iso(row.submitted_at),
+            "author_id": row.author_id, "author_name": name(Employee, row.author_id),
+            "assessment_id": row.assessment_id, "completion": row.payload, "ai_review": row.ai_review,
+            "photos": [photo_dict(db, photo) for photo in db.scalars(select(Photo).join(SubmissionPhoto, SubmissionPhoto.photo_id == Photo.id).where(SubmissionPhoto.attempt_id == row.id).order_by(Photo.id))],
+            "materials": materials, "decisions": decisions})
+    return assignments, attempts
 
 
 def photo_dict(db, photo):

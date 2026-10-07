@@ -220,3 +220,70 @@ class AIAssessment(Base):
     is_stub: Mapped[bool] = mapped_column(Boolean, default=True)
     master_score: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class OrderAssignment(Base):
+    __tablename__ = "order_assignments"
+    __table_args__ = (
+        UniqueConstraint("order_id", "sequence", name="uq_order_assignment_sequence"),
+        CheckConstraint("source IN ('live','legacy_snapshot')", name="ck_assignment_source"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    assignee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    brigade_id: Mapped[int | None] = mapped_column(ForeignKey("brigades.id"))
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    assigned_by_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
+    source: Mapped[str] = mapped_column(String(20))
+
+
+class SubmissionAttempt(Base):
+    __tablename__ = "submission_attempts"
+    __table_args__ = (
+        UniqueConstraint("order_id", "sequence", name="uq_submission_attempt_sequence"),
+        CheckConstraint("source IN ('live','legacy_snapshot')", name="ck_submission_source"),
+        CheckConstraint("source != 'live' OR (submitted_at IS NOT NULL AND author_id IS NOT NULL AND assignment_id IS NOT NULL)", name="ck_submission_live_identity"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    assignment_id: Mapped[int | None] = mapped_column(ForeignKey("order_assignments.id"))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
+    payload: Mapped[dict] = mapped_column(JSON)
+    ai_review: Mapped[dict | None] = mapped_column(JSON)
+    assessment_id: Mapped[int | None] = mapped_column(ForeignKey("ai_assessments.id"))
+    source: Mapped[str] = mapped_column(String(20))
+
+
+class SubmissionPhoto(Base):
+    __tablename__ = "submission_photos"
+    __table_args__ = (UniqueConstraint("attempt_id", "photo_id", name="uq_submission_photo"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("submission_attempts.id"), index=True)
+    photo_id: Mapped[int] = mapped_column(ForeignKey("photos.id"))
+
+
+class SubmissionWriteoff(Base):
+    __tablename__ = "submission_writeoffs"
+    __table_args__ = (UniqueConstraint("writeoff_id", name="uq_submission_writeoff"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("submission_attempts.id"), index=True)
+    writeoff_id: Mapped[int] = mapped_column(ForeignKey("material_writeoffs.id"))
+
+
+class SubmissionDecision(Base):
+    __tablename__ = "submission_decisions"
+    __table_args__ = (
+        CheckConstraint("action IN ('close','rework')", name="ck_submission_decision_action"),
+        CheckConstraint("score IS NULL OR (score >= 1 AND score <= 5)", name="ck_submission_decision_score"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("submission_attempts.id"), index=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    action: Mapped[str] = mapped_column(String(20))
+    score: Mapped[float | None] = mapped_column(Float)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

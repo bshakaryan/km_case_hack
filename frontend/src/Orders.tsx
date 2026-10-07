@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { OrderHistory } from "./OrderHistory";
 import {
   completionValidationIssues,
   periodInputDate,
@@ -2438,6 +2439,7 @@ export function OrderDialog({
                 )}
               </div>
               <aside className="detail-history">
+                <OrderHistory order={order} faultCodes={r.fault_codes} />
                 <h3>
                   <History size={16} />
                   История наряда

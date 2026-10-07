@@ -6,6 +6,7 @@ import '../data/app_controller.dart';
 import '../data/models.dart';
 import '../ui.dart' as app_ui;
 import '../widgets/order_photo.dart';
+import '../widgets/order_history.dart';
 import 'completion_screen.dart';
 
 const _blue = Color(0xFF173E68);
@@ -413,6 +414,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   _photos(order),
                   if (order.data['completion'] is Map) _report(order),
                   if (order.data['ai_review'] is Map) _review(order),
+                  OrderHistory(order: order, controller: widget.controller),
                   _history(order),
                   if (_updatedAt != null)
                     Padding(

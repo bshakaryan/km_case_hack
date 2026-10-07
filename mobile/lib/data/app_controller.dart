@@ -209,7 +209,7 @@ class AppController extends ChangeNotifier {
     }
     _lastSnapshotWrite = now;
     final values = <String, Object?>{
-      SnapshotKeys.orders: orders.map((order) => order.data).toList(),
+      SnapshotKeys.orders: orders.map((order) => order.toJson()).toList(),
       SnapshotKeys.reference: reference,
       SnapshotKeys.employees: employees,
       SnapshotKeys.dashboard: dashboard,
@@ -667,7 +667,11 @@ class AppController extends ChangeNotifier {
       if (!_current(session) || revision != _dataRevision) return;
       reference = results[0] as Json;
       employees = results[1] as List<Json>;
-      orders = (results[2] as List<Json>).map(WorkOrder.fromJson).toList();
+      final cachedOrders = {for (final order in orders) order.id: order};
+      orders = (results[2] as List<Json>)
+          .map((json) => WorkOrder.fromJson(json))
+          .map((order) => order.withCachedHistory(cachedOrders[order.id]))
+          .toList();
       dashboard = results[3] as Json;
       notifications = results[4] as List<Json>;
       analytics = results[5] as Json;
@@ -705,7 +709,7 @@ class AppController extends ChangeNotifier {
     if (index < 0) {
       orders.insert(0, order);
     } else {
-      orders[index] = order;
+      orders[index] = order.withCachedHistory(orders[index]);
     }
   }
 
@@ -734,6 +738,10 @@ class AppController extends ChangeNotifier {
       }
       _upsert(result);
       await _reloadOutbox();
+      if (!_current(session)) {
+        throw const ApiException('Сессия изменилась.', 401);
+      }
+      await _persistSnapshot(session, force: true);
       if (!_current(session)) {
         throw const ApiException('Сессия изменилась.', 401);
       }

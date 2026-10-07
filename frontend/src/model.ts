@@ -55,6 +55,8 @@ export type Order = {
   score: number | null;
 };
 export type OrderDetail = Order & {
+  assignment_history?: AssignmentHistory[];
+  submission_attempts?: SubmissionAttempt[];
   events: {
     id: Id;
     action: string;
@@ -89,6 +91,56 @@ export type OrderDetail = Order & {
     is_stub: boolean;
     master_score?: number | null;
   } | null;
+};
+export type AssignmentHistory = {
+  id: Id;
+  number: number;
+  source: "live" | "legacy_snapshot";
+  assignee_id: Id;
+  assignee_name: string;
+  brigade_id: Id | null;
+  brigade_name: string | null;
+  assigned_by_id: Id | null;
+  assigned_by_name: string | null;
+  assigned_at: string;
+  ended_at: string | null;
+};
+export type SubmissionAttempt = {
+  id: Id;
+  number: number;
+  source: "live" | "legacy_snapshot";
+  assignment_id: Id | null;
+  submitted_at: string | null;
+  author_id: Id | null;
+  author_name: string | null;
+  assessment_id: Id | null;
+  completion: {
+    work_done?: string;
+    fault_code_id?: Id | null;
+    comment?: string;
+    materials?: { material_id: Id; quantity: number; name?: string; unit?: string }[];
+  };
+  photos: OrderDetail["photos"];
+  materials: {
+    id: Id;
+    material_id: Id;
+    name: string;
+    unit: string;
+    quantity: number;
+    author_id: Id | null;
+    author_name: string | null;
+    created_at: string;
+  }[];
+  ai_review: OrderDetail["ai_review"];
+  decisions: {
+    id: Id;
+    actor_id: Id;
+    actor_name: string;
+    action: "close" | "rework";
+    score: number | null;
+    comment: string | null;
+    created_at: string;
+  }[];
 };
 export type Notice = {
   id: Id;
