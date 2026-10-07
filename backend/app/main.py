@@ -1,8 +1,11 @@
 import asyncio
 import csv
+import hashlib
 import io
+import json
 import logging
 import os
+import re
 import secrets
 import warnings
 from collections import defaultdict, deque
@@ -14,13 +17,14 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from sqlalchemy import delete, func, select, text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import Base, make_engine, session_factory
-from .models import AIAssessment, Area, AuthSession, Brigade, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
+from .models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
 from .schemas import Completion, Login, OrderCreate, OrderPatch, Transition
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
@@ -90,7 +94,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     app.state.engine = engine
     app.state.sessions = sessions
     app.state.realtime = realtime
-    app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type"])
+    app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id"])
 
     def get_db():
         with sessions() as db:
@@ -155,6 +159,44 @@ def create_app(database_url=None, seed=True, monitor=True):
         await realtime.publish("orders.updated", order.id)
         await realtime.publish("notifications.updated")
         return order_dict(db, order, detail=True)
+
+    CLIENT_COMMAND_ID = re.compile(r"[A-Za-z0-9._:-]{8,64}")
+
+    def request_hash(*parts):
+        return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+    def json_hash(payload):
+        return request_hash(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str))
+
+    async def run_idempotent(db, user, request, kind, command_hash, status, perform):
+        client_id = (request.headers.get("X-Client-Command-Id") or "").strip()
+        if client_id:
+            if not CLIENT_COMMAND_ID.fullmatch(client_id):
+                raise HTTPException(422, "Некорректный X-Client-Command-Id")
+            existing = db.scalar(select(ClientCommand).where(ClientCommand.employee_id == user.id, ClientCommand.client_id == client_id))
+            if existing:
+                if existing.request_hash != command_hash:
+                    raise HTTPException(409, "Команда с таким идентификатором уже выполнена с другим содержанием")
+                if existing.response_status is None:
+                    raise HTTPException(409, "Предыдущая отправка этой команды не завершена. Повторите запрос позже.")
+                return JSONResponse(status_code=existing.response_status, content=existing.response_body)
+        claim = None
+        if client_id:
+            claim = ClientCommand(employee_id=user.id, client_id=client_id, kind=kind, request_hash=command_hash)
+            db.add(claim)
+            try:
+                db.flush()
+            except IntegrityError:
+                db.rollback()
+                raise HTTPException(409, "Команда с таким идентификатором уже выполняется")
+        body, events = await perform()
+        if claim is not None:
+            claim.response_status = status
+            claim.response_body = body
+        db.commit()
+        for type_, order_id in events:
+            await realtime.publish(type_, order_id)
+        return JSONResponse(status_code=status, content=body)
 
     def filtered(db, user, area_id=None, equipment_id=None, assignee_id=None, brigade_id=None, priority=None, status=None, search=None, from_date=None, to_date=None):
         query = select(Order)
@@ -316,21 +358,26 @@ def create_app(database_url=None, seed=True, monitor=True):
         return order_dict(db, get_order(db, id_, user), detail=True)
 
     @app.post("/api/orders", status_code=201)
-    async def order_create(payload: OrderCreate, db: DB, user: User):
+    async def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
         require_role(user, "master", "admin")
-        equipment = db.get(Equipment, payload.equipment_id)
-        if not equipment or equipment.area_id != payload.area_id:
-            raise HTTPException(422, "Оборудование не принадлежит выбранному участку")
-        if payload.deadline <= utcnow():
-            raise HTTPException(422, "Срок нового наряда должен быть в будущем")
-        data = payload.model_dump()
-        data["assignee_id"] = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
-        order = Order(**data, number=f"Н-{utcnow().year}-{secrets.token_hex(3).upper()}", status="issued", master_id=user.id)
-        db.add(order)
-        db.flush()
-        audit(db, order, "issue", user.id, comment=payload.comment)
-        notify(db, [order.assignee_id], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
-        return await changed(db, order)
+        command_hash = json_hash(payload.model_dump())
+
+        async def perform():
+            equipment = db.get(Equipment, payload.equipment_id)
+            if not equipment or equipment.area_id != payload.area_id:
+                raise HTTPException(422, "Оборудование не принадлежит выбранному участку")
+            if payload.deadline <= utcnow():
+                raise HTTPException(422, "Срок нового наряда должен быть в будущем")
+            data = payload.model_dump()
+            data["assignee_id"] = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
+            order = Order(**data, number=f"Н-{utcnow().year}-{secrets.token_hex(3).upper()}", status="issued", master_id=user.id)
+            db.add(order)
+            db.flush()
+            audit(db, order, "issue", user.id, comment=payload.comment)
+            notify(db, [order.assignee_id], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
+            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+
+        return await run_idempotent(db, user, request, "order_create", command_hash, 201, perform)
 
     @app.patch("/api/orders/{id_}")
     async def order_update(id_: int, payload: OrderPatch, db: DB, user: User):
@@ -358,118 +405,132 @@ def create_app(database_url=None, seed=True, monitor=True):
         return await changed(db, order)
 
     @app.post("/api/orders/{id_}/transition")
-    async def transition(id_: int, payload: Transition, db: DB, user: User):
+    async def transition(id_: int, payload: Transition, db: DB, user: User, request: Request):
         require_role(user, "worker", "master", "admin")
-        order = get_order(db, id_, user, lock=True)
         action = payload.action
         if action in ["close", "rework", "cancel"]:
             require_role(user, "master", "admin")
-        if action in ["reject", "pause", "rework", "cancel"] and not payload.reason:
-            raise HTTPException(422, "Укажите причину действия")
-        transitions = {"accept": ({"issued", "queued", "rework"}, "accepted"), "queue": ({"issued", "accepted", "rework"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued", "rework"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"ai_review"}, "closed"), "rework": ({"ai_review"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
-        allowed, target = transitions[action]
-        if order.status not in allowed:
-            raise HTTPException(409, f"Действие {action} недоступно для статуса {order.status}")
-        if action in ["start", "resume"]:
-            person = db.scalar(select(Employee).where(Employee.id == order.assignee_id).with_for_update())
-            if not person.on_shift:
-                raise HTTPException(409, "Исполнитель вне смены")
-            busy = db.scalar(select(Order.id).where(Order.assignee_id == order.assignee_id, Order.id != order.id, Order.status == "in_progress"))
-            if busy:
-                raise HTTPException(409, "У исполнителя уже есть наряд в работе. Приостановите его или поставьте новый в очередь.")
-            order.started_at = order.started_at or utcnow()
-        old_status = order.status
-        if action == "cancel" and order.work_type == "unplanned":
-            order.downtime_minutes = downtime_minutes(order)
-        order.status = target
-        if action == "close":
-            if payload.score is None:
-                raise HTTPException(422, "Мастер должен поставить итоговую оценку от 1 до 5")
-            order.score = payload.score
-            order.closed_at = utcnow()
-            order.ai_review = {**(order.ai_review or {}), "master_score": payload.score}
-            assessment = db.scalar(select(AIAssessment).where(AIAssessment.order_id == order.id).order_by(AIAssessment.id.desc()).limit(1))
-            if assessment:
-                assessment.master_score = payload.score
-        if action == "rework":
-            order.completed_at = None
-            order.score = None
-        if action == "cancel":
-            order.closed_at = utcnow()
-        audit(db, order, action, user.id, old_status, payload.reason or payload.comment)
-        notify(db, [order.assignee_id, order.master_id], "Статус наряда изменён", f"{order.number}: {old_status} → {target}", "status", order.id)
-        return await changed(db, order)
+        order = get_order(db, id_, user, lock=True)
+        command_hash = json_hash(payload.model_dump())
+
+        async def perform():
+            if action in ["reject", "pause", "rework", "cancel"] and not payload.reason:
+                raise HTTPException(422, "Укажите причину действия")
+            transitions = {"accept": ({"issued", "queued", "rework"}, "accepted"), "queue": ({"issued", "accepted", "rework"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued", "rework"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"ai_review"}, "closed"), "rework": ({"ai_review"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
+            allowed, target = transitions[action]
+            if order.status not in allowed:
+                raise HTTPException(409, f"Действие {action} недоступно для статуса {order.status}")
+            if action in ["start", "resume"]:
+                person = db.scalar(select(Employee).where(Employee.id == order.assignee_id).with_for_update())
+                if not person.on_shift:
+                    raise HTTPException(409, "Исполнитель вне смены")
+                busy = db.scalar(select(Order.id).where(Order.assignee_id == order.assignee_id, Order.id != order.id, Order.status == "in_progress"))
+                if busy:
+                    raise HTTPException(409, "У исполнителя уже есть наряд в работе. Приостановите его или поставьте новый в очередь.")
+                order.started_at = order.started_at or utcnow()
+            old_status = order.status
+            if action == "cancel" and order.work_type == "unplanned":
+                order.downtime_minutes = downtime_minutes(order)
+            order.status = target
+            if action == "close":
+                if payload.score is None:
+                    raise HTTPException(422, "Мастер должен поставить итоговую оценку от 1 до 5")
+                order.score = payload.score
+                order.closed_at = utcnow()
+                order.ai_review = {**(order.ai_review or {}), "master_score": payload.score}
+                assessment = db.scalar(select(AIAssessment).where(AIAssessment.order_id == order.id).order_by(AIAssessment.id.desc()).limit(1))
+                if assessment:
+                    assessment.master_score = payload.score
+            if action == "rework":
+                order.completed_at = None
+                order.score = None
+            if action == "cancel":
+                order.closed_at = utcnow()
+            audit(db, order, action, user.id, old_status, payload.reason or payload.comment)
+            notify(db, [order.assignee_id, order.master_id], "Статус наряда изменён", f"{order.number}: {old_status} → {target}", "status", order.id)
+            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+
+        return await run_idempotent(db, user, request, "transition", command_hash, 200, perform)
 
     @app.post("/api/orders/{id_}/complete")
-    async def complete(id_: int, payload: Completion, db: DB, user: User):
+    async def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
         require_role(user, "worker", "master", "admin")
         order = get_order(db, id_, user, lock=True)
-        if order.status != "in_progress":
-            raise HTTPException(409, "Завершить можно только наряд в работе")
-        if not db.get(FaultCode, payload.fault_code_id):
-            raise HTTPException(422, "Код неисправности не найден")
-        if order.work_type == "unplanned" and not db.scalar(select(Photo.id).where(Photo.order_id == order.id, Photo.kind == "after")):
-            raise HTTPException(422, "Для внеплановой работы добавьте фото после выполнения")
-        materials = []
-        for usage in payload.materials:
-            material = db.get(Material, usage.material_id)
-            if not material:
-                raise HTTPException(422, f"Материал {usage.material_id} не найден")
-            materials.append({"material_id": material.id, "name": material.name, "unit": material.unit, "quantity": usage.quantity})
-            db.add(MaterialWriteoff(order_id=order.id, material_id=material.id, quantity=usage.quantity, author_id=user.id))
-        previous_materials = (order.completion or {}).get("materials", [])
-        accumulated = {m["material_id"]: dict(m) for m in previous_materials}
-        for material in materials:
-            if material["material_id"] in accumulated:
-                accumulated[material["material_id"]]["quantity"] += material["quantity"]
-            else:
-                accumulated[material["material_id"]] = material
-        order.completion = {**payload.model_dump(exclude={"materials"}), "materials": list(accumulated.values())}
-        order.completed_at = utcnow()
-        if order.work_type == "unplanned":
-            order.downtime_minutes = round((order.completed_at - aware(order.created_at)).total_seconds() / 60, 1)
-        order.status = "completed"
-        audit(db, order, "complete", user.id, "in_progress", payload.work_done)
-        order.ai_review = AIReviewStub.review(db, order)
-        db.add(AIAssessment(order_id=order.id, **order.ai_review))
-        order.status = "ai_review"
-        audit(db, order, "ai_review", user.id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
-        notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
-        return await changed(db, order)
+        command_hash = json_hash(payload.model_dump())
+
+        async def perform():
+            if order.status != "in_progress":
+                raise HTTPException(409, "Завершить можно только наряд в работе")
+            if not db.get(FaultCode, payload.fault_code_id):
+                raise HTTPException(422, "Код неисправности не найден")
+            if order.work_type == "unplanned" and not db.scalar(select(Photo.id).where(Photo.order_id == order.id, Photo.kind == "after")):
+                raise HTTPException(422, "Для внеплановой работы добавьте фото после выполнения")
+            materials = []
+            for usage in payload.materials:
+                material = db.get(Material, usage.material_id)
+                if not material:
+                    raise HTTPException(422, f"Материал {usage.material_id} не найден")
+                materials.append({"material_id": material.id, "name": material.name, "unit": material.unit, "quantity": usage.quantity})
+                db.add(MaterialWriteoff(order_id=order.id, material_id=material.id, quantity=usage.quantity, author_id=user.id))
+            previous_materials = (order.completion or {}).get("materials", [])
+            accumulated = {m["material_id"]: dict(m) for m in previous_materials}
+            for material in materials:
+                if material["material_id"] in accumulated:
+                    accumulated[material["material_id"]]["quantity"] += material["quantity"]
+                else:
+                    accumulated[material["material_id"]] = material
+            order.completion = {**payload.model_dump(exclude={"materials"}), "materials": list(accumulated.values())}
+            order.completed_at = utcnow()
+            if order.work_type == "unplanned":
+                order.downtime_minutes = round((order.completed_at - aware(order.created_at)).total_seconds() / 60, 1)
+            order.status = "completed"
+            audit(db, order, "complete", user.id, "in_progress", payload.work_done)
+            order.ai_review = AIReviewStub.review(db, order)
+            db.add(AIAssessment(order_id=order.id, **order.ai_review))
+            order.status = "ai_review"
+            audit(db, order, "ai_review", user.id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
+            notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
+            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+
+        return await run_idempotent(db, user, request, "complete", command_hash, 200, perform)
 
     @app.post("/api/orders/{id_}/photos", status_code=201)
-    async def upload_photo(id_: int, db: DB, user: User, file: UploadFile = File(...), kind: str = Form(...)):
+    async def upload_photo(id_: int, db: DB, user: User, request: Request, file: UploadFile = File(...), kind: str = Form(...)):
         require_role(user, "worker", "master", "admin")
         order = get_order(db, id_, user, lock=True)
-        if order.status in TERMINAL or order.status == "ai_review":
-            raise HTTPException(409, "Фотографии нельзя менять после сдачи или закрытия наряда")
         if kind not in ["before", "after"]:
             raise HTTPException(422, "Тип фото: before или after")
-        count = db.scalar(select(func.count()).select_from(Photo).where(Photo.order_id == id_, Photo.kind == kind))
-        if count >= 5:
-            raise HTTPException(422, "Можно загрузить не более 5 фотографий каждого типа")
         data = await file.read(10 * 1024 * 1024 + 1)
         await file.close()
         if len(data) > 10 * 1024 * 1024:
             raise HTTPException(413, "Размер фото не должен превышать 10 МБ")
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", Image.DecompressionBombWarning)
-                with Image.open(io.BytesIO(data)) as original:
-                    original.verify()
-                with Image.open(io.BytesIO(data)) as original:
-                    photo_image = ImageOps.exif_transpose(original).convert("RGB")
-                    photo_image.thumbnail((1920, 1920))
-                    output = io.BytesIO()
-                    photo_image.save(output, format="JPEG", quality=82, optimize=True)
-        except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-            raise HTTPException(422, "Файл не является допустимым изображением")
-        photo = Photo(order_id=id_, kind=kind, data=output.getvalue(), author_id=user.id)
-        db.add(photo)
-        audit(db, order, "photo", user.id, order.status, f"Добавлена фотография: {kind}")
-        db.commit()
-        await realtime.publish("orders.updated", id_)
-        return photo_dict(db, photo)
+        command_hash = request_hash(str(id_), kind, hashlib.sha256(data).hexdigest())
+
+        async def perform():
+            if order.status in TERMINAL or order.status == "ai_review":
+                raise HTTPException(409, "Фотографии нельзя менять после сдачи или закрытия наряда")
+            count = db.scalar(select(func.count()).select_from(Photo).where(Photo.order_id == id_, Photo.kind == kind))
+            if count >= 5:
+                raise HTTPException(422, "Можно загрузить не более 5 фотографий каждого типа")
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", Image.DecompressionBombWarning)
+                    with Image.open(io.BytesIO(data)) as original:
+                        original.verify()
+                    with Image.open(io.BytesIO(data)) as original:
+                        photo_image = ImageOps.exif_transpose(original).convert("RGB")
+                        photo_image.thumbnail((1920, 1920))
+                        output = io.BytesIO()
+                        photo_image.save(output, format="JPEG", quality=82, optimize=True)
+            except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+                raise HTTPException(422, "Файл не является допустимым изображением")
+            photo = Photo(order_id=id_, kind=kind, data=output.getvalue(), author_id=user.id)
+            db.add(photo)
+            audit(db, order, "photo", user.id, order.status, f"Добавлена фотография: {kind}")
+            db.flush()
+            return photo_dict(db, photo), [("orders.updated", id_)]
+
+        return await run_idempotent(db, user, request, "photo_upload", command_hash, 201, perform)
 
     @app.get("/api/photos/{id_}")
     def get_photo(id_: int, db: DB, user: User):

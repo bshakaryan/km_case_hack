@@ -61,9 +61,46 @@ class _NaryadAppState extends State<NaryadApp> {
     localizationsDelegates: GlobalMaterialLocalizations.delegates,
     home: ListenableBuilder(
       listenable: controller,
-      builder: (context, _) => controller.user == null
-          ? LoginScreen(controller: controller)
-          : WorkspaceScreen(controller: controller),
+      builder: (context, _) {
+        if (controller.restoring && controller.user == null) {
+          return const _RestoringScreen();
+        }
+        return controller.user == null
+            ? LoginScreen(controller: controller)
+            : WorkspaceScreen(controller: controller);
+      },
     ),
   );
+}
+
+class _RestoringScreen extends StatelessWidget {
+  const _RestoringScreen();
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Scaffold(
+      backgroundColor: colors.surface,
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.construction, size: 72, color: colors.primary),
+            const SizedBox(height: 16),
+            Text(
+              'НарядAI',
+              style: Theme.of(
+                context,
+              ).textTheme.headlineMedium?.copyWith(color: colors.primary),
+            ),
+            const SizedBox(height: 24),
+            const SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(strokeWidth: 3),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

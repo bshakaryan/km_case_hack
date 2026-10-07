@@ -37,12 +37,24 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   @override
   void initState() {
     super.initState();
+    _seedFromCache();
     unawaited(_load());
     _timer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (widget.controller.offline) return;
       if (!_busy && mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
         unawaited(_load(silent: true));
       }
     });
+  }
+
+  void _seedFromCache() {
+    for (final item in widget.controller.orders) {
+      if (item.id == widget.orderId) {
+        _order = item;
+        _loading = false;
+        break;
+      }
+    }
   }
 
   @override

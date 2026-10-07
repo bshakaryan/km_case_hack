@@ -143,6 +143,19 @@ class Notification(Base):
     dedupe_key: Mapped[str | None] = mapped_column(String(180))
 
 
+class ClientCommand(Base):
+    __tablename__ = "client_commands"
+    __table_args__ = (UniqueConstraint("employee_id", "client_id", name="uq_client_command_employee_client"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    client_id: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(40))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_status: Mapped[int | None] = mapped_column(Integer)
+    response_body: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class IntegrationLog(Base):
     __tablename__ = "integration_logs"
     id: Mapped[int] = mapped_column(primary_key=True)

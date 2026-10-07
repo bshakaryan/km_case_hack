@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../data/app_controller.dart';
+import '../data/local_store.dart';
 import '../data/models.dart';
 import '../ui.dart';
 import 'create_order_screen.dart';
@@ -36,6 +39,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) _refresh(silent: true);
+    if (state == AppLifecycleState.paused) {
+      unawaited(widget.controller.flushSnapshot());
+    }
   }
 
   Future<void> _refresh({bool silent = false}) async {
@@ -66,6 +72,26 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       ),
     );
     if (mounted && order != null) openOrder(order.id);
+  }
+
+  String commandLabel(OutboxCommand command) => switch (command.kind) {
+    OutboxKind.createOrder => 'Создание наряда',
+    OutboxKind.transition => 'Переход по наряду',
+    OutboxKind.complete => 'Сдача отчёта',
+    OutboxKind.uploadPhoto => 'Загрузка фото',
+    OutboxKind.markRead => 'Отметка о прочтении',
+    _ => command.kind,
+  };
+
+  Future<void> showSyncQueue() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => SyncQueueDialog(
+        controller: widget.controller,
+        commandLabel: commandLabel,
+      ),
+    );
+    if (mounted) _refresh(silent: true);
   }
 
   void showOrders(String? filter, {int? assignee}) => setState(() {
@@ -190,6 +216,52 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                 ),
               ),
             ),
+            if (c.offline)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 8,
+                ),
+                decoration: const BoxDecoration(
+                  color: Color(0xfffff8e1),
+                  border: Border(bottom: BorderSide(color: line)),
+                ),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 680),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.cloud_off_outlined,
+                          size: 16,
+                          color: Color(0xff8c6d00),
+                        ),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            'Нет соединения. Действия сохраняются на устройстве и отправятся после восстановления связи.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xff6b5300),
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => _refresh(),
+                          tooltip: 'Повторить соединение',
+                          visualDensity: VisualDensity.compact,
+                          icon: const Icon(
+                            Icons.sync,
+                            size: 16,
+                            color: Color(0xff8c6d00),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             Expanded(
               child: RefreshIndicator(
                 onRefresh: () => _refresh(),
@@ -236,6 +308,29 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                               action: TextButton(
                                 onPressed: () => _refresh(),
                                 child: const Text('Повторить обновление'),
+                              ),
+                            ),
+                          ),
+                        if (c.hasPendingWrites || c.conflictCommands.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 16),
+                            child: InfoPanel(
+                              c.conflictCommands.isEmpty
+                                  ? 'На устройстве ${c.outbox.where((item) => item.state != OutboxState.conflict).length} действие(й) ожидает отправки после восстановления связи.'
+                                  : 'Некоторые сохранённые действия требуют решения: сервер их не принял.',
+                              color: c.conflictCommands.isEmpty
+                                  ? navy
+                                  : danger,
+                              icon: c.conflictCommands.isEmpty
+                                  ? Icons.sync
+                                  : Icons.warning_amber_outlined,
+                              action: TextButton(
+                                onPressed: showSyncQueue,
+                                child: Text(
+                                  c.conflictCommands.isEmpty
+                                      ? 'Открыть очередь'
+                                      : 'Решить конфликт',
+                                ),
                               ),
                             ),
                           ),
@@ -363,6 +458,127 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
           ),
         ],
       ),
+    );
+  }
+}
+
+class SyncQueueDialog extends StatelessWidget {
+  const SyncQueueDialog({
+    required this.controller,
+    required this.commandLabel,
+    super.key,
+  });
+  final AppController controller;
+  final String Function(OutboxCommand) commandLabel;
+
+  Future<void> _retry(BuildContext context, OutboxCommand command) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    await controller.retryCommand(command.commandId);
+    messenger.showSnackBar(
+      SnackBar(content: Text('${commandLabel(command)}: отправка снова.')),
+    );
+    if (navigator.mounted) navigator.pop();
+  }
+
+  Future<void> _discard(BuildContext context, OutboxCommand command) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить команду?'),
+        content: const Text(
+          'Действие не будет отправлено на сервер. Зависимые команды (фото, сдача) тоже будут удалены.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Оставить'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await controller.discardCommand(command.commandId);
+    messenger.showSnackBar(
+      SnackBar(content: Text('${commandLabel(command)} удалено.')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final pending = controller.outbox
+            .where((item) => item.state != OutboxState.conflict)
+            .toList();
+        final conflicts = controller.conflictCommands;
+        return AlertDialog(
+          title: const Text('Очередь отправки'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                if (pending.isEmpty && conflicts.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Text('Сохранённых действий нет.'),
+                  ),
+                for (final command in pending)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.sync, color: navy),
+                    title: Text(commandLabel(command)),
+                    subtitle: Text(
+                      'Ожидает отправки · ${dateLabel(DateTime.fromMillisecondsSinceEpoch(command.createdAt))}',
+                    ),
+                  ),
+                for (final command in conflicts)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(
+                      Icons.warning_amber_outlined,
+                      color: danger,
+                    ),
+                    title: Text(commandLabel(command)),
+                    subtitle: Text(
+                      command.lastError != null && command.lastError!.isNotEmpty
+                          ? command.lastError!
+                          : 'Сервер не принял действие',
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          onPressed: () => _retry(context, command),
+                          tooltip: 'Отправить снова',
+                          icon: const Icon(Icons.replay),
+                        ),
+                        IconButton(
+                          onPressed: () => _discard(context, command),
+                          tooltip: 'Удалить команду',
+                          icon: const Icon(Icons.delete_outline, color: danger),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Закрыть'),
+            ),
+          ],
+        );
+      },
     );
   }
 }
