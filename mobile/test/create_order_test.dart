@@ -230,7 +230,10 @@ void main() {
       await _fillTask(tester);
 
       expect(find.textContaining('Иван Тестовый'), findsOneWidget);
-      expect(find.textContaining('Свободен · В очереди: 0'), findsOneWidget);
+      expect(
+        find.textContaining('Свободен · ожидают начала: 0'),
+        findsOneWidget,
+      );
       await tester.tap(find.widgetWithText(FilledButton, 'Выдать наряд'));
       await tester.pumpAndSettle();
 

@@ -55,7 +55,7 @@ void main() {
         ),
       ),
     );
-    expect(find.text('Принят в работу'), findsOneWidget);
+    expect(find.text('Принят · ожидает начала'), findsOneWidget);
     expect(find.text('Ожидает синхронизации'), findsOneWidget);
     await tester.pumpWidget(
       MaterialApp(
@@ -106,7 +106,10 @@ void main() {
 
     expect((await store.outbox()).single.state, OutboxState.pending);
     expect(controller.orders.single.status, 'accepted');
-    expect(find.text('Сервер подтвердил: Принят в работу'), findsNothing);
+    expect(
+      find.text('Задание принято. Это ваше единственное текущее задание.'),
+      findsNothing,
+    );
     expect(
       find.text('Действие сохранено на устройстве. Ожидает отправки.'),
       findsOneWidget,
@@ -186,7 +189,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(await store.outbox(), isEmpty);
-    expect(find.text('Сервер подтвердил: Принят в работу'), findsOneWidget);
+    expect(
+      find.text('Задание принято. Это ваше единственное текущее задание.'),
+      findsOneWidget,
+    );
     expect(find.text('Ожидает синхронизации'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });

@@ -97,7 +97,7 @@ def main():
     assert analytics["summary"]["total"] >= 500 and analytics["is_stub"] is True
     request("/api/notifications", worker)
     integrations = request("/api/integrations", master)
-    assert integrations["ai"]["mode"] == "stub" and integrations["native"]["mode"] == "stub"
+    assert integrations["ai"]["mode"] == "stub" and integrations["native"]["mode"] in ("stub", "fcm")
     print(f"PASS: auth, RBAC, seed, full lifecycle, mandatory photo, protected media, audit, Excel, analytics. Order {order['number']}.")
 
 

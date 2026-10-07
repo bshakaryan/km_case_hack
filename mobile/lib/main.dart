@@ -1,8 +1,13 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'data/app_controller.dart';
+import 'data/push_service.dart';
 import 'screens/login_screen.dart';
+import 'screens/order_detail_screen.dart';
 import 'screens/workspace_screen.dart';
 import 'ui.dart';
 
@@ -21,7 +26,10 @@ class NaryadApp extends StatefulWidget {
 class _NaryadAppState extends State<NaryadApp> {
   late final AppController controller;
   final navigatorKey = GlobalKey<NavigatorState>();
+  PushService? push;
+  StreamSubscription<int>? pushTaps;
   bool hadSession = false;
+
   void sessionChanged() {
     final active = controller.user != null;
     if (hadSession && !active) {
@@ -32,12 +40,41 @@ class _NaryadAppState extends State<NaryadApp> {
       });
     }
     hadSession = active;
+    if (active) _openPushOrderIfAny();
+  }
+
+  // Opens a notification tapped before the session was ready; consumed once.
+  void _openPushOrderIfAny() {
+    final orderId = controller.consumePendingPushOrder();
+    if (orderId == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      navigatorKey.currentState?.push<void>(
+        MaterialPageRoute(
+          builder: (_) =>
+              OrderDetailScreen(controller: controller, orderId: orderId),
+        ),
+      );
+    });
   }
 
   @override
   void initState() {
     super.initState();
-    controller = widget.controller ?? AppController();
+    // Firebase only for the real entry point: widget.controller (tests and
+    // embedded runs) keeps the plugin-free NoopPushService path.
+    if (widget.controller == null && !kIsWeb) {
+      push = FirebasePushService();
+    }
+    controller = widget.controller ?? AppController(pushService: push);
+    if (push != null) {
+      pushTaps = push!.orderTaps.listen(controller.openOrderFromPush);
+      unawaited(
+        push!.init().catchError((Object failure) {
+          debugPrint('[naryad.push] init failed: $failure');
+        }),
+      );
+    }
     hadSession = controller.user != null;
     controller.addListener(sessionChanged);
     controller.restoreSession();
@@ -45,6 +82,7 @@ class _NaryadAppState extends State<NaryadApp> {
 
   @override
   void dispose() {
+    unawaited(pushTaps?.cancel());
     controller.removeListener(sessionChanged);
     if (widget.controller == null) controller.dispose();
     super.dispose();

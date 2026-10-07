@@ -3,6 +3,7 @@
 Synthetic catalog rows enter the real SQLAlchemy dialect decoders. This checks
 reflection compatibility only; it does not exercise PostgreSQL transactions.
 """
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -37,8 +38,15 @@ class CatalogInspector:
             else:
                 format_type = str(column.type.compile(dialect=self.dialect)).lower()
             rows.append({"table_name": name, "name": column.name, "format_type": format_type,
+                "collation": None,
                 "default": f"nextval('{name}_id_seq'::regclass)" if column.primary_key else None,
                 "generated": None, "not_null": not column.nullable, "identity_options": None, "comment": None})
+        if "named_type_loader" in inspect.signature(self.dialect._get_columns_info).parameters:
+            # SQLAlchemy 2.1 supplies domains/enums through a named-type loader and
+            # expects a `collation` entry in every synthetic catalog row.
+            loader = SimpleNamespace(enums={}, domains={})
+            return self.dialect._get_columns_info(rows, loader, None)[(None, name)]
+        # SQLAlchemy 2.0 signature: (rows, domains, enums, schema).
         return self.dialect._get_columns_info(rows, {}, {}, None)[(None, name)]
 
     def get_pk_constraint(self, name):
@@ -51,13 +59,20 @@ class CatalogInspector:
         return dict(self.dialect.get_multi_unique_constraints(None, **self.arguments)).get((None, name), [])
 
     def get_indexes(self, name):
-        rows = [{"indrelid": 100, "relname_index": item.name, "elements": [column.name for column in item.columns],
-                 "elements_is_expr": [False for _ in item.columns], "indnkeyatts": len(item.columns),
-                 "indisunique": item.unique, "indoption": [0 for _ in item.columns], "has_constraint": False,
-                 "reloptions": None, "amname": "btree", "filter_definition": None, "indnullsnotdistinct": False}
+        # Catalog aliases differ between SQLAlchemy 2.0 and 2.1. Both still
+        # enter the installed dialect's decoder rather than mocking its output.
+        rows = [{"indrelid": 100, "relname": item.name, "relname_index": item.name,
+                 "amname": "btree", "elements": [column.name for column in item.columns],
+                 "elements_is_expr": [False for _ in item.columns], "elements_opclass": [0 for _ in item.columns],
+                 "indnkeyatts": len(item.columns), "indisunique": item.unique, "indisvalid": True,
+                 "indoption": [0 for _ in item.columns], "has_constraint": False, "reloptions": None,
+                 "relam": 403, "filter_definition": None, "indnullsnotdistinct": False}
                 for item in self.table.indexes]
         self.dialect._get_table_oids = lambda *args, **kwargs: [(100, name)]
-        connection = SimpleNamespace(execute=lambda *args, **kwargs: SimpleNamespace(mappings=lambda: iter(rows)))
+        connection = SimpleNamespace(
+            execute=lambda *args, **kwargs: SimpleNamespace(mappings=lambda: iter(rows), all=lambda: iter(())),
+            scalar=lambda *args, **kwargs: 403,  # btree access-method oid for SQLAlchemy 2.1
+        )
         return dict(self.dialect.get_multi_indexes(connection, **self.arguments)).get((None, name), [])
 
     def get_foreign_keys(self, name):

@@ -11,3 +11,5 @@ uploads
 *.log
 test-results
 playwright-report
+**/secrets
+*service-account*.json

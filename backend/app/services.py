@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from .models import Area, Brigade, Employee, Equipment, IntegrationLog, Notification, Order, OrderEvent, Photo, utcnow
+from .push import enqueue_push
 
 LOG = logging.getLogger(__name__)
 TERMINAL = {"closed", "cancelled"}
@@ -117,21 +118,16 @@ def audit(db, order, action, actor_id, old_status=None, comment=""):
     db.add(OrderEvent(order_id=order.id, action=action, from_status=old_status, to_status=order.status, actor_id=actor_id, comment=comment))
 
 
-class NativePushStub:
-    """Persist an integration trace. This adapter never contacts a push provider."""
-    @staticmethod
-    def send(db, employee_id, title, order_id):
-        db.add(IntegrationLog(adapter="native_stub", operation="push_not_sent", payload={"employee_id": employee_id, "title": title, "order_id": order_id, "is_stub": True}))
-
-
 def notify(db, employee_ids, title, message, kind, order_id, dedupe_prefix=None):
     added = 0
     for employee_id in set(employee_ids):
         key = f"{dedupe_prefix}:{employee_id}" if dedupe_prefix else None
         if key and db.scalar(select(Notification.id).where(Notification.dedupe_key == key)):
             continue
-        db.add(Notification(employee_id=employee_id, title=title, message=message, kind=kind, order_id=order_id, dedupe_key=key))
-        NativePushStub.send(db, employee_id, title, order_id)
+        notification = Notification(employee_id=employee_id, title=title, message=message, kind=kind, order_id=order_id, dedupe_key=key)
+        db.add(notification)
+        db.flush()
+        enqueue_push(db, notification)
         added += 1
     return added
 

@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 BACKEND = Path(__file__).resolve().parents[1]
-REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time")
+REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push")
 
 
 class SchemaCompatibilityError(RuntimeError):
@@ -42,8 +42,39 @@ def expected_schema(revision):
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.UniqueConstraint("employee_id", "client_id", name="uq_client_command_employee_client"),
         )
-    if revision == REVISIONS[2]:
+    if revision in REVISIONS[2:]:
         metadata.tables["orders"].append_column(sa.Column("assigned_at", sa.DateTime(timezone=True), nullable=False))
+    if revision == REVISIONS[3]:
+        # Exact DDL of immutable 0003_push.
+        sa.Table("device_tokens", metadata,
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("employee_id", sa.Integer(), sa.ForeignKey("employees.id"), nullable=False, index=True),
+            sa.Column("token", sa.String(4096), nullable=False, unique=True),
+            sa.Column("platform", sa.String(20), nullable=False),
+            sa.Column("app_version", sa.String(40), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        )
+        sa.Table("push_tasks", metadata,
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("notification_id", sa.Integer(), sa.ForeignKey("notifications.id"), nullable=True),
+            sa.Column("employee_id", sa.Integer(), sa.ForeignKey("employees.id"), nullable=False, index=True),
+            sa.Column("kind", sa.String(40), nullable=False),
+            sa.Column("title", sa.String(180), nullable=False),
+            sa.Column("message", sa.Text(), nullable=False),
+            sa.Column("order_id", sa.Integer(), nullable=True),
+            sa.Column("priority", sa.String(20), nullable=False),
+            sa.Column("payload", sa.JSON(), nullable=False),
+            sa.Column("status", sa.String(20), nullable=False),
+            sa.Column("attempts", sa.Integer(), nullable=False),
+            sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False, index=True),
+            sa.Column("last_error", sa.Text(), nullable=True),
+            sa.Column("provider_message_id", sa.String(180), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Index("ix_push_tasks_status_next", "status", "next_attempt_at"),
+        )
     return metadata
 
 

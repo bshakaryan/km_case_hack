@@ -264,6 +264,22 @@ class NaryadApi {
     await _object('/notifications/$id/read', method: 'POST');
   }
 
+  // Idempotent upsert of the device record for push delivery.
+  Future<Json> registerDevice(String token, {String? appVersion}) =>
+      _object(
+        '/devices',
+        method: 'POST',
+        body: {
+          'token': token,
+          'platform': 'android',
+          'app_version': ?appVersion,
+        },
+      );
+
+  // Idempotent removal of the device record on logout or session expiry.
+  Future<Json> unregisterDevice(String token) =>
+      _object('/devices/unregister', method: 'POST', body: {'token': token});
+
   Future<void> logout() async {
     try {
       await _object('/auth/logout', method: 'POST');

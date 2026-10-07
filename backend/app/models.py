@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -175,6 +175,39 @@ class MaterialWriteoff(Base):
     quantity: Mapped[float] = mapped_column(Float)
     author_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DeviceToken(Base):
+    __tablename__ = "device_tokens"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    token: Mapped[str] = mapped_column(String(4096), unique=True)
+    platform: Mapped[str] = mapped_column(String(20))
+    app_version: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PushTask(Base):
+    __tablename__ = "push_tasks"
+    __table_args__ = (Index("ix_push_tasks_status_next", "status", "next_attempt_at"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    notification_id: Mapped[int | None] = mapped_column(ForeignKey("notifications.id"))
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(180))
+    message: Mapped[str] = mapped_column(Text)
+    order_id: Mapped[int | None] = mapped_column(Integer)
+    priority: Mapped[str] = mapped_column(String(20), default="normal")
+    payload: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    provider_message_id: Mapped[str | None] = mapped_column(String(180))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AIAssessment(Base):

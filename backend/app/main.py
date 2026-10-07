@@ -25,8 +25,9 @@ from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
 from .migrations import upgrade_database
-from .models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
-from .schemas import Completion, Login, OrderCreate, OrderPatch, Transition
+from .models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
+from .push import StubSender, dispatch_push, env_int, get_sender
+from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPatch, Transition
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
 from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, audit, aware, downtime_minutes, effective_queue_statuses, employee_dict, iso, monitor_deadlines, notify, order_dict, photo_dict, queue_positions, shift_start, waiting_orders
@@ -57,6 +58,8 @@ def create_app(database_url=None, seed=True, monitor=True):
     sessions = session_factory(engine)
     realtime = Realtime()
     attempts = defaultdict(deque)
+    # One sender instance keeps the OAuth2 access token cached across dispatches.
+    push_sender = get_sender()
 
     def run_monitor():
         with sessions() as db:
@@ -74,6 +77,20 @@ def create_app(database_url=None, seed=True, monitor=True):
                 log.exception("Deadline monitor failed; retrying in five seconds")
             await asyncio.sleep(5)
 
+    def run_push():
+        with sessions() as db:
+            return dispatch_push(db, push_sender)
+
+    async def push_loop():
+        while True:
+            try:
+                await asyncio.to_thread(run_push)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Push dispatch failed; retrying")
+            await asyncio.sleep(max(1, env_int("PUSH_DISPATCH_SECONDS", 3)))
+
     @asynccontextmanager
     async def lifespan(app):
         upgrade_database(engine)
@@ -81,7 +98,12 @@ def create_app(database_url=None, seed=True, monitor=True):
             with sessions() as db:
                 seed_database(db)
         task = asyncio.create_task(deadline_loop()) if monitor else None
+        push_task = asyncio.create_task(push_loop()) if monitor and not isinstance(push_sender, StubSender) else None
         yield
+        if push_task:
+            push_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await push_task
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -617,6 +639,30 @@ def create_app(database_url=None, seed=True, monitor=True):
         await realtime.publish("notifications.updated")
         return {"ok": True}
 
+    @app.post("/api/devices", status_code=201)
+    def register_device(payload: DeviceRegistration, db: DB, user: User):
+        now = utcnow()
+        device = db.scalar(select(DeviceToken).where(DeviceToken.token == payload.token))
+        if device is None:
+            device = DeviceToken(token=payload.token, employee_id=user.id, platform=payload.platform, app_version=payload.app_version, created_at=now, last_seen_at=now)
+            db.add(device)
+        else:
+            device.employee_id = user.id
+            device.platform = payload.platform
+            device.app_version = payload.app_version
+            device.last_seen_at = now
+            device.revoked_at = None
+        db.commit()
+        return {"id": device.id, "token": device.token, "platform": device.platform, "app_version": device.app_version, "created_at": iso(device.created_at), "last_seen_at": iso(device.last_seen_at)}
+
+    @app.post("/api/devices/unregister")
+    def unregister_device(payload: DeviceUnregister, db: DB, user: User):
+        device = db.scalar(select(DeviceToken).where(DeviceToken.token == payload.token, DeviceToken.employee_id == user.id))
+        if device is not None and device.revoked_at is None:
+            device.revoked_at = utcnow()
+            db.commit()
+        return {"ok": True}
+
     def analytics_data(db, user, days, from_date, to_date, area_id, equipment_id, assignee_id, brigade_id):
         start = parse_date(from_date) if from_date else utcnow() - timedelta(days=days)
         end = parse_date(to_date, end=True) if to_date else utcnow()
@@ -673,7 +719,11 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.get("/api/integrations")
     def integrations(user: User):
         require_role(user, "master", "manager", "admin")
-        return {"ai": {"mode": "stub", "status": "demo", "description": "Детерминированная заглушка. Реальные LLM и компьютерное зрение не подключены. Итоговое решение принимает мастер."}, "native": {"mode": "stub", "status": "demo", "description": "Контракт мобильного приложения и push-адаптер. События сохраняются в БД; отправки на устройства нет."}, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
+        if isinstance(get_sender(), StubSender):
+            native = {"mode": "stub", "status": "demo", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
+        else:
+            native = {"mode": "fcm", "status": "active", "description": "Firebase Cloud Messaging (HTTP v1), Android. Доставка на устройства включена."}
+        return {"ai": {"mode": "stub", "status": "demo", "description": "Детерминированная заглушка. Реальные LLM и компьютерное зрение не подключены. Итоговое решение принимает мастер."}, "native": native, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
 
     @app.websocket("/api/ws")
     @app.websocket("/ws")

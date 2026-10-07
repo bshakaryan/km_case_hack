@@ -2,7 +2,7 @@ import io
 from datetime import timedelta
 from PIL import Image
 from sqlalchemy import func, select
-from app.models import AIAssessment, AuthSession, Employee, IntegrationLog, MaterialWriteoff, Notification, Order, OrderEvent, utcnow
+from app.models import AIAssessment, AuthSession, Employee, IntegrationLog, MaterialWriteoff, Notification, Order, OrderEvent, PushTask, utcnow
 from app.services import monitor_deadlines
 from conftest import auth_headers
 
@@ -217,7 +217,8 @@ def test_deadline_monitor_thresholds_deduplication_and_finished_exclusion(client
         assert len(list(db.scalars(select(Notification).where(Notification.order_id == first["id"], Notification.kind == "unaccepted")))) == 2
         assert not db.scalar(select(Notification).where(Notification.order_id == second["id"], Notification.kind == "unaccepted"))
         assert not db.scalar(select(Notification).where(Notification.order_id == third["id"], Notification.kind.in_(["overdue", "due_soon", "unaccepted"])))
-        assert db.scalar(select(IntegrationLog).where(IntegrationLog.adapter == "native_stub"))
+        # notify() enqueues push tasks in the same transaction as the notification.
+        assert db.scalar(select(PushTask).where(PushTask.employee_id.in_([6, 1])))
     assert not client.get(f"/api/orders/{third['id']}", headers=master).json()["is_overdue"]
 
 

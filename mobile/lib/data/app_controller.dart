@@ -10,6 +10,7 @@ import 'api.dart';
 import 'local_store.dart';
 import 'local_store_open.dart';
 import 'models.dart';
+import 'push_service.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -17,10 +18,14 @@ class AppController extends ChangeNotifier {
     FlutterSecureStorage? storage,
     NaryadApi Function(String)? apiFactory,
     LocalStore? localStore,
+    PushService? pushService,
   }) : api = api ?? NaryadApi(defaultBaseUrl),
        _storage = storage ?? const FlutterSecureStorage(),
        _apiFactory = apiFactory ?? ((url) => NaryadApi(url)),
-       _providedStore = localStore;
+       _providedStore = localStore,
+       // Default stays plugin-free: main.dart injects the real push service,
+       // so unit tests and injected controllers never touch Firebase.
+       _push = pushService ?? const NoopPushService();
 
   static const defaultBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -31,8 +36,11 @@ class AppController extends ChangeNotifier {
   final FlutterSecureStorage _storage;
   final NaryadApi Function(String) _apiFactory;
   final LocalStore? _providedStore;
+  final PushService _push;
   NaryadApi api;
   User? user;
+  // Order id from a tapped push that could not be opened yet (no session).
+  int? pendingPushOrderId;
   Json reference = {};
   List<Json> employees = [];
   List<WorkOrder> orders = [];
@@ -327,6 +335,40 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  // Push registration is best effort: a missing token or a rejected device
+  // record must never break login, restore or logout. The cap keeps a
+  // black-holed network from stalling the screen for the full HTTP timeout.
+  Future<void> _registerDevice(int session, NaryadApi source) async {
+    if (!_current(session)) return;
+    try {
+      await _push.registerWith(source).timeout(const Duration(seconds: 10));
+    } catch (failure) {
+      debugPrint('[naryad.push] device register skipped: $failure');
+    }
+  }
+
+  Future<void> _unregisterDevice() async {
+    try {
+      await _push.unregister().timeout(const Duration(seconds: 10));
+    } catch (failure) {
+      debugPrint('[naryad.push] device unregister skipped: $failure');
+    }
+  }
+
+  /// Records a tapped notification; opens once a session is available.
+  void openOrderFromPush(int orderId) {
+    if (orderId <= 0) return;
+    pendingPushOrderId = orderId;
+    if (user != null) _notify();
+  }
+
+  /// Returns the stored push target once and clears it.
+  int? consumePendingPushOrder() {
+    final orderId = pendingPushOrderId;
+    pendingPushOrderId = null;
+    return orderId;
+  }
+
   Future<void> login(String baseUrl, String login, String pin) async {
     // Validate before replacing a still-valid client.
     final next = _apiFactory(baseUrl);
@@ -379,6 +421,7 @@ class AppController extends ChangeNotifier {
         // Authentication succeeded; the dashboard displays its own load error.
       }
       if (_current(session) && storageWarning != null) error = storageWarning;
+      await _registerDevice(session, next);
       await _reloadOutbox();
     } catch (failure) {
       if (_current(session)) error = failure.toString();
@@ -471,6 +514,7 @@ class AppController extends ChangeNotifier {
       } catch (_) {
         // _refresh records offline/error state itself.
       }
+      await _registerDevice(session, next);
       await _reloadOutbox();
     } catch (failure) {
       if (_current(session)) {
@@ -540,14 +584,19 @@ class AppController extends ChangeNotifier {
     } catch (_) {
       // _refresh records offline/error state itself.
     }
+    await _registerDevice(session, next);
   }
 
   Future<void> logout() async {
     final previous = api;
+    // Unregister while the bearer is valid, before server logout revokes it.
+    // Local state is cleared below immediately, without waiting for the network.
+    final pushUnregister = _unregisterDevice();
     final cachePrefix = user == null ? null : _scope('');
-    final revocation = previous.token == null
-        ? Future<void>.value()
-        : previous.logout();
+    final revocation = () async {
+      await pushUnregister;
+      if (previous.token != null) await previous.logout();
+    }();
     // Listen immediately: network failure may precede secure storage completion.
     Object? revokeFailure;
     final revokeResult = revocation.catchError((Object e) {
@@ -556,6 +605,7 @@ class AppController extends ChangeNotifier {
     final session = ++_session;
     api = _apiFactory(previous.baseUrl);
     _resetData();
+    pendingPushOrderId = null;
     error = null;
     _notify();
     if (cachePrefix != null) unawaited(_clearLocalData(cachePrefix));
@@ -579,9 +629,12 @@ class AppController extends ChangeNotifier {
   }
 
   void _expireSession() {
+    // Best effort, started before the bearer token is dropped.
+    unawaited(_unregisterDevice());
     ++_session;
     api.token = null;
     _resetData();
+    pendingPushOrderId = null;
     error = 'Сессия истекла. Войдите снова.';
     unawaited(
       _store(() => _storage.delete(key: _sessionKey)).catchError((Object _) {}),

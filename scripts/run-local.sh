@@ -19,8 +19,12 @@ export SEED_DEMO="${SEED_DEMO:-true}"
 export CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}"
 export TZ=Asia/Almaty
 
+# FCM delivery requires explicit credentials and PUSH_ENABLED=true.
+export FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID:-km-case-hack}"
+export PUSH_ENABLED="${PUSH_ENABLED:-false}"
+
 cd "$PROJECT_DIR/backend"
-"$PYTHON_BIN" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+"$PYTHON_BIN" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 cd "$PROJECT_DIR/frontend"
 node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort &

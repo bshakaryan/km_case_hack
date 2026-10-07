@@ -22,3 +22,6 @@ coverage/
 .coverage
 playwright-report/
 test-results/
+backend/secrets/*
+!backend/secrets/.gitkeep
+*service-account*.json

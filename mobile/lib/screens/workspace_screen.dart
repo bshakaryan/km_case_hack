@@ -351,7 +351,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                           ),
                         if (page == 2) ...[
                           const InfoPanel(
-                            'Уведомления обновляются, пока приложение открыто. Push в фоне будет подключён отдельным этапом.',
+                            'Push-уведомления теперь приходят и в фоне: приложение может быть закрыто, а событие или аварийный наряд всё равно придёт со звуком. Нажмите на событие, чтобы сразу открыть наряд.',
                             icon: Icons.notifications_none,
                           ),
                           const SizedBox(height: 16),
