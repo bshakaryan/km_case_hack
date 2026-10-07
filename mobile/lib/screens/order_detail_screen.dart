@@ -88,9 +88,42 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   bool get _master => widget.controller.user?.isMaster ?? false;
   bool get _canExecute =>
-      _master ||
-      ((widget.controller.user?.isWorker ?? false) &&
-          _order?.data['assignee_id'] == widget.controller.user?.id);
+      (widget.controller.user?.isWorker ?? false) &&
+      _order?.data['assignee_id'] == widget.controller.user?.id;
+
+  bool _hasOtherOpenOrder(WorkOrder order) {
+    final userId = widget.controller.user?.id;
+    if (userId == null) return false;
+    const openStatuses = {'accepted', 'queued', 'in_progress', 'paused'};
+    return widget.controller.orders.any((candidate) {
+      final assigneeId = (candidate.data['assignee_id'] as num?)?.toInt();
+      return candidate.id != order.id &&
+          assigneeId == userId &&
+          openStatuses.contains(candidate.status);
+    });
+  }
+
+  bool _hasOtherExecutingOrder(WorkOrder order) {
+    final userId = widget.controller.user?.id;
+    if (userId == null) return false;
+    return widget.controller.orders.any((candidate) {
+      final assigneeId = (candidate.data['assignee_id'] as num?)?.toInt();
+      return candidate.id != order.id &&
+          assigneeId == userId &&
+          {'in_progress', 'paused'}.contains(candidate.status);
+    });
+  }
+
+  bool _hasOtherInProgressOrder(WorkOrder order) {
+    final userId = widget.controller.user?.id;
+    if (userId == null) return false;
+    return widget.controller.orders.any((candidate) {
+      final assigneeId = (candidate.data['assignee_id'] as num?)?.toInt();
+      return candidate.id != order.id &&
+          assigneeId == userId &&
+          candidate.status == 'in_progress';
+    });
+  }
 
   Future<void> _act(String action, {String? reason, double? score}) async {
     if (_busy) return;
@@ -116,6 +149,10 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           content: Text(
             updated.pendingSync || widget.controller.isOrderPending(updated.id)
                 ? 'Действие сохранено на устройстве. Ожидает отправки.'
+                : action == 'queue' && updated.status == 'queued'
+                ? 'Задание поставлено в очередь · место ${updated.data['queue_position'] ?? '—'}'
+                : action == 'accept'
+                ? 'Задание принято. Это ваше единственное текущее задание.'
                 : 'Сервер подтвердил: ${_status(updated.status)}',
           ),
         ),
@@ -435,6 +472,13 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           runSpacing: 8,
           children: [
             _tag(_status(order.status), _blue),
+            if (order.data['queue_position'] is num)
+              _tag(
+                (order.data['queue_position'] as num).toInt() == 1
+                    ? 'Следующий к началу'
+                    : 'Очередь · место ${order.data['queue_position']}',
+                app_ui.navy,
+              ),
             if (order.pendingSync || widget.controller.isOrderPending(order.id))
               _tag('Ожидает синхронизации', const Color(0xFF8C5A00)),
             _tag(
@@ -744,7 +788,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   }
 
   Widget? _actions(WorkOrder order) {
-    if (!_canExecute ||
+    if ((!_canExecute && !(_master && order.status == 'ai_review')) ||
         {
           'closed',
           'cancelled',
@@ -756,6 +800,11 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     String? primary;
     VoidCallback? action;
     final secondary = <Widget>[];
+    final hasOtherOpenOrder = _hasOtherOpenOrder(order);
+    final queuePosition = (order.data['queue_position'] as num?)?.toInt();
+    final startBlocked =
+        _hasOtherExecutingOrder(order) ||
+        (queuePosition != null && queuePosition > 1);
     if (order.status == 'ai_review') {
       if (!_master) return null;
       primary = 'Принять работу';
@@ -769,13 +818,44 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
       );
     } else if (order.status == 'issued') {
-      primary = 'Принять задание';
-      action = () => _act('accept');
-    } else if ({'accepted', 'queued', 'rework'}.contains(order.status)) {
-      primary = order.status == 'rework'
-          ? 'Начать доработку'
-          : 'Начать исполнение';
+      if (hasOtherOpenOrder) {
+        primary = 'В очередь';
+        action = () => _act('queue');
+      } else {
+        primary = 'Принять задание';
+        action = () => _act('accept');
+        secondary.add(
+          OutlinedButton(
+            onPressed: _busy ? null : () => _act('queue'),
+            child: const Text('В очередь'),
+          ),
+        );
+      }
+    } else if (order.status == 'rework') {
+      if (hasOtherOpenOrder) {
+        primary = 'В очередь';
+        action = () => _act('queue');
+      } else {
+        primary = 'Принять доработку';
+        action = () => _act('accept');
+        secondary.add(
+          OutlinedButton(
+            onPressed: _busy ? null : () => _act('queue'),
+            child: const Text('В очередь'),
+          ),
+        );
+      }
+    } else if ({'accepted', 'queued'}.contains(order.status)) {
+      primary = 'Начать исполнение';
       action = () => _act('start');
+      if (order.status == 'accepted') {
+        secondary.add(
+          OutlinedButton(
+            onPressed: _busy ? null : () => _act('queue'),
+            child: const Text('В очередь'),
+          ),
+        );
+      }
     } else if (order.status == 'in_progress') {
       primary = 'Исполнено · заполнить отчёт';
       action = _complete;
@@ -788,14 +868,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     } else if (order.status == 'paused') {
       primary = 'Продолжить работу';
       action = () => _act('resume');
-    }
-    if ({'issued', 'accepted', 'rework'}.contains(order.status)) {
-      secondary.add(
-        OutlinedButton(
-          onPressed: _busy ? null : () => _act('queue'),
-          child: const Text('В очередь'),
-        ),
-      );
     }
     if ({'issued', 'accepted', 'queued'}.contains(order.status)) {
       secondary.add(
@@ -824,7 +896,13 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 minimumSize: const Size(double.infinity, 56),
                 backgroundColor: _blue,
               ),
-              onPressed: _busy ? null : action,
+              onPressed:
+                  _busy ||
+                      (primary == 'Начать исполнение' && startBlocked) ||
+                      (primary == 'Продолжить работу' &&
+                          _hasOtherInProgressOrder(order))
+                  ? null
+                  : action,
               child: _busy
                   ? const SizedBox(
                       width: 22,

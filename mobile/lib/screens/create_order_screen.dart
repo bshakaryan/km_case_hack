@@ -141,7 +141,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
         : employee['status'] == 'queued'
         ? 'Есть задания'
         : 'Свободен';
-    return '${employee['specialty'] ?? 'Специальность не указана'}\n$status · В очереди: $count';
+    return '${employee['specialty'] ?? 'Специальность не указана'}\n$status · ожидают начала: $count';
   }
 
   Color _employeeColor(Json employee) {

@@ -29,9 +29,7 @@ class OverviewScreen extends StatelessWidget {
           .where((o) => {'in_progress', 'paused'}.contains(o.status))
           .toList();
       final incoming =
-          active
-              .where((o) => {'issued', 'rework', 'accepted'}.contains(o.status))
-              .toList()
+          active.where((o) => {'issued', 'rework'}.contains(o.status)).toList()
             ..sort(
               (a, b) => (a.priority == 'emergency' ? 0 : 1).compareTo(
                 b.priority == 'emergency' ? 0 : 1,
@@ -86,10 +84,10 @@ class OverviewScreen extends StatelessWidget {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              onPressed: () => onFilter('queued'),
+              onPressed: () => onFilter('queue'),
               icon: const Icon(Icons.format_list_numbered),
               label: Text(
-                'Моя очередь · ${active.where((o) => o.status == 'queued').length}',
+                'Моя очередь к началу · ${active.where((o) => {'accepted', 'queued'}.contains(o.status)).length}',
               ),
             ),
           ),
@@ -314,8 +312,8 @@ class _EmployeeTile extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 e['current_order'] != null
-                    ? 'В работе ${e['current_order']}\nДругих назначений: ${e['queue_count']}'
-                    : 'Назначений в ожидании: ${e['queue_count']}',
+                    ? 'В работе ${e['current_order']}\nОжидают начала: ${e['queue_count']}'
+                    : 'Ожидают начала: ${e['queue_count']}',
                 style: const TextStyle(fontSize: 14, color: muted),
               ),
               if (onAssign != null) ...[

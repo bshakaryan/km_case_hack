@@ -86,6 +86,18 @@ const navigation = [
   { id: "employees" as Page, name: "Сотрудники", icon: Users },
   { id: "analytics" as Page, name: "Аналитика", icon: ChartNoAxesCombined },
 ];
+const pageRoles: Record<Page, string[]> = {
+  dashboard: ["master", "worker", "manager", "admin"],
+  orders: ["master", "manager", "admin"],
+  employees: ["master", "manager", "admin"],
+  analytics: ["master", "manager", "admin"],
+  reference: ["master", "admin"],
+  integrations: ["master", "manager", "admin"],
+};
+
+function canOpenPage(role: string, target: Page) {
+  return pageRoles[target].includes(role);
+}
 
 function Brand() {
   return (
@@ -320,49 +332,54 @@ export default function App() {
     };
   }, [logout]);
 
-  const refresh = useCallback((revalidate = true): Promise<void> => {
-    const capturedToken = token();
-    if (!capturedToken) return Promise.resolve();
-    if (pending.current?.token === capturedToken) {
-      if (revalidate) refreshAgain.current = true;
-      return pending.current.promise;
-    }
-    const generation = session.current;
-    const current = () =>
-      generation === session.current && capturedToken === token();
-    const promise = (async () => {
-      try {
-        do {
-          refreshAgain.current = false;
-          const [r, o, e, d, n] = await Promise.all([
-            api<Reference>("/reference"),
-            api<Order[]>("/orders?limit=5000"),
-            api<Employee[]>("/employees"),
-            api<Dashboard>("/dashboard"),
-            api<Notice[]>("/notifications"),
-          ]);
-          if (!current()) return;
-          setReference(r);
-          setOrders(o);
-          setEmployees(e);
-          setDashboard(d);
-          setNotices(n);
-          setError("");
-          setLastUpdated(new Date().toISOString());
-          setVersion((v) => v + 1);
-        } while (current() && refreshAgain.current);
-      } catch (failure) {
-        if (current()) setError((failure as Error).message);
-      } finally {
-        if (current()) {
-          pending.current = null;
-          setLoading(false);
-        }
+  const refresh = useCallback(
+    (revalidate = true): Promise<void> => {
+      const capturedToken = token();
+      if (!capturedToken) return Promise.resolve();
+      if (pending.current?.token === capturedToken) {
+        if (revalidate) refreshAgain.current = true;
+        return pending.current.promise;
       }
-    })();
-    pending.current = { token: capturedToken, promise };
-    return promise;
-  }, []);
+      const generation = session.current;
+      const current = () =>
+        generation === session.current && capturedToken === token();
+      const promise = (async () => {
+        try {
+          do {
+            refreshAgain.current = false;
+            const [r, o, e, d, n] = await Promise.all([
+              api<Reference>("/reference"),
+              api<Order[]>("/orders?limit=5000"),
+              user?.role === "worker"
+                ? Promise.resolve([] as Employee[])
+                : api<Employee[]>("/employees"),
+              api<Dashboard>("/dashboard"),
+              api<Notice[]>("/notifications"),
+            ]);
+            if (!current()) return;
+            setReference(r);
+            setOrders(o);
+            setEmployees(e);
+            setDashboard(d);
+            setNotices(n);
+            setError("");
+            setLastUpdated(new Date().toISOString());
+            setVersion((v) => v + 1);
+          } while (current() && refreshAgain.current);
+        } catch (failure) {
+          if (current()) setError((failure as Error).message);
+        } finally {
+          if (current()) {
+            pending.current = null;
+            setLoading(false);
+          }
+        }
+      })();
+      pending.current = { token: capturedToken, promise };
+      return promise;
+    },
+    [user?.role],
+  );
 
   useEffect(() => {
     if (!user) return;
@@ -426,12 +443,14 @@ export default function App() {
     [],
   );
   const canManage = user?.role === "master" || user?.role === "admin";
+  const currentPage =
+    user && canOpenPage(user.role, page) ? page : ("dashboard" as Page);
   const title =
-    page === "dashboard" && user?.role === "worker"
+    currentPage === "dashboard" && user?.role === "worker"
       ? "Моя работа"
-      : navigation.find((n) => n.id === page)?.name ||
+      : navigation.find((n) => n.id === currentPage)?.name ||
         { reference: "Справочники", integrations: "Интеграции" }[
-          page as "reference" | "integrations"
+          currentPage as "reference" | "integrations"
         ];
   const unread = notices.filter((n) => !n.read).length;
   const attention = attentionCounts(orders);
@@ -450,11 +469,13 @@ export default function App() {
     setCreate(true);
   }
   function navigate(next: Page) {
+    if (!user || !canOpenPage(user.role, next)) return;
     setPage(next);
     setMenu(false);
     setBoardContext((context) => ({ revision: context.revision + 1 }));
   }
   function inspectOrders(filters: Omit<BoardContext, "revision">) {
+    if (!user || !canOpenPage(user.role, "orders")) return;
     setPage("orders");
     setMenu(false);
     setBoardContext((context) => ({
@@ -520,43 +541,54 @@ export default function App() {
         </div>
         <div className="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</div>
         <nav>
-          {navigation.map(({ id, name, icon: Icon }) => (
-            <button
-              key={id}
-              className={page === id ? "active" : ""}
-              aria-current={page === id ? "page" : undefined}
-              onClick={() => navigate(id)}
-            >
-              <Icon size={20} />
-              <span>
-                {id === "dashboard" && user.role === "worker"
-                  ? "Моя работа"
-                  : name}
-              </span>
-              {id === "orders" && (
-                <span className="nav-count">{dashboard?.active || 0}</span>
-              )}
-            </button>
-          ))}
+          {navigation
+            .filter(({ id }) => canOpenPage(user.role, id))
+            .map(({ id, name, icon: Icon }) => (
+              <button
+                key={id}
+                className={currentPage === id ? "active" : ""}
+                aria-current={currentPage === id ? "page" : undefined}
+                onClick={() => navigate(id)}
+              >
+                <Icon size={20} />
+                <span>
+                  {id === "dashboard" && user.role === "worker"
+                    ? "Моя работа"
+                    : name}
+                </span>
+                {id === "orders" && (
+                  <span className="nav-count">{dashboard?.active || 0}</span>
+                )}
+              </button>
+            ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="nav-caption">СИСТЕМА</div>
-          <nav>
-            <button
-              className={page === "reference" ? "active" : ""}
-              onClick={() => navigate("reference")}
-            >
-              <BookOpen size={20} />
-              <span>Справочники</span>
-            </button>
-            <button
-              className={page === "integrations" ? "active" : ""}
-              onClick={() => navigate("integrations")}
-            >
-              <Plug size={20} />
-              <span>Интеграции</span>
-            </button>
-          </nav>
+          {(canOpenPage(user.role, "reference") ||
+            canOpenPage(user.role, "integrations")) && (
+            <>
+              <div className="nav-caption">СИСТЕМА</div>
+              <nav>
+                {canOpenPage(user.role, "reference") && (
+                  <button
+                    className={currentPage === "reference" ? "active" : ""}
+                    onClick={() => navigate("reference")}
+                  >
+                    <BookOpen size={20} />
+                    <span>Справочники</span>
+                  </button>
+                )}
+                {canOpenPage(user.role, "integrations") && (
+                  <button
+                    className={currentPage === "integrations" ? "active" : ""}
+                    onClick={() => navigate("integrations")}
+                  >
+                    <Plug size={20} />
+                    <span>Интеграции</span>
+                  </button>
+                )}
+              </nav>
+            </>
+          )}
           <div className="sidebar-status">
             <span className={`live-dot ${error ? "is-stale" : ""}`} />
             <div>
@@ -678,42 +710,46 @@ export default function App() {
           <div className="page-heading">
             <div>
               <div className="eyebrow">
-                {page === "dashboard"
+                {currentPage === "dashboard"
                   ? "ТЕКУЩАЯ СМЕНА"
-                  : page === "orders"
+                  : currentPage === "orders"
                     ? "ЗАДАНИЯ И ИСТОРИЯ"
                     : "РАБОЧЕЕ ПРОСТРАНСТВО"}
               </div>
               <h1>{title}</h1>
               <p>
-                {page === "dashboard"
+                {currentPage === "dashboard"
                   ? user.role === "worker"
                     ? "Текущее задание и следующие действия."
                     : "Приоритеты, ход работ и решения мастера."
-                  : page === "orders"
+                  : currentPage === "orders"
                     ? "Назначение, выполнение и приёмка — в одном журнале."
-                    : page === "employees"
+                    : currentPage === "employees"
                       ? "Кто свободен, что выполняет и сколько назначений ожидает."
-                      : page === "analytics"
+                      : currentPage === "analytics"
                         ? "Результаты за период, показатели и исходные наряды."
-                        : page === "reference"
+                        : currentPage === "reference"
                           ? "Участки, оборудование, сотрудники и материалы."
                           : "Текущее состояние подключений."}
               </p>
             </div>
             <div className="page-actions">
-              {(page === "dashboard" || page === "orders") && (
+              {(currentPage === "dashboard" || currentPage === "orders") && (
                 <div className="shift-badge">
                   <CalendarDays size={17} />
                   <span>{dashboard?.shift_label || "Текущая смена"}</span>
                 </div>
               )}
-              {canManage && (page === "dashboard" || page === "orders") && (
-                <button className="button primary" onClick={() => openCreate()}>
-                  <Plus size={19} />
-                  Выдать наряд
-                </button>
-              )}
+              {canManage &&
+                (currentPage === "dashboard" || currentPage === "orders") && (
+                  <button
+                    className="button primary"
+                    onClick={() => openCreate()}
+                  >
+                    <Plus size={19} />
+                    Выдать наряд
+                  </button>
+                )}
             </div>
           </div>
           {error && (
@@ -724,9 +760,9 @@ export default function App() {
           )}
           {loading ? (
             <Loading />
-          ) : page === "dashboard" || page === "orders" ? (
+          ) : currentPage === "dashboard" || currentPage === "orders" ? (
             <>
-              {page === "dashboard" &&
+              {currentPage === "dashboard" &&
                 (user.role === "worker" ? (
                   <>
                     <SectionTitle
@@ -906,11 +942,11 @@ export default function App() {
                 </div>
               )}
               <OrderBoard
-                key={`${page}-${boardContext.revision}`}
+                key={`${currentPage}-${boardContext.revision}`}
                 orders={orders}
                 reference={reference}
                 onSelect={setSelected}
-                compact={page === "dashboard"}
+                compact={currentPage === "dashboard"}
                 initialFocus={boardContext.focus}
                 initialAssignee={boardContext.assigneeId}
                 initialEquipment={boardContext.equipmentId}
@@ -921,7 +957,7 @@ export default function App() {
                 user={user}
                 onCreate={() => openCreate()}
               />
-              {page === "dashboard" && user.role !== "worker" && (
+              {currentPage === "dashboard" && user.role !== "worker" && (
                 <section className="workforce-section">
                   <SectionTitle
                     title="Команда смены"
@@ -962,7 +998,7 @@ export default function App() {
                             {employee.current_order || "Нет текущей работы"}
                           </span>
                           <small>
-                            Других назначений: {employee.queue_count}
+                            Ожидают начала: {employee.queue_count}
                           </small>
                         </div>
                         <div className="team-actions">
@@ -995,7 +1031,7 @@ export default function App() {
                   </div>
                 </section>
               )}
-              {page === "dashboard" && (
+              {currentPage === "dashboard" && (
                 <div className="dashboard-bottom">
                   <div>
                     <ShieldCheck size={17} />
@@ -1005,7 +1041,7 @@ export default function App() {
                 </div>
               )}
             </>
-          ) : page === "employees" ? (
+          ) : currentPage === "employees" ? (
             <EmployeesPage
               employees={employees}
               orders={orders}
@@ -1013,7 +1049,7 @@ export default function App() {
               onSelect={setSelected}
               onCreate={canManage ? openCreate : undefined}
             />
-          ) : page === "analytics" ? (
+          ) : currentPage === "analytics" ? (
             <AnalyticsPage
               reference={reference}
               notify={notify}
@@ -1022,7 +1058,7 @@ export default function App() {
                 inspectOrders({ focus: "all", ...filters })
               }
             />
-          ) : page === "reference" ? (
+          ) : currentPage === "reference" ? (
             <ReferencePage
               reference={reference}
               user={user}
@@ -1059,6 +1095,26 @@ export default function App() {
           id={selected}
           reference={reference}
           user={user}
+          workerHasOpenOrder={orders.some(
+            (order) =>
+              String(order.assignee_id) === String(user.id) &&
+              String(order.id) !== String(selected) &&
+              ["accepted", "queued", "in_progress", "paused"].includes(
+                order.status,
+              ),
+          )}
+          workerHasActiveOrder={orders.some(
+            (order) =>
+              String(order.assignee_id) === String(user.id) &&
+              String(order.id) !== String(selected) &&
+              ["in_progress", "paused"].includes(order.status),
+          )}
+          workerHasInProgressOrder={orders.some(
+            (order) =>
+              String(order.assignee_id) === String(user.id) &&
+              String(order.id) !== String(selected) &&
+              order.status === "in_progress",
+          )}
           version={version}
           onClose={() => setSelected(null)}
           onChange={() => void refresh()}

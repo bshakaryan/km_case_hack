@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { periodInputDate, withinCreatedPeriod } from "./workspace";
+import {
+  completionValidationIssues,
+  periodInputDate,
+  withinCreatedPeriod,
+} from "./workspace";
 import type { FormEvent } from "react";
 import {
   AlertTriangle,
@@ -201,15 +205,27 @@ export function OrderBoard({
             withinCreatedPeriod(o.created_at, filters.from, filters.to)
           );
         })
-        .sort((a, b) =>
-          sort === "deadline"
+        .sort((a, b) => {
+          const waiting = (o: Order) =>
+            ["accepted", "queued"].includes(o.status);
+          if (
+            waiting(a) &&
+            waiting(b) &&
+            String(a.assignee_id) === String(b.assignee_id)
+          ) {
+            const queueOrder =
+              (a.queue_position ?? Number.MAX_SAFE_INTEGER) -
+              (b.queue_position ?? Number.MAX_SAFE_INTEGER);
+            if (queueOrder) return queueOrder;
+          }
+          return sort === "deadline"
             ? new Date(a.deadline).getTime() - new Date(b.deadline).getTime()
             : sort === "newest"
               ? new Date(b.created_at).getTime() -
                 new Date(a.created_at).getTime()
               : ["emergency", "high", "normal", "planned"].indexOf(a.priority) -
-                ["emergency", "high", "normal", "planned"].indexOf(b.priority),
-        ),
+                ["emergency", "high", "normal", "planned"].indexOf(b.priority);
+        }),
     [orders, scope, search, filters, sort, focus],
   );
   const columns = [
@@ -1193,8 +1209,8 @@ export function CreateOrder({
                                 ? `В работе: ${person.current_order}`
                                 : person.status === "free"
                                   ? "Свободен"
-                                  : "Есть назначения"}{" "}
-                            · очередь {person.queue_count}
+                                  : "Есть очередь"}{" "}
+                            · ждут начала {person.queue_count}
                           </option>
                         ))
                       : r.brigades.map((brigade) => (
@@ -1217,11 +1233,11 @@ export function CreateOrder({
                           ? "В работе"
                           : selectedEmployee.status === "free"
                             ? "Свободен"
-                            : "Есть назначения"}
+                            : "Есть очередь"}
                     </span>
                     <span>
                       Текущий наряд: {selectedEmployee.current_order || "нет"} ·
-                      в очереди: {selectedEmployee.queue_count}
+                      ожидают начала: {selectedEmployee.queue_count}
                     </span>
                   </div>
                 )}
@@ -1393,6 +1409,9 @@ export function OrderDialog({
   id,
   reference: r,
   user,
+  workerHasOpenOrder,
+  workerHasActiveOrder,
+  workerHasInProgressOrder,
   version,
   onClose,
   onChange,
@@ -1401,6 +1420,9 @@ export function OrderDialog({
   id: Id;
   reference: Reference;
   user: User;
+  workerHasOpenOrder: boolean;
+  workerHasActiveOrder: boolean;
+  workerHasInProgressOrder: boolean;
   version: number;
   onClose: () => void;
   onChange: () => void;
@@ -1416,6 +1438,8 @@ export function OrderDialog({
   const [reason, setReason] = useState("");
   const [score, setScore] = useState("");
   const [completionUncertain, setCompletionUncertain] = useState(false);
+  const [completionValidationError, setCompletionValidationError] =
+    useState("");
   const [photoUncertain, setPhotoUncertain] = useState(false);
   const [materialSearch, setMaterialSearch] = useState("");
   const mutationLock = useRef(false);
@@ -1543,11 +1567,13 @@ export function OrderDialog({
       setOrder(o);
       setMode("none");
       setReason("");
-      notify(
-        actionName === "close"
-          ? "Работа принята. Наряд закрыт."
-          : "Статус наряда обновлён",
-      );
+      let message = "Статус наряда обновлён";
+      if (actionName === "close") message = "Работа принята. Наряд закрыт.";
+      else if (actionName === "queue")
+        message = `Задание поставлено в очередь · позиция ${o.queue_position ?? "—"}`;
+      else if (actionName === "accept")
+        message = "Задание принято. Это ваше единственное текущее задание.";
+      notify(message);
       onChange();
     } catch (e) {
       setError((e as Error).message);
@@ -1603,26 +1629,26 @@ export function OrderDialog({
   async function submitComplete(e: FormEvent) {
     e.preventDefault();
     if (mutationLock.current || completionUncertain) return;
-    if (complete.work_done.trim().length < 10) {
-      setError("Опишите выполненные работы: не менее 10 символов.");
+    setError("");
+    const issues = completionValidationIssues({
+      workDone: complete.work_done,
+      faultCodeId: complete.fault_code_id,
+      faultCodeIds: r.fault_codes.map((fault) => fault.id),
+      workType: order?.work_type || "",
+      hasAfterPhoto: Boolean(
+        order?.photos.some((photo) => photo.kind === "after"),
+      ),
+      materials: materials.map((material) => ({
+        materialId: material.material_id,
+        quantity: material.quantity,
+      })),
+      materialIds: r.materials.map((material) => material.id),
+    });
+    if (issues.length) {
+      setCompletionValidationError(issues.join(" "));
       return;
     }
-    if (
-      order?.work_type === "unplanned" &&
-      !order.photos.some((photo) => photo.kind === "after")
-    ) {
-      setError(
-        "Для внепланового ремонта обязательно фото после выполнения. Добавьте снимок выше.",
-      );
-      return;
-    }
-    if (
-      new Set(materials.map((material) => material.material_id)).size !==
-      materials.length
-    ) {
-      setError("Укажите каждый материал один раз, суммируя его количество.");
-      return;
-    }
+    setCompletionValidationError("");
     mutationLock.current = true;
     revision.current++;
     setBusy(true);
@@ -1706,7 +1732,8 @@ export function OrderDialog({
     setMode("edit");
   }
   const actionLabels: Record<string, string> = {
-    accept: "Принять наряд",
+    accept:
+      order?.status === "rework" ? "Принять доработку" : "Принять задание",
     queue: "В очередь",
     reject: "Отклонить",
     start: "Начать работу",
@@ -1717,19 +1744,19 @@ export function OrderDialog({
     cancel: "Отменить наряд",
   };
   const actions = order
-    ? order.status === "issued"
-      ? ["accept", "queue", "reject"]
+    ? ["issued", "rework"].includes(order.status)
+      ? workerHasOpenOrder
+        ? ["queue", "reject"]
+        : ["accept", "queue", "reject"]
       : order.status === "accepted"
         ? ["start", "queue", "reject"]
         : order.status === "queued"
-          ? ["start", "accept", "reject"]
+          ? ["start", "reject"]
           : order.status === "in_progress"
             ? ["pause"]
             : order.status === "paused"
               ? ["resume"]
-              : order.status === "rework"
-                ? ["start", "queue", "accept"]
-                : []
+              : []
     : [];
   return (
     <Modal
@@ -1759,6 +1786,13 @@ export function OrderDialog({
             <div className="detail-title-line">
               <Status value={order.status} />
               <Priority value={order.priority} />
+              {order.queue_position != null && (
+                <span className="detail-worktype">
+                  {order.queue_position === 1
+                    ? "Следующий к началу"
+                    : `Очередь · место ${order.queue_position}`}
+                </span>
+              )}
               <span className="detail-worktype">
                 {order.work_type === "planned"
                   ? "Плановая работа"
@@ -2116,7 +2150,11 @@ export function OrderDialog({
                   </section>
                 )}
                 {mode === "complete" && (
-                  <form className="inline-form" onSubmit={submitComplete}>
+                  <form
+                    className="inline-form"
+                    noValidate
+                    onSubmit={submitComplete}
+                  >
                     <fieldset disabled={busy || completionUncertain}>
                       <h3>
                         <FileCheck2 size={18} />
@@ -2278,6 +2316,12 @@ export function OrderDialog({
                         />
                       </label>
                     </fieldset>
+                    {completionValidationError && (
+                      <div className="error-box" role="alert">
+                        <AlertTriangle size={18} />
+                        <span>{completionValidationError}</span>
+                      </div>
+                    )}
                     {completionUncertain && (
                       <div className="info-banner" role="status">
                         <AlertTriangle size={18} />
@@ -2461,24 +2505,32 @@ export function OrderDialog({
           )}
           {canAct && !terminal && mode === "none" && (
             <>
-              {actions.map((a, i) => (
-                <button
-                  key={a}
-                  className={`button ${i === 0 && order.status !== "in_progress" ? "primary" : "secondary"}`}
-                  disabled={busy}
-                  onClick={() => actionClick(a)}
-                >
-                  {a === "start" || a === "resume" ? (
-                    <Play size={15} />
-                  ) : a === "pause" ? (
-                    <CirclePause size={15} />
-                  ) : a === "accept" ? (
-                    <Check size={15} />
-                  ) : null}
-                  {actionLabels[a]}
-                </button>
-              ))}
-              {order.status === "in_progress" && (
+              {worker &&
+                actions.map((a, i) => (
+                  <button
+                    key={a}
+                    className={`button ${i === 0 && order.status !== "in_progress" ? "primary" : "secondary"}`}
+                    disabled={
+                      busy ||
+                      (a === "start" &&
+                        (workerHasActiveOrder ||
+                          (order.queue_position != null &&
+                            order.queue_position !== 1))) ||
+                      (a === "resume" && workerHasInProgressOrder)
+                    }
+                    onClick={() => actionClick(a)}
+                  >
+                    {a === "start" || a === "resume" ? (
+                      <Play size={15} />
+                    ) : a === "pause" ? (
+                      <CirclePause size={15} />
+                    ) : a === "accept" ? (
+                      <Check size={15} />
+                    ) : null}
+                    {actionLabels[a]}
+                  </button>
+                ))}
+              {worker && order.status === "in_progress" && (
                 <button
                   className="button primary"
                   disabled={busy}

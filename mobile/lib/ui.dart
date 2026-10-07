@@ -12,8 +12,8 @@ const danger = Color(0xffb42332);
 const line = Color(0xffdce3eb);
 const statuses = <String, String>{
   'issued': 'Выдан',
-  'accepted': 'Принят в работу',
-  'queued': 'В очереди',
+  'accepted': 'Принят · ожидает начала',
+  'queued': 'Ожидает очереди',
   'rejected': 'Отклонён',
   'in_progress': 'В работе',
   'paused': 'Приостановлен',
@@ -250,6 +250,13 @@ class OrderCard extends StatelessWidget {
                   runSpacing: 6,
                   children: [
                     Tag(statuses[o.status] ?? o.status),
+                    if (o.data['queue_position'] is num)
+                      Tag(
+                        (o.data['queue_position'] as num).toInt() == 1
+                            ? 'Следующий к началу'
+                            : 'Очередь · место ${o.data['queue_position']}',
+                        color: navy,
+                      ),
                     if (o.pendingSync)
                       const Tag(
                         'Ожидает синхронизации',

@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
-from sqlalchemy import delete, func, select, text as sql_text
+from sqlalchemy import delete, func, or_, select, text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -29,7 +29,7 @@ from .models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, Emp
 from .schemas import Completion, Login, OrderCreate, OrderPatch, Transition
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
-from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, audit, aware, downtime_minutes, employee_dict, iso, monitor_deadlines, notify, order_dict, photo_dict, shift_start
+from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, audit, aware, downtime_minutes, effective_queue_statuses, employee_dict, iso, monitor_deadlines, notify, order_dict, photo_dict, queue_positions, shift_start, waiting_orders
 
 log = logging.getLogger(__name__)
 STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "completed", "ai_review", "rework", "closed", "cancelled"}
@@ -216,8 +216,16 @@ def create_app(database_url=None, seed=True, monitor=True):
             query = query.where(Order.assignee_id == user.id)
         for key, value in [("area_id", area_id), ("equipment_id", equipment_id), ("assignee_id", assignee_id), ("brigade_id", brigade_id), ("priority", priority), ("status", status)]:
             if value is not None and value != "":
-                if key == "status" and value not in STATUS:
-                    raise HTTPException(422, "Неизвестный статус")
+                if key == "status":
+                    if value not in STATUS:
+                        raise HTTPException(422, "Неизвестный статус")
+                    legacy_queued = effective_queue_statuses(db)
+                    if value == "queued":
+                        query = query.where(or_(Order.status == "queued", Order.id.in_(legacy_queued)))
+                        continue
+                    if value == "accepted":
+                        query = query.where(Order.status == "accepted", Order.id.not_in(legacy_queued))
+                        continue
                 if key == "priority" and value not in PRIORITY:
                     raise HTTPException(422, "Неизвестный приоритет")
                 query = query.where(getattr(Order, key) == value)
@@ -271,7 +279,10 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @app.get("/api/reference")
     def reference(db: DB, user: User):
-        return {"areas": rows(db, Area, ["id", "name"]), "equipment": rows(db, Equipment, ["id", "name", "inventory_number", "area_id", "type", "criticality"]), "employees": [employee_dict(p) for p in db.scalars(select(Employee).order_by(Employee.id))], "brigades": rows(db, Brigade, ["id", "name"]), "fault_codes": rows(db, FaultCode, ["id", "code", "name"]), "materials": rows(db, Material, ["id", "name", "unit"]), "time_norms": rows(db, TimeNorm, ["id", "name", "hours"])}
+        if user.role == "worker":
+            return {"areas": [], "equipment": [], "employees": [], "brigades": [], "fault_codes": rows(db, FaultCode, ["id", "code", "name"]), "materials": rows(db, Material, ["id", "name", "unit"]), "time_norms": []}
+        result = {"areas": rows(db, Area, ["id", "name"]), "equipment": rows(db, Equipment, ["id", "name", "inventory_number", "area_id", "type", "criticality"]), "employees": [employee_dict(p) for p in db.scalars(select(Employee).order_by(Employee.id))], "brigades": rows(db, Brigade, ["id", "name"]), "fault_codes": rows(db, FaultCode, ["id", "code", "name"]), "materials": rows(db, Material, ["id", "name", "unit"]), "time_norms": rows(db, TimeNorm, ["id", "name", "hours"])}
+        return result
 
     reference_models = {"areas": Area, "equipment": Equipment, "employees": Employee, "brigades": Brigade, "fault_codes": FaultCode, "materials": Material, "time_norms": TimeNorm}
 
@@ -348,22 +359,26 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @app.get("/api/employees")
     def employees(db: DB, user: User):
+        require_role(user, "master", "manager", "admin")
         all_orders = list(db.scalars(select(Order)))
         ratings = analytics(db, all_orders, utcnow() - timedelta(days=90), utcnow())["rankings"]
         rating_map = {r["id"]: r for r in ratings}
         result = []
         for person in db.scalars(select(Employee).where(Employee.role == "worker").order_by(Employee.id)):
             assigned = [o for o in all_orders if o.assignee_id == person.id and o.status not in EXECUTION_FINISHED and o.status != "rejected"]
-            current = next((o for o in assigned if o.status in ["in_progress", "paused"]), None)
+            current = next((o for o in assigned if o.status == "in_progress"), None) or next((o for o in assigned if o.status == "paused"), None)
+            queue_count = sum(o.status in {"accepted", "queued"} for o in assigned)
             rating = rating_map.get(person.id, {})
-            result.append({**employee_dict(person), "status": "off_shift" if not person.on_shift else "busy" if current else "queued" if assigned else "free", "current_order": current.number if current else None, "queue_count": len([o for o in assigned if o is not current]), "rating": rating.get("score", 0), "completed_count": rating.get("closed_count", 0)})
+            result.append({**employee_dict(person), "status": "off_shift" if not person.on_shift else "busy" if current else "queued" if queue_count else "free", "current_order": current.number if current else None, "queue_count": queue_count, "rating": rating.get("score", 0), "completed_count": rating.get("closed_count", 0)})
         return result
 
     @app.get("/api/orders")
     def orders(db: DB, user: User, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, priority: str | None = None, status: str | None = None, search: str | None = Query(None, max_length=200), from_date: str | None = None, to_date: str | None = None, limit: int = Query(1000, ge=1, le=5000)):
         query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id, priority, status, search, from_date, to_date)
         refs = {"areas": {a.id: a for a in db.scalars(select(Area))}, "equipment": {e.id: e for e in db.scalars(select(Equipment))}, "employees": {p.id: p for p in db.scalars(select(Employee))}}
-        return [order_dict(db, o, refs=refs) for o in db.scalars(query.order_by(Order.created_at.desc()).limit(limit))]
+        positions = queue_positions(db)
+        statuses = effective_queue_statuses(db)
+        return [order_dict(db, o, refs=refs, positions=positions, statuses=statuses) for o in db.scalars(query.order_by(Order.created_at.desc()).limit(limit))]
 
     @app.get("/api/orders/{id_}")
     def order_detail(id_: int, db: DB, user: User):
@@ -423,25 +438,47 @@ def create_app(database_url=None, seed=True, monitor=True):
     async def transition(id_: int, payload: Transition, db: DB, user: User, request: Request):
         require_role(user, "worker", "master", "admin")
         action = payload.action
-        if action in ["close", "rework", "cancel"]:
+        if action in ["accept", "start", "pause", "resume", "reject"]:
+            require_role(user, "worker")
+        elif action == "queue":
+            require_role(user, "worker")
+        elif action in ["close", "rework", "cancel"]:
             require_role(user, "master", "admin")
+        else:
+            raise HTTPException(422, "Неизвестное действие с нарядом")
         order = get_order(db, id_, user, lock=True)
         command_hash = json_hash(payload.model_dump())
 
         async def perform():
+            if action == "queue" and order.status == "queued":
+                return order_dict(db, order, detail=True), [("orders.updated", order.id)]
             if action in ["reject", "pause", "rework", "cancel"] and not payload.reason:
                 raise HTTPException(422, "Укажите причину действия")
-            transitions = {"accept": ({"issued", "queued", "rework"}, "accepted"), "queue": ({"issued", "accepted", "rework"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued", "rework"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"ai_review"}, "closed"), "rework": ({"ai_review"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
+            transitions = {"accept": ({"issued", "rework"}, "accepted"), "queue": ({"issued", "rework", "accepted"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"ai_review"}, "closed"), "rework": ({"ai_review"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
             allowed, target = transitions[action]
             if order.status not in allowed:
                 raise HTTPException(409, f"Действие {action} недоступно для статуса {order.status}")
+            if action == "accept":
+                person = db.scalar(select(Employee).where(Employee.id == order.assignee_id).with_for_update())
+                active = db.scalar(select(Order).where(Order.assignee_id == person.id, Order.status.in_(["accepted", "in_progress", "paused"])).order_by(Order.id).limit(1))
+                if active:
+                    raise HTTPException(409, f"У вас уже есть незавершённый наряд {active.number}. Это назначение можно добавить в очередь.")
+                waiting = [item for item in waiting_orders(db, person.id) if item.id != order.id]
+                if waiting:
+                    raise HTTPException(409, f"Сначала разберите очередь с наряда {waiting[0].number}. Новое назначение можно добавить в очередь.")
+            if action == "queue":
+                db.scalar(select(Employee.id).where(Employee.id == order.assignee_id).with_for_update())
             if action in ["start", "resume"]:
                 person = db.scalar(select(Employee).where(Employee.id == order.assignee_id).with_for_update())
                 if not person.on_shift:
                     raise HTTPException(409, "Исполнитель вне смены")
-                busy = db.scalar(select(Order.id).where(Order.assignee_id == order.assignee_id, Order.id != order.id, Order.status == "in_progress"))
+                conflicting_statuses = ["in_progress"] if action == "resume" else ["in_progress", "paused"]
+                busy = db.scalar(select(Order).where(Order.assignee_id == order.assignee_id, Order.id != order.id, Order.status.in_(conflicting_statuses)).order_by(Order.id).limit(1))
                 if busy:
-                    raise HTTPException(409, "У исполнителя уже есть наряд в работе. Приостановите его или поставьте новый в очередь.")
+                    raise HTTPException(409, f"Сначала завершите текущий наряд {busy.number}.")
+                queue = waiting_orders(db, person.id)
+                if action == "start" and queue and queue[0].id != order.id:
+                    raise HTTPException(409, f"Сначала начните {queue[0].number} — этот наряд следующий в очереди.")
                 order.started_at = order.started_at or utcnow()
             old_status = order.status
             if action == "cancel" and order.work_type == "unplanned":
@@ -462,14 +499,15 @@ def create_app(database_url=None, seed=True, monitor=True):
             if action == "cancel":
                 order.closed_at = utcnow()
             audit(db, order, action, user.id, old_status, payload.reason or payload.comment)
-            notify(db, [order.assignee_id, order.master_id], "Статус наряда изменён", f"{order.number}: {old_status} → {target}", "status", order.id)
+            notice = "Наряд добавлен в очередь" if action == "queue" else "Статус наряда изменён"
+            notify(db, [order.assignee_id, order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
             return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return await run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/complete")
     async def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
-        require_role(user, "worker", "master", "admin")
+        require_role(user, "worker")
         order = get_order(db, id_, user, lock=True)
         command_hash = json_hash(payload.model_dump())
 
@@ -634,6 +672,7 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @app.get("/api/integrations")
     def integrations(user: User):
+        require_role(user, "master", "manager", "admin")
         return {"ai": {"mode": "stub", "status": "demo", "description": "Детерминированная заглушка. Реальные LLM и компьютерное зрение не подключены. Итоговое решение принимает мастер."}, "native": {"mode": "stub", "status": "demo", "description": "Контракт мобильного приложения и push-адаптер. События сохраняются в БД; отправки на устройства нет."}, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
 
     @app.websocket("/api/ws")

@@ -63,6 +63,102 @@ def test_full_lifecycle_requires_master_decision(client, master, worker):
     assert client.patch(path, json={"priority": "high"}, headers=master).status_code == 409
 
 
+def test_worker_owns_acceptance_and_queue_order_is_automatic(client, master, worker):
+    first = new_order(client, master, priority="normal")
+    path = f"/api/orders/{first['id']}"
+    assert client.post(path + "/transition", json={"action": "accept"}, headers=master).status_code == 403
+    accepted = client.post(path + "/transition", json={"action": "accept"}, headers=worker).json()
+    assert accepted["status"] == "accepted" and accepted["queue_position"] == 1
+    assert client.post(path + "/transition", json={"action": "start"}, headers=master).status_code == 403
+    report = {"work_done": "Отчёт не должен приниматься мастером", "fault_code_id": 1, "materials": []}
+    assert client.post(path + "/complete", json=report, headers=master).status_code == 403
+
+    second = new_order(client, master, priority="normal")
+    second_path = f"/api/orders/{second['id']}"
+    assert client.post(second_path + "/transition", json={"action": "accept"}, headers=worker).status_code == 409
+    assert client.post(second_path + "/transition", json={"action": "queue"}, headers=master).status_code == 403
+    assert client.post(path + "/transition", json={"action": "start"}, headers=worker).json()["status"] == "in_progress"
+    queued = client.post(second_path + "/transition", json={"action": "queue"}, headers=worker).json()
+    assert queued["status"] == "queued" and queued["queue_position"] == 1
+    repeated_queue = client.post(second_path + "/transition", json={"action": "queue"}, headers=worker)
+    assert repeated_queue.status_code == 200 and repeated_queue.json()["status"] == "queued"
+
+    emergency = new_order(client, master, priority="emergency")
+    emergency_path = f"/api/orders/{emergency['id']}"
+    assert client.post(emergency_path + "/transition", json={"action": "accept"}, headers=worker).status_code == 409
+    queued_emergency = client.post(emergency_path + "/transition", json={"action": "queue"}, headers=worker).json()
+    assert queued_emergency["status"] == "queued" and queued_emergency["queue_position"] == 1
+    assert client.get(second_path, headers=worker).json()["queue_position"] == 2
+    deferred_start = client.post(emergency_path + "/transition", json={"action": "start"}, headers=worker)
+    assert deferred_start.status_code == 409
+    assert client.get(emergency_path, headers=worker).json()["status"] == "queued"
+    worker_id = client.get("/api/auth/me", headers=worker).json()["id"]
+    worker_row = next(item for item in client.get("/api/employees", headers=master).json() if item["id"] == worker_id)
+    assert worker_row["current_order"] == first["number"] and worker_row["queue_count"] == 2
+
+    assert client.post(path + "/transition", json={"action": "pause", "reason": "Освободить пост"}, headers=worker).status_code == 200
+    blocked = client.post(second_path + "/transition", json={"action": "start"}, headers=worker)
+    assert blocked.status_code == 409 and first["number"] in blocked.json()["detail"]
+    paused_start = client.post(emergency_path + "/transition", json={"action": "start"}, headers=worker)
+    assert paused_start.status_code == 409
+    assert client.post(path + "/transition", json={"action": "cancel", "reason": "Освободить наряд теста"}, headers=master).status_code == 200
+    started = client.post(emergency_path + "/transition", json={"action": "start"}, headers=worker)
+    assert started.status_code == 200 and started.json()["status"] == "in_progress"
+    lower_priority_start = client.post(second_path + "/transition", json={"action": "start"}, headers=worker)
+    assert lower_priority_start.status_code == 409
+    assert client.post(emergency_path + "/transition", json={"action": "cancel", "reason": "Очистка теста очереди"}, headers=master).status_code == 200
+    assert client.post(second_path + "/transition", json={"action": "start"}, headers=worker).json()["status"] == "in_progress"
+    cancelled = client.post(f"/api/orders/{second['id']}/transition", json={"action": "cancel", "reason": "Очистка теста очереди"}, headers=master)
+    assert cancelled.status_code == 200
+
+
+def test_legacy_multiple_accepts_are_exposed_as_queue_without_data_rewrite(client, master, worker):
+    normal = new_order(client, master, priority="normal")
+    high = new_order(client, master, priority="high")
+    emergency = new_order(client, master, priority="emergency")
+    with client.app.state.sessions() as db:
+        for record in (normal, high, emergency):
+            db.get(Order, record["id"]).status = "accepted"
+        db.commit()
+
+    response = client.get("/api/orders", headers=worker)
+    assert response.status_code == 200
+    by_id = {item["id"]: item for item in response.json()}
+    assert by_id[emergency["id"]]["status"] == "accepted"
+    assert by_id[emergency["id"]]["queue_position"] == 1
+    assert by_id[high["id"]]["status"] == "queued"
+    assert by_id[high["id"]]["queue_position"] == 2
+    assert by_id[normal["id"]]["status"] == "queued"
+    assert by_id[normal["id"]]["queue_position"] == 3
+    filtered_queue = client.get("/api/orders?status=queued", headers=worker).json()
+    assert {item["id"] for item in filtered_queue} >= {normal["id"], high["id"]}
+    filtered_accepted = client.get("/api/orders?status=accepted", headers=worker).json()
+    assert emergency["id"] in {item["id"] for item in filtered_accepted}
+    assert normal["id"] not in {item["id"] for item in filtered_accepted}
+    with client.app.state.sessions() as db:
+        assert [db.get(Order, item["id"]).status for item in (normal, high, emergency)] == ["accepted"] * 3
+    for record in (normal, high, emergency):
+        assert client.post(f"/api/orders/{record['id']}/transition", json={"action": "cancel", "reason": "Очистка проверки очереди"}, headers=master).status_code == 200
+
+
+def test_legacy_paused_jobs_can_be_resumed_one_at_a_time(client, master, worker):
+    first = new_order(client, master)
+    second = new_order(client, master)
+    with client.app.state.sessions() as db:
+        for record in (first, second):
+            order = db.get(Order, record["id"])
+            order.status = "paused"
+            order.started_at = utcnow() - timedelta(minutes=5)
+        db.commit()
+
+    resumed = client.post(f"/api/orders/{first['id']}/transition", json={"action": "resume"}, headers=worker)
+    assert resumed.status_code == 200 and resumed.json()["status"] == "in_progress"
+    blocked = client.post(f"/api/orders/{second['id']}/transition", json={"action": "resume"}, headers=worker)
+    assert blocked.status_code == 409 and first["number"] in blocked.json()["detail"]
+    for record in (first, second):
+        assert client.post(f"/api/orders/{record['id']}/transition", json={"action": "cancel", "reason": "Очистка проверки возобновления"}, headers=master).status_code == 200
+
+
 def test_unplanned_photos_and_upload_validation(client, master, worker):
     order = new_order(client, master, work_type="unplanned")
     path = f"/api/orders/{order['id']}"

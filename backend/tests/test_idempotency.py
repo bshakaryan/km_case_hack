@@ -27,6 +27,15 @@ def new_order(client, headers, key=None, **overrides):
     return response.json()
 
 
+def cancel_test_order(client, master, order):
+    response = client.post(
+        f"/api/orders/{order['id']}/transition",
+        json={"action": "cancel", "reason": "Очистка тестовых данных"},
+        headers=master,
+    )
+    assert response.status_code == 200, response.text
+
+
 def photo_bytes():
     import io
 
@@ -94,6 +103,7 @@ def test_transition_replay_keeps_single_event(client, master, worker):
     assert second.json() == first.json()
     events = client.get(path, headers=worker).json()["events"]
     assert len([event for event in events if event["action"] == "accept"]) == 1
+    cancel_test_order(client, master, order)
 
 
 def test_replay_returns_stored_response_even_if_state_moved_on(client, master, worker):
@@ -131,6 +141,7 @@ def test_photo_upload_replay_stores_one_photo(client, master, worker):
     assert second.json() == first.json()
     with client.app.state.sessions() as db:
         assert db.scalar(select(func.count()).select_from(Photo).where(Photo.order_id == order["id"], Photo.kind == "before")) == 1
+    cancel_test_order(client, master, order)
 
 
 def test_photo_upload_same_key_different_file_conflicts(client, master, worker):
@@ -143,6 +154,7 @@ def test_photo_upload_same_key_different_file_conflicts(client, master, worker):
     other = photo_bytes() + b"\x00"
     second = client.post(path + "/photos", data={"kind": "before"}, files={"file": ("b.png", other, "image/png")}, headers=headers)
     assert second.status_code == 409
+    cancel_test_order(client, master, order)
 
 
 def test_complete_replay_does_not_duplicate_material_writeoff(client, master, worker):
@@ -161,6 +173,7 @@ def test_complete_replay_does_not_duplicate_material_writeoff(client, master, wo
     assert quantities == [2]
     with client.app.state.sessions() as db:
         assert db.scalar(select(func.count()).select_from(MaterialWriteoff).where(MaterialWriteoff.order_id == order["id"])) == 1
+    cancel_test_order(client, master, order)
 
 
 def test_command_key_is_scoped_per_user(client, master, worker):
@@ -171,6 +184,7 @@ def test_command_key_is_scoped_per_user(client, master, worker):
     accepted = client.post(f"/api/orders/{other['id']}/transition", json={"action": "accept"}, headers={**worker, "X-Client-Command-Id": shared_key})
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["status"] == "accepted"
+    cancel_test_order(client, master, other)
 
 
 def test_manager_cannot_use_master_key_to_create(client, master, worker):
@@ -207,6 +221,7 @@ def test_transition_key_cannot_replay_on_another_order(client, master, worker):
     other = client.get(f"/api/orders/{other_order['id']}", headers=worker).json()
     assert other["status"] == "issued"
     assert not any(event["action"] == "accept" for event in other["events"])
+    cancel_test_order(client, master, first_order)
 
 
 def test_complete_key_cannot_replay_on_another_order(client, master, worker):
@@ -228,12 +243,13 @@ def test_complete_key_cannot_replay_on_another_order(client, master, worker):
     other_path = f"/api/orders/{other_order['id']}"
     assert client.get(other_path, headers=worker).json()["status"] == "in_progress"
     assert client.post(other_path + "/transition", json={"action": "cancel", "reason": "Очистка проверки"}, headers=master).status_code == 200
+    client.post(f"/api/orders/{first_order['id']}/transition", json={"action": "cancel", "reason": "Очистка проверки"}, headers=master)
 
 
 def test_key_cannot_be_reused_for_another_route(client, master):
     key = "route-create-transition-0001"
     order = new_order(client, master, key=key)
-    result = client.post(f"/api/orders/{order['id']}/transition", json={"action": "accept"}, headers={**master, "X-Client-Command-Id": key})
+    result = client.post(f"/api/orders/{order['id']}/transition", json={"action": "cancel", "reason": "Повтор ключа"}, headers={**master, "X-Client-Command-Id": key})
     assert result.status_code == 409
     assert client.get(f"/api/orders/{order['id']}", headers=master).json()["status"] == "issued"
 
@@ -290,6 +306,7 @@ def test_legacy_transition_same_key_on_different_order_conflicts(client, master,
     convert_to_legacy(client, key, Transition, payload)
     assert client.post(f"/api/orders/{other['id']}/transition", json=payload, headers=headers).status_code == 409
     assert client.get(f"/api/orders/{other['id']}", headers=worker).json()["status"] == "issued"
+    cancel_test_order(client, master, order)
 
 
 def test_legacy_command_kind_is_checked_even_when_payload_hash_matches(client, master, worker):
@@ -305,6 +322,7 @@ def test_legacy_command_kind_is_checked_even_when_payload_hash_matches(client, m
         stored.kind = "complete"
         db.commit()
     assert client.post(path + "/transition", json=payload, headers=headers).status_code == 409
+    cancel_test_order(client, master, order)
 
 
 @pytest.mark.parametrize("target", ["same", "other", "missing"])
@@ -332,9 +350,8 @@ def test_legacy_complete_replay_never_reapplies_materials(client, master, worker
                 stored.response_body = body
                 db.commit()
         assert client.post(path + "/transition", json={"action": "rework", "reason": "Проверка сохранённой команды"}, headers=master).status_code == 200
-    assert client.post(requested_path + "/transition", json={"action": "start" if target != "other" else "accept"}, headers=worker).status_code == 200
-    if target == "other":
-        assert client.post(requested_path + "/transition", json={"action": "start"}, headers=worker).status_code == 200
+    assert client.post(requested_path + "/transition", json={"action": "accept"}, headers=worker).status_code == 200
+    assert client.post(requested_path + "/transition", json={"action": "start"}, headers=worker).status_code == 200
     replay = client.post(requested_path + "/complete", json=payload, headers=headers)
     if target == "same":
         assert replay.status_code == 200 and replay.json() == first.json()

@@ -42,6 +42,7 @@ export type Order = {
   master_id: Id;
   priority: string;
   status: string;
+  queue_position?: number | null;
   deadline: string;
   created_at: string;
   started_at: string | null;
@@ -148,7 +149,7 @@ export type Analytics = {
 };
 export const statusNames: Record<string, string> = {
   issued: "Выдан",
-  accepted: "Принят в работу",
+  accepted: "Принят · ожидает начала",
   queued: "В очереди",
   rejected: "Отклонён",
   in_progress: "В работе",

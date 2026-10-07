@@ -76,3 +76,62 @@ export function nextWorkAction(status: string) {
       return "Открыть наряд";
   }
 }
+
+export type CompletionMaterialInput = {
+  materialId: string;
+  quantity: string;
+};
+
+export function completionValidationIssues(input: {
+  workDone: string;
+  faultCodeId: string;
+  faultCodeIds: Array<string | number>;
+  workType: string;
+  hasAfterPhoto: boolean;
+  materials: CompletionMaterialInput[];
+  materialIds: Array<string | number>;
+}): string[] {
+  const issues: string[] = [];
+  const workDoneLength = input.workDone.trim().length;
+  if (workDoneLength < 10 || workDoneLength > 5000)
+    issues.push("Опишите выполненные работы: от 10 до 5 000 символов.");
+  if (
+    !input.faultCodeId ||
+    !input.faultCodeIds.some((id) => String(id) === input.faultCodeId)
+  )
+    issues.push("Выберите код неисправности.");
+  if (input.workType === "unplanned" && !input.hasAfterPhoto)
+    issues.push("Для внепланового ремонта добавьте фото «После выполнения».");
+  if (input.materials.length > 100)
+    issues.push("В отчёте можно указать не более 100 материалов.");
+
+  const materialIds = input.materials.map((material) => material.materialId);
+  if (
+    new Set(materialIds.filter(Boolean)).size !==
+    materialIds.filter(Boolean).length
+  )
+    issues.push(
+      "Один и тот же материал укажите один раз, суммируя количество.",
+    );
+  if (input.materials.some((material) => !material.materialId))
+    issues.push("Выберите материал в каждой добавленной строке.");
+  else if (
+    input.materials.some(
+      (material) =>
+        !input.materialIds.some((id) => String(id) === material.materialId),
+    )
+  )
+    issues.push("Выбранный материал больше недоступен. Выберите его заново.");
+  if (
+    input.materials.some((material) => {
+      const quantity = Number(material.quantity);
+      return (
+        !Number.isFinite(quantity) || quantity <= 0 || quantity > 1_000_000
+      );
+    })
+  )
+    issues.push(
+      "Количество материала должно быть больше 0 и не превышать 1 000 000.",
+    );
+  return issues;
+}

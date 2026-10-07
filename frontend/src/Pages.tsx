@@ -276,7 +276,7 @@ export function EmployeesPage({
                         <small>
                           {e.on_shift === false || e.status === "off_shift"
                             ? "Не на смене"
-                            : "других заданий"}
+                            : "ожидают начала"}
                         </small>
                       </td>
                       <td>{e.completed_count}</td>

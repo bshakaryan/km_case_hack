@@ -9,6 +9,7 @@ from .models import Area, Brigade, Employee, Equipment, IntegrationLog, Notifica
 LOG = logging.getLogger(__name__)
 TERMINAL = {"closed", "cancelled"}
 EXECUTION_FINISHED = TERMINAL | {"completed", "ai_review"}
+QUEUE_PRIORITIES = {"emergency": 0, "high": 1, "normal": 2, "planned": 3}
 
 
 def aware(value):
@@ -30,14 +31,75 @@ def downtime_minutes(order, now=None):
     return order.downtime_minutes
 
 
-def order_dict(db, order, detail=False, refs=None):
+def waiting_orders(db, assignee_id=None):
+    query = select(Order).where(Order.status.in_(["accepted", "queued"]))
+    if assignee_id is not None:
+        query = query.where(Order.assignee_id == assignee_id)
+    orders = list(db.scalars(query))
+    return sorted(
+        orders,
+        key=lambda item: (
+            QUEUE_PRIORITIES.get(item.priority, len(QUEUE_PRIORITIES)),
+            aware(item.assigned_at),
+            item.id,
+        ),
+    )
+
+
+def queue_positions(db):
+    grouped = defaultdict(list)
+    for order in waiting_orders(db):
+        grouped[order.assignee_id].append(order)
+    return {
+        order.id: position
+        for assigned in grouped.values()
+        for position, order in enumerate(assigned, start=1)
+    }
+
+
+def effective_queue_statuses(db):
+    grouped = defaultdict(list)
+    for order in waiting_orders(db):
+        grouped[order.assignee_id].append(order)
+    busy_assignees = set(
+        db.scalars(
+            select(Order.assignee_id).where(
+                Order.status.in_(["in_progress", "paused"])
+            )
+        )
+    )
+    overrides = {}
+    for assignee_id, orders in grouped.items():
+        keep_accepted = (
+            orders[0].id
+            if assignee_id not in busy_assignees
+            and orders
+            and orders[0].status == "accepted"
+            else None
+        )
+        for order in orders:
+            if order.status == "accepted" and order.id != keep_accepted:
+                overrides[order.id] = "queued"
+    return overrides
+
+
+def order_dict(db, order, detail=False, refs=None, positions=None, statuses=None):
     refs = refs or {}
     area = refs.get("areas", {}).get(order.area_id) or db.get(Area, order.area_id)
     equipment = refs.get("equipment", {}).get(order.equipment_id) or db.get(Equipment, order.equipment_id)
     employee = refs.get("employees", {}).get(order.assignee_id) or db.get(Employee, order.assignee_id)
     result = {key: getattr(order, key) for key in ["id", "number", "title", "description", "work_type", "area_id", "equipment_id", "assignee_id", "brigade_id", "master_id", "priority", "status", "comment", "normal_hours", "downtime_minutes", "score"]}
+    if order.status == "accepted":
+        statuses = statuses if statuses is not None else effective_queue_statuses(db)
+        if order.id in statuses:
+            result["status"] = "queued"
     result.update({key: iso(getattr(order, key)) for key in ["deadline", "created_at", "assigned_at", "started_at", "completed_at", "closed_at"]})
     result["downtime_minutes"] = downtime_minutes(order)
+    if order.status in {"accepted", "queued"}:
+        positions = positions if positions is not None else queue_positions(db)
+        result["queue_position"] = positions.get(order.id)
+    else:
+        result["queue_position"] = None
     result.update(area_name=area.name, equipment_name=equipment.name, assignee_name=employee.name, is_overdue=order.status not in EXECUTION_FINISHED and aware(order.deadline) < utcnow())
     if detail:
         result["events"] = [{"id": event.id, "action": event.action, "from_status": event.from_status, "to_status": event.to_status, "actor_name": db.get(Employee, event.actor_id).name, "created_at": iso(event.created_at), "comment": event.comment} for event in db.scalars(select(OrderEvent).where(OrderEvent.order_id == order.id).order_by(OrderEvent.created_at, OrderEvent.id))]

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/app_controller.dart';
+import '../data/models.dart';
 import '../ui.dart';
 
 class OrdersScreen extends StatefulWidget {
@@ -34,6 +35,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
         'all' => true,
         'active' => !terminal(o),
         'history' => terminal(o),
+        'queue' => {'accepted', 'queued'}.contains(o.status),
         'emergency' => o.priority == 'emergency' && !terminal(o),
         'overdue' => o.isOverdue,
         _ => o.status == filter,
@@ -46,6 +48,11 @@ class _OrdersScreenState extends State<OrdersScreen> {
               .toLowerCase()
               .contains(query.toLowerCase());
     }).toList();
+    if (filter == 'queue') {
+      int position(WorkOrder order) =>
+          (order.data['queue_position'] as num?)?.toInt() ?? 1 << 30;
+      orders.sort((a, b) => position(a).compareTo(position(b)));
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -67,6 +74,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
           items: [
             for (final e in {
               'active': 'Активные',
+              'queue': 'Очередь к выполнению',
               'all': 'Все наряды',
               'emergency': 'Аварийные',
               'overdue': 'Срок истёк',

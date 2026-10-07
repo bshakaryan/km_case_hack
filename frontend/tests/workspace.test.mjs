@@ -7,6 +7,7 @@ import {
   periodBoundary,
   periodInputDate,
   withinCreatedPeriod,
+  completionValidationIssues,
 } from "../src/workspace.ts";
 
 test("Analytics drill-down retains exact shift bounds rather than widening to whole days", () => {
@@ -72,4 +73,40 @@ test("Next action distinguishes acceptance, execution and pause", () => {
   assert.equal(nextWorkAction("accepted"), "Перейти к выполнению");
   assert.equal(nextWorkAction("paused"), "Продолжить работу");
   assert.equal(nextWorkAction("ai_review"), "Открыть наряд");
+});
+
+test("Completion validation explains all blockers instead of silently relying on browser validation", () => {
+  assert.deepEqual(
+    completionValidationIssues({
+      workDone: "",
+      faultCodeId: "",
+      faultCodeIds: [1],
+      workType: "unplanned",
+      hasAfterPhoto: false,
+      materials: [{ materialId: "", quantity: "0" }],
+      materialIds: [5],
+    }),
+    [
+      "Опишите выполненные работы: от 10 до 5 000 символов.",
+      "Выберите код неисправности.",
+      "Для внепланового ремонта добавьте фото «После выполнения».",
+      "Выберите материал в каждой добавленной строке.",
+      "Количество материала должно быть больше 0 и не превышать 1 000 000.",
+    ],
+  );
+});
+
+test("A complete planned-work report with valid material usage passes validation", () => {
+  assert.deepEqual(
+    completionValidationIssues({
+      workDone: "Подшипник заменён",
+      faultCodeId: "1",
+      faultCodeIds: [1],
+      workType: "planned",
+      hasAfterPhoto: false,
+      materials: [{ materialId: "5", quantity: "0.5" }],
+      materialIds: [5],
+    }),
+    [],
+  );
 });

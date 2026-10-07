@@ -272,8 +272,22 @@ class AppController extends ChangeNotifier {
         return;
       }
       user = User.fromJson(profile);
-      if (rawReference is Json) reference = rawReference;
-      if (rawEmployees is List) {
+      if (rawReference is Json) {
+        reference = user!.isWorker
+            ? {
+                'areas': <Json>[],
+                'equipment': <Json>[],
+                'employees': <Json>[],
+                'brigades': <Json>[],
+                'fault_codes': rawReference['fault_codes'] ?? <Json>[],
+                'materials': rawReference['materials'] ?? <Json>[],
+                'time_norms': <Json>[],
+              }
+            : rawReference;
+      }
+      if (user!.isWorker) {
+        employees = [];
+      } else if (rawEmployees is List) {
         employees = rawEmployees.whereType<Json>().toList();
       }
       if (rawOrders is List) {
@@ -591,7 +605,7 @@ class AppController extends ChangeNotifier {
     try {
       final results = await Future.wait<Object>([
         source.reference(),
-        source.employees(),
+        user?.isWorker == true ? Future.value(<Json>[]) : source.employees(),
         source.orders(),
         source.dashboard(),
         source.notifications(),
