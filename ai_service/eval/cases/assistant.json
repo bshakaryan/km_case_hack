@@ -1,0 +1,292 @@
+[
+  {
+    "id": "A-01",
+    "question": "Какие работы просрочены?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "overdue_orders",
+    "arguments": {},
+    "expected_metric": "overdue",
+    "expected_value": 0,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-02",
+    "question": "Кто свободен из слесарей?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "available_workers",
+    "arguments": {},
+    "expected_metric": "free_workers",
+    "expected_value": 5,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-03",
+    "question": "Покажи отчёт по участку Транспортный участок за месяц",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 3,
+      "from": "2026-08-30T03:00:00Z",
+      "to": "2026-09-29T03:00:00Z"
+    },
+    "expected_metric": "area_count",
+    "expected_value": 36,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-04",
+    "question": "Какие проблемы на участке Энергетический участок?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_problems",
+    "arguments": {
+      "area_id": 4
+    },
+    "expected_metric": "unplanned_count",
+    "expected_value": 58,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-05",
+    "question": "Сколько нарядов на участке Дробильно-сортировочный комплекс?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 1
+    },
+    "expected_metric": "area_count",
+    "expected_value": 283,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-06",
+    "question": "Какие работы просрочены?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "overdue_orders",
+    "arguments": {},
+    "expected_metric": "overdue",
+    "expected_value": 0,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-07",
+    "question": "Кто свободен из слесарей?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "available_workers",
+    "arguments": {},
+    "expected_metric": "free_workers",
+    "expected_value": 5,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-08",
+    "question": "Покажи отчёт по участку Энергетический участок за месяц",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 4,
+      "from": "2026-08-30T03:00:00Z",
+      "to": "2026-09-29T03:00:00Z"
+    },
+    "expected_metric": "area_count",
+    "expected_value": 25,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-09",
+    "question": "Какие проблемы на участке Дробильно-сортировочный комплекс?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_problems",
+    "arguments": {
+      "area_id": 1
+    },
+    "expected_metric": "unplanned_count",
+    "expected_value": 228,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-10",
+    "question": "Сколько нарядов на участке Обогатительная фабрика?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 2
+    },
+    "expected_metric": "area_count",
+    "expected_value": 263,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-11",
+    "question": "Какие работы просрочены?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "overdue_orders",
+    "arguments": {},
+    "expected_metric": "overdue",
+    "expected_value": 0,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-12",
+    "question": "Кто свободен из слесарей?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "available_workers",
+    "arguments": {},
+    "expected_metric": "free_workers",
+    "expected_value": 5,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-13",
+    "question": "Покажи отчёт по участку Дробильно-сортировочный комплекс за месяц",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 1,
+      "from": "2026-08-30T03:00:00Z",
+      "to": "2026-09-29T03:00:00Z"
+    },
+    "expected_metric": "area_count",
+    "expected_value": 94,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-14",
+    "question": "Какие проблемы на участке Обогатительная фабрика?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_problems",
+    "arguments": {
+      "area_id": 2
+    },
+    "expected_metric": "unplanned_count",
+    "expected_value": 203,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-15",
+    "question": "Сколько нарядов на участке Транспортный участок?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 3
+    },
+    "expected_metric": "area_count",
+    "expected_value": 100,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-16",
+    "question": "Какие работы просрочены?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "overdue_orders",
+    "arguments": {},
+    "expected_metric": "overdue",
+    "expected_value": 0,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-17",
+    "question": "Кто свободен из слесарей?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "available_workers",
+    "arguments": {},
+    "expected_metric": "free_workers",
+    "expected_value": 5,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-18",
+    "question": "Покажи отчёт по участку Обогатительная фабрика за месяц",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 2,
+      "from": "2026-08-30T03:00:00Z",
+      "to": "2026-09-29T03:00:00Z"
+    },
+    "expected_metric": "area_count",
+    "expected_value": 92,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-19",
+    "question": "Какие проблемы на участке Транспортный участок?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_problems",
+    "arguments": {
+      "area_id": 3
+    },
+    "expected_metric": "unplanned_count",
+    "expected_value": 80,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-20",
+    "question": "Сколько нарядов на участке Энергетический участок?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 4
+    },
+    "expected_metric": "area_count",
+    "expected_value": 73,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-21",
+    "question": "Какие работы просрочены?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "overdue_orders",
+    "arguments": {},
+    "expected_metric": "overdue",
+    "expected_value": 0,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-22",
+    "question": "Кто свободен из слесарей?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "available_workers",
+    "arguments": {},
+    "expected_metric": "free_workers",
+    "expected_value": 5,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-23",
+    "question": "Покажи отчёт по участку Транспортный участок за месяц",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 3,
+      "from": "2026-08-30T03:00:00Z",
+      "to": "2026-09-29T03:00:00Z"
+    },
+    "expected_metric": "area_count",
+    "expected_value": 36,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-24",
+    "question": "Какие проблемы на участке Энергетический участок?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_problems",
+    "arguments": {
+      "area_id": 4
+    },
+    "expected_metric": "unplanned_count",
+    "expected_value": 58,
+    "label_source": "computed_from_snapshot"
+  },
+  {
+    "id": "A-25",
+    "question": "Сколько нарядов на участке Дробильно-сортировочный комплекс?",
+    "reference_time": "2026-09-29T03:00:00Z",
+    "expected_tool": "area_report",
+    "arguments": {
+      "area_id": 1
+    },
+    "expected_metric": "area_count",
+    "expected_value": 283,
+    "label_source": "computed_from_snapshot"
+  }
+]

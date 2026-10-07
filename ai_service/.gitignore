@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+state/
+data/
+reports/*
+!reports/metrics.md
+!reports/metrics.json
+data_gen/photos/duplicates/
