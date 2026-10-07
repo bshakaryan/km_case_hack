@@ -107,8 +107,10 @@ def test_deadline_monitor_thresholds_deduplication_and_finished_exclusion(client
     with client.app.state.sessions() as db:
         emergency = db.get(Order, first["id"])
         emergency.created_at = now - timedelta(minutes=4)
+        emergency.assigned_at = now - timedelta(minutes=4)
         normal = db.get(Order, second["id"])
         normal.created_at = now - timedelta(minutes=4)
+        normal.assigned_at = now - timedelta(minutes=4)
         normal.deadline = now - timedelta(minutes=2)
         finished = db.get(Order, third["id"])
         finished.status = "ai_review"

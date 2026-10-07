@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/app_controller.dart';
+import 'package:naryad_ai/data/local_store.dart';
 import 'package:naryad_ai/data/models.dart';
 import 'package:naryad_ai/screens/completion_screen.dart';
 import 'package:naryad_ai/screens/order_detail_screen.dart';
@@ -52,7 +53,7 @@ class _Controller extends AppController {
     this.uncertain = false,
     String role = 'worker',
     int userId = 6,
-  }) {
+  }) : super(localStore: MemoryLocalStore()) {
     user = User(id: userId, name: 'Алексей Ким', role: role);
     reference = {
       'fault_codes': [

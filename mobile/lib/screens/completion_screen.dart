@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../data/api.dart';
 import '../data/app_controller.dart';
+import '../data/local_store.dart';
 import '../data/models.dart';
 import '../widgets/order_photo.dart';
 
@@ -74,7 +75,15 @@ class _CompletionScreenState extends State<CompletionScreen> {
   bool get _uploading => _photos.any((photo) => photo.uploading);
   bool get _locked => _sending || _picking || _uploading || _checking;
   bool get _hasAfter =>
-      _serverPhotos.isNotEmpty || _photos.any((photo) => photo.uploaded);
+      _serverPhotos.isNotEmpty ||
+      _photos.any((photo) => photo.uploaded) ||
+      widget.controller.outbox.any(
+        (command) =>
+            command.kind == OutboxKind.uploadPhoto &&
+            command.photoKind == 'after' &&
+            (command.orderId == widget.order.id ||
+                command.localRef == '${widget.order.id}'),
+      );
 
   Future<void> _addMaterial() async {
     final rows = _maps(widget.controller.reference['materials']);
@@ -192,7 +201,10 @@ class _CompletionScreenState extends State<CompletionScreen> {
         'after',
       );
       if (!mounted) return;
-      setState(() => photo.uploaded = true);
+      setState(() {
+        photo.uploaded = true;
+        photo.queued = widget.controller.isOrderPending(widget.order.id);
+      });
       // A failed refresh must not turn an acknowledged upload into a retry.
       try {
         final fresh = await widget.controller.loadOrder(widget.order.id);
@@ -340,7 +352,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
         content: Text(
           _uncertain
               ? 'Результат отправки ещё не подтверждён. Сначала проверьте карточку наряда перед новым отчётом, чтобы не списать материалы дважды. Текст этой формы после закрытия не сохранится.'
-              : 'Текст и материалы ещё не сохранены на устройстве и будут потеряны. Уже загруженные фотографии останутся у наряда на сервере.',
+              : 'Текст и материалы ещё не сохранены на устройстве и будут потеряны. Отправленные фотографии останутся у наряда, ожидающие отправки — в очереди на устройстве.',
         ),
         actions: [
           TextButton(
@@ -551,7 +563,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
               ),
               const SizedBox(height: 16),
               const Text(
-                'Форма хранится только пока открыт этот экран. Офлайн-отправка пока недоступна.',
+                'До отправки текст хранится только на этом экране. Отправленный без связи отчёт сохраняется на устройстве и ожидает синхронизации.',
                 style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
               ),
               const SizedBox(height: 20),
@@ -719,7 +731,9 @@ class _CompletionScreenState extends State<CompletionScreen> {
                 children: [
                   Text(
                     photo.uploaded
-                        ? 'Фото получено сервером'
+                        ? photo.queued
+                              ? 'Фото сохранено на устройстве. Ожидает отправки.'
+                              : 'Фото получено сервером'
                         : photo.uploading
                         ? 'Фото отправляется…'
                         : photo.uncertain
@@ -797,6 +811,7 @@ class _PendingPhoto {
   final String filename;
   bool uploading = false;
   bool uploaded = false;
+  bool queued = false;
   bool uncertain = false;
   String? error;
 }

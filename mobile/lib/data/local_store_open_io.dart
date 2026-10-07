@@ -9,11 +9,7 @@ Future<LocalStore> openLocalStore() async {
     await store.open();
     return store;
   } catch (error) {
-    debugPrint(
-      '[naryad.store] sqflite unavailable; using in-memory store: $error',
-    );
-    final store = MemoryLocalStore();
-    await store.open();
-    return store;
+    debugPrint('[naryad.store] persistent storage unavailable: $error');
+    rethrow;
   }
 }

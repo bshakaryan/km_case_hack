@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/app_controller.dart';
+import 'package:naryad_ai/data/local_store.dart';
 import 'package:naryad_ai/data/models.dart';
 import 'package:naryad_ai/main.dart';
 import 'package:naryad_ai/screens/login_screen.dart';
@@ -9,6 +10,7 @@ import 'package:naryad_ai/screens/order_detail_screen.dart';
 import 'package:naryad_ai/screens/workspace_screen.dart';
 
 class TestController extends AppController {
+  TestController() : super(localStore: MemoryLocalStore());
   int logins = 0;
   @override
   Future<void> restoreSession() async {}
@@ -164,23 +166,22 @@ void main() {
     },
   );
 
-  testWidgets(
-    'Offline banner builds without a color/decoration conflict',
-    (tester) async {
-      final c = TestController()
-        ..user = const User(id: 1, name: 'Мастер', role: 'master')
-        ..offline = true;
-      addTearDown(c.dispose);
-      await tester.pumpWidget(NaryadApp(controller: c));
-      expect(
-        find.text(
-          'Нет соединения. Действия сохраняются на устройстве и отправятся после восстановления связи.',
-        ),
-        findsOneWidget,
-      );
-      expect(tester.takeException(), isNull);
-    },
-  );
+  testWidgets('Offline banner builds without a color/decoration conflict', (
+    tester,
+  ) async {
+    final c = TestController()
+      ..user = const User(id: 1, name: 'Мастер', role: 'master')
+      ..offline = true;
+    addTearDown(c.dispose);
+    await tester.pumpWidget(NaryadApp(controller: c));
+    expect(
+      find.text(
+        'Нет соединения. Действия сохраняются на устройстве и отправятся после восстановления связи.',
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('Order detail opens instantly from cache while offline', (
     tester,

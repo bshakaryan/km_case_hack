@@ -318,9 +318,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                               c.conflictCommands.isEmpty
                                   ? 'На устройстве ${c.outbox.where((item) => item.state != OutboxState.conflict).length} действие(й) ожидает отправки после восстановления связи.'
                                   : 'Некоторые сохранённые действия требуют решения: сервер их не принял.',
-                              color: c.conflictCommands.isEmpty
-                                  ? navy
-                                  : danger,
+                              color: c.conflictCommands.isEmpty ? navy : danger,
                               icon: c.conflictCommands.isEmpty
                                   ? Icons.sync
                                   : Icons.warning_amber_outlined,
@@ -488,7 +486,7 @@ class SyncQueueDialog extends StatelessWidget {
       builder: (context) => AlertDialog(
         title: const Text('Удалить команду?'),
         content: const Text(
-          'Действие не будет отправлено на сервер. Зависимые команды (фото, сдача) тоже будут удалены.',
+          'Повторная отправка будет остановлена. Если сервер уже сохранил действие, удаление команды его не отменит. Зависимые команды (фото, сдача) тоже будут удалены. Проверьте состояние наряда после восстановления связи.',
         ),
         actions: [
           TextButton(

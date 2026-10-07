@@ -58,9 +58,12 @@ class AppController extends ChangeNotifier {
   Future<void>? _refreshFuture;
   Future<void> _storageTail = Future.value();
   Future<LocalStore>? _localFuture;
+  Future<void> _cacheTail = Future.value();
+  Future<void>? _syncFuture;
   DateTime? _lastSnapshotWrite;
   int _session = 0;
   int _dataRevision = 0;
+  int _outboxReloadRevision = 0;
   bool _disposed = false;
 
   bool _current(int session) => !_disposed && session == _session;
@@ -89,15 +92,40 @@ class AppController extends ChangeNotifier {
     _lastSnapshotWrite = null;
     _refreshFuture = null;
     _outboxCache.clear();
+    _resolvedIds.clear();
     _poll?.cancel();
     _poll = null;
   }
 
-  Future<LocalStore> _local() => _localFuture ??= () async {
-    final store = _providedStore ?? await openLocalStore();
-    await store.open();
-    return store;
-  }();
+  Future<LocalStore> _local() {
+    if (_localFuture != null) return _localFuture!;
+    final pending = () async {
+      final store = _providedStore;
+      if (store == null) return openLocalStore();
+      await store.open();
+      return store;
+    }();
+    _localFuture = pending;
+    pending.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {
+        if (identical(_localFuture, pending)) _localFuture = null;
+      },
+    );
+    return pending;
+  }
+
+  String _scope(String key, {NaryadApi? source, int? ownerId}) =>
+      localScopeKey((source ?? api).baseUrl, ownerId ?? user!.id, key);
+
+  bool _owns(OutboxCommand command, NaryadApi source, int ownerId) =>
+      command.serverUrl == source.baseUrl && command.ownerId == ownerId;
+
+  Future<void> _cacheWrite(Future<void> Function() action) {
+    final next = _cacheTail.then((_) => action());
+    _cacheTail = next.catchError((Object _) {});
+    return next;
+  }
 
   // Serialize storage writes so a delayed login cannot restore a logged-out token.
   Future<void> _store(Future<void> Function() action) {
@@ -113,21 +141,27 @@ class AppController extends ChangeNotifier {
     if (_current(session)) {
       await _storage.write(
         key: _sessionKey,
-        value: jsonEncode({'base_url': source.baseUrl, 'token': source.token}),
+        value: jsonEncode({
+          'base_url': source.baseUrl,
+          'token': source.token,
+          'owner_id': user!.id,
+        }),
       );
     }
   });
 
   Future<void> _persistProfile(int session, Json profile) async {
     if (kIsWeb) return;
+    final key = _scope(
+      SnapshotKeys.profile,
+      ownerId: (profile['id'] as num).toInt(),
+    );
     try {
-      final store = await _local();
-      if (!_current(session)) return;
-      await store.putSnapshot(
-        SnapshotKeys.profile,
-        profile,
-        updatedAt: DateTime.now(),
-      );
+      await _cacheWrite(() async {
+        final store = await _local();
+        if (!_current(session)) return;
+        await store.putSnapshot(key, profile, updatedAt: DateTime.now());
+      });
     } catch (_) {
       // Local storage is best effort: login must not fail with it.
     }
@@ -165,6 +199,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> _persistSnapshot(int session, {bool force = false}) async {
     if (kIsWeb || user == null) return;
+    final source = api;
+    final ownerId = user!.id;
     final now = DateTime.now();
     if (!force &&
         _lastSnapshotWrite != null &&
@@ -172,39 +208,26 @@ class AppController extends ChangeNotifier {
       return;
     }
     _lastSnapshotWrite = now;
+    final values = <String, Object?>{
+      SnapshotKeys.orders: orders.map((order) => order.data).toList(),
+      SnapshotKeys.reference: reference,
+      SnapshotKeys.employees: employees,
+      SnapshotKeys.dashboard: dashboard,
+      SnapshotKeys.notifications: notifications,
+      SnapshotKeys.analytics: analytics,
+    };
     try {
-      final store = await _local();
-      if (!_current(session)) return;
-      await store.putSnapshot(
-        SnapshotKeys.orders,
-        orders.map((order) => order.data).toList(),
-        updatedAt: now,
-      );
-      await store.putSnapshot(
-        SnapshotKeys.reference,
-        reference,
-        updatedAt: now,
-      );
-      await store.putSnapshot(
-        SnapshotKeys.employees,
-        employees,
-        updatedAt: now,
-      );
-      await store.putSnapshot(
-        SnapshotKeys.dashboard,
-        dashboard,
-        updatedAt: now,
-      );
-      await store.putSnapshot(
-        SnapshotKeys.notifications,
-        notifications,
-        updatedAt: now,
-      );
-      await store.putSnapshot(
-        SnapshotKeys.analytics,
-        analytics,
-        updatedAt: now,
-      );
+      await _cacheWrite(() async {
+        final store = await _local();
+        for (final entry in values.entries) {
+          if (!_current(session)) return;
+          await store.putSnapshot(
+            _scope(entry.key, source: source, ownerId: ownerId),
+            entry.value,
+            updatedAt: now,
+          );
+        }
+      });
     } catch (_) {
       // Best effort: a failed snapshot write never breaks the online flow.
     }
@@ -212,8 +235,13 @@ class AppController extends ChangeNotifier {
 
   Future<void> flushSnapshot() => _persistSnapshot(_session, force: true);
 
-  Future<void> _hydrateSnapshot() async {
+  Future<void> _hydrateSnapshot(
+    int session,
+    NaryadApi source,
+    int ownerId,
+  ) async {
     try {
+      await _cacheTail;
       final store = await _local();
       Json? profile;
       Object? rawOrders;
@@ -224,7 +252,9 @@ class AppController extends ChangeNotifier {
       Object? rawAnalytics;
       DateTime? stamped;
       for (final key in SnapshotKeys.all) {
-        final entry = await store.getSnapshot(key);
+        final entry = await store.getSnapshot(
+          _scope(key, source: source, ownerId: ownerId),
+        );
         if (entry == null) continue;
         if (stamped == null || entry.updatedAt.isAfter(stamped)) {
           stamped = entry.updatedAt;
@@ -246,7 +276,10 @@ class AppController extends ChangeNotifier {
             rawAnalytics = entry.data;
         }
       }
-      if (profile != null) user = User.fromJson(profile);
+      if (!_current(session) || profile == null || profile['id'] != ownerId) {
+        return;
+      }
+      user = User.fromJson(profile);
       if (rawReference is Json) reference = rawReference;
       if (rawEmployees is List) {
         employees = rawEmployees.whereType<Json>().toList();
@@ -265,12 +298,14 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _clearLocalData() async {
+  Future<void> _clearLocalData(String prefix) async {
     if (kIsWeb) return;
     try {
-      final store = await _local();
-      await store.clearSnapshots();
-      await store.clearPhotos();
+      await _cacheWrite(() async {
+        final store = await _local();
+        await store.clearSnapshots(prefix: prefix);
+        await store.clearPhotos(prefix: prefix);
+      });
     } catch (_) {
       // Local cleanup is best effort.
     }
@@ -336,6 +371,17 @@ class AppController extends ChangeNotifier {
       final result = await next.login(login, pin);
       if (!_current(session)) return;
       user = User.fromJson(result['user'] as Json);
+      final authenticated = user!;
+      await _syncFuture;
+      if (!_current(session)) return;
+      try {
+        await (await _local()).resetRunningOutbox();
+        await _hydrateSnapshot(session, next, authenticated.id);
+      } catch (_) {
+        // Authentication is usable for reading even if durable writes are not.
+      }
+      if (!_current(session)) return;
+      user = authenticated;
       debugPrint(
         '[naryad.login] authenticated user=#${user!.id} tokenLength=${next.token?.length}',
       );
@@ -362,7 +408,7 @@ class AppController extends ChangeNotifier {
       }
       if (_current(session) && storageWarning != null) error = storageWarning;
       await _registerDevice(session, next);
-      unawaited(_reloadOutbox());
+      await _reloadOutbox();
     } catch (failure) {
       if (_current(session)) error = failure.toString();
       rethrow;
@@ -385,6 +431,7 @@ class AppController extends ChangeNotifier {
     error = null;
     loading = true;
     _notify();
+    var legacySession = false;
     try {
       await _storageTail;
       final saved = await _storage.read(key: _sessionKey);
@@ -394,8 +441,7 @@ class AppController extends ChangeNotifier {
       );
       if (saved == null) {
         if (_current(session) && await _readEverLoggedIn()) {
-          error =
-              'Сохранённая сессия недоступна на этом устройстве. Войдите снова.';
+          error = 'Сохранённая сессия недоступна на этом устройстве. Войдите снова.';
           debugPrint(
             '[naryad.restore] prior login seen but secure storage lost the key',
           );
@@ -416,7 +462,10 @@ class AppController extends ChangeNotifier {
       // A saved session exists: keep a splash, never flash the login form.
       restoring = true;
       _notify();
-      await _hydrateSnapshot();
+      final savedOwner = value['owner_id'];
+      final ownerId = savedOwner is num ? savedOwner.toInt() : null;
+      legacySession = ownerId == null;
+      if (ownerId != null) await _hydrateSnapshot(session, next, ownerId);
       debugPrint('[naryad.restore] snapshot user=#${user?.id}');
       if (!_current(session)) return;
       if (user != null) {
@@ -436,13 +485,15 @@ class AppController extends ChangeNotifier {
       if (!_current(session)) return;
       user = restoredUser;
       offline = false;
-      unawaited(
-        _persistProfile(session, {
-          'id': restoredUser.id,
-          'name': restoredUser.name,
-          'role': restoredUser.role,
-        }),
-      );
+      await _hydrateSnapshot(session, next, restoredUser.id);
+      if (!_current(session)) return;
+      user = restoredUser;
+      await _persist(session, next);
+      await _persistProfile(session, {
+        'id': restoredUser.id,
+        'name': restoredUser.name,
+        'role': restoredUser.role,
+      });
       _startPolling();
       try {
         await refresh(silent: true);
@@ -459,6 +510,10 @@ class AppController extends ChangeNotifier {
         } else {
           error = failure is FormatException
               ? 'Сохранённая сессия недоступна. Войдите снова.'
+              : legacySession &&
+                    failure is ApiException &&
+                    failure.statusCode == 0
+              ? 'Нет связи с сервером. Старый офлайн-кэш нельзя безопасно связать с аккаунтом. Подключитесь к сети и войдите снова.'
               : failure.toString();
           debugPrint('[naryad.restore] error: $failure');
         }
@@ -488,20 +543,28 @@ class AppController extends ChangeNotifier {
       if (failure is ApiException && failure.statusCode == 0) {
         // No connection: the amber offline banner replaces the dashboard error.
         offline = true;
-        debugPrint('[naryad.restore] validation unreachable; offline dashboard');
+        debugPrint(
+          '[naryad.restore] validation unreachable; offline dashboard',
+        );
         return;
       }
       error = failure.toString();
       return;
     }
     if (!_current(session)) return;
+    if (user != null && user!.id != fresh.id) {
+      _expireSession();
+      return;
+    }
     offline = false;
     user = fresh;
-    unawaited(_persistProfile(session, {
-      'id': fresh.id,
-      'name': fresh.name,
-      'role': fresh.role,
-    }));
+    unawaited(
+      _persistProfile(session, {
+        'id': fresh.id,
+        'name': fresh.name,
+        'role': fresh.role,
+      }),
+    );
     try {
       await refresh(silent: true);
     } catch (_) {
@@ -514,6 +577,7 @@ class AppController extends ChangeNotifier {
     final previous = api;
     // Start while the bearer token is still attached to the client.
     final pushUnregister = _unregisterDevice();
+    final cachePrefix = user == null ? null : _scope('');
     final revocation = previous.token == null
         ? Future<void>.value()
         : previous.logout();
@@ -528,7 +592,7 @@ class AppController extends ChangeNotifier {
     pendingPushOrderId = null;
     error = null;
     _notify();
-    unawaited(_clearLocalData());
+    if (cachePrefix != null) unawaited(_clearLocalData(cachePrefix));
     await _clearEverLoggedIn();
     try {
       await _store(() => _storage.delete(key: _sessionKey));
@@ -595,6 +659,8 @@ class AppController extends ChangeNotifier {
       lastUpdated = DateTime.now();
       offline = false;
       error = null;
+      await _reloadOutbox();
+      if (!_current(session)) return;
       unawaited(_persistSnapshot(session));
       unawaited(syncOutbox());
     } catch (failure) {
@@ -630,6 +696,15 @@ class AppController extends ChangeNotifier {
 
   Future<WorkOrder> loadOrder(int id) async {
     if (id < 0) {
+      if (user != null) {
+        final session = _session;
+        final mappingKey = _scope('$id');
+        final mapped = await (await _local()).serverId(mappingKey);
+        if (!_current(session)) {
+          throw const ApiException('Сессия изменилась.', 401);
+        }
+        if (mapped != null) return loadOrder(mapped);
+      }
       final cached = orders.where((item) => item.id == id);
       if (cached.isEmpty) {
         throw const ApiException('Наряд не найден локально.', 404);
@@ -642,7 +717,12 @@ class AppController extends ChangeNotifier {
       if (!_current(session)) {
         throw const ApiException('Сессия изменилась.', 401);
       }
-      return result;
+      _upsert(result);
+      await _reloadOutbox();
+      if (!_current(session)) {
+        throw const ApiException('Сессия изменилась.', 401);
+      }
+      return orders.firstWhere((order) => order.id == id);
     } catch (failure) {
       if (_current(session) &&
           failure is ApiException &&
@@ -663,16 +743,29 @@ class AppController extends ChangeNotifier {
   }
 
   Future<Uint8List> photoBytes(int id) async {
-    final url = '${api.baseUrl}/photos/$id';
+    if (user == null) throw const ApiException('Войдите в приложение.', 401);
+    final session = _session;
+    final source = api;
+    final key = _scope('photo:$id');
     try {
-      final cached = await (await _local()).getPhoto(url);
-      if (cached != null) return cached;
+      final cached = await (await _local()).getPhoto(key);
+      if (cached != null && _current(session)) return cached;
     } catch (_) {
       // Cache failures fall through to the network load.
     }
-    final bytes = await api.photo(id);
+    if (!_current(session)) throw const ApiException('Сессия изменилась.', 401);
+    Uint8List bytes;
     try {
-      await (await _local()).putPhoto(url, bytes);
+      bytes = await source.photo(id);
+    } on ApiException catch (failure) {
+      if (_current(session) && failure.statusCode == 401) _expireSession();
+      rethrow;
+    }
+    if (!_current(session)) throw const ApiException('Сессия изменилась.', 401);
+    try {
+      await _cacheWrite(() async {
+        if (_current(session)) await (await _local()).putPhoto(key, bytes);
+      });
     } catch (_) {
       // A failed cache write must not break viewing the photo.
     }
@@ -682,49 +775,110 @@ class AppController extends ChangeNotifier {
   static const maxSendAttempts = 12;
 
   final List<OutboxCommand> _outboxCache = [];
+  final Map<String, int> _resolvedIds = {};
   List<OutboxCommand> get outbox => List.unmodifiable(_outboxCache);
+  bool get syncing => _syncFuture != null;
+  bool hasQueuedWritesForOrder(int id) => _outboxCache.any(
+    (command) =>
+        command.kind != OutboxKind.markRead &&
+        (command.orderId == id ||
+            command.localRef == '$id' ||
+            _resolvedIds[command.localRef] == id),
+  );
+  bool isOrderPending(int id) => hasQueuedWritesForOrder(id);
   bool get hasPendingWrites =>
       _outboxCache.any((command) => command.state != OutboxState.conflict);
-  List<OutboxCommand> get conflictCommands =>
-      _outboxCache.where((command) => command.state == OutboxState.conflict).toList();
+  List<OutboxCommand> get conflictCommands => _outboxCache
+      .where((command) => command.state == OutboxState.conflict)
+      .toList();
 
   String _newCommandId() {
     final random = Random.secure();
     final bytes = List<int>.generate(16, (_) => random.nextInt(256));
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    final hex = bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+    final hex = bytes
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
     return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
   }
 
   Future<void> _reloadOutbox() async {
+    if (user == null) return;
+    final reloadRevision = ++_outboxReloadRevision;
+    final session = _session;
+    final source = api;
+    final ownerId = user!.id;
     try {
       final store = await _local();
       final commands = await store.outbox();
       final relevant = commands
-          .where((command) =>
-              command.ownerId == null || command.ownerId == user?.id)
+          .where((command) => _owns(command, source, ownerId))
           .toList();
-      if (_disposed) return;
-      _outboxCache
-        ..clear()
-        ..addAll(relevant);
+      if (!_current(session) || reloadRevision != _outboxReloadRevision) return;
       final activeRefs = relevant
           .map((command) => command.localRef)
           .whereType<String>()
           .toSet();
       final mapped = <String>{};
+      final resolvedIds = <String, int>{};
       for (final ref in activeRefs) {
-        final serverId = await store.serverId(ref);
-        if (serverId != null) mapped.add(ref);
+        final serverId = await store.serverId(
+          _scope(ref, source: source, ownerId: ownerId),
+        );
+        if (serverId != null) {
+          mapped.add(ref);
+          resolvedIds[ref] = serverId;
+        }
       }
+      if (!_current(session) || reloadRevision != _outboxReloadRevision) return;
+      _outboxCache
+        ..clear()
+        ..addAll(relevant);
+      _resolvedIds
+        ..clear()
+        ..addAll(resolvedIds);
       final kept = orders.where((order) {
         if (order.id >= 0) return true;
         final ref = '${order.id}';
         return activeRefs.contains(ref) && !mapped.contains(ref);
       }).toList();
-      if (kept.length != orders.length) {
-        orders = kept;
+      orders = kept.map((order) {
+        final data = Map<String, dynamic>.from(order.data);
+        final confirmed = data.remove('_server_status');
+        if (confirmed is String) data['status'] = confirmed;
+        data.remove('_queued_status');
+        data.remove('_pending_sync');
+        return WorkOrder.fromJson(data);
+      }).toList();
+      for (final command in relevant) {
+        if (command.kind == OutboxKind.markRead) continue;
+        final id =
+            command.orderId ??
+            resolvedIds[command.localRef] ??
+            int.tryParse(command.localRef ?? '');
+        if (id == null) continue;
+        if (command.kind == OutboxKind.createOrder &&
+            id < 0 &&
+            !orders.any((order) => order.id == id)) {
+          _upsert(_offlineCreated(command.payload, '$id'));
+        }
+        final existing = orders.where((order) => order.id == id).firstOrNull;
+        if (existing == null) continue;
+        final data = Map<String, dynamic>.from(existing.data);
+        data['_pending_sync'] = true;
+        data['_server_status'] ??= data['status'];
+        if (command.state != OutboxState.conflict) {
+          if (command.kind == OutboxKind.transition) {
+            data['status'] = _transitionedStatus(
+              command.payload['action'] as String,
+            );
+          } else if (command.kind == OutboxKind.complete) {
+            data['status'] = 'ai_review';
+          }
+        }
+        data['_queued_status'] = data['status'];
+        _upsert(WorkOrder.fromJson(data));
       }
       _notify();
     } catch (_) {
@@ -733,7 +887,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> retryCommand(String commandId) async {
-    if (kIsWeb || user == null || saving) return;
+    if (user == null || saving) return;
     final session = _session;
     try {
       final store = await _local();
@@ -741,7 +895,7 @@ class AppController extends ChangeNotifier {
       final commands = await store.outbox();
       OutboxCommand? command;
       for (final item in commands) {
-        if (item.commandId == commandId) {
+        if (item.commandId == commandId && _owns(item, api, user!.id)) {
           command = item;
           break;
         }
@@ -764,7 +918,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> discardCommand(String commandId) async {
-    if (kIsWeb || user == null) return;
+    if (user == null) return;
     final session = _session;
     try {
       final store = await _local();
@@ -772,7 +926,7 @@ class AppController extends ChangeNotifier {
       final commands = await store.outbox();
       OutboxCommand? command;
       for (final item in commands) {
-        if (item.commandId == commandId) {
+        if (item.commandId == commandId && _owns(item, api, user!.id)) {
           command = item;
           break;
         }
@@ -782,12 +936,20 @@ class AppController extends ChangeNotifier {
         return;
       }
       final target = command;
-      final dependents = commands
-          .where((item) =>
-              item.commandId != commandId &&
-              item.localRef != null &&
-              item.localRef == target.localRef)
-          .toList();
+      final targetLane = await _lane(store, target);
+      final dependents = <OutboxCommand>[];
+      var afterTarget = false;
+      for (final item in commands) {
+        if (item.commandId == commandId) {
+          afterTarget = true;
+          continue;
+        }
+        if (afterTarget &&
+            _owns(item, api, user!.id) &&
+            await _lane(store, item) == targetLane) {
+          dependents.add(item);
+        }
+      }
       await store.removeOutbox(commandId);
       for (final dependent in dependents) {
         await store.removeOutbox(dependent.commandId);
@@ -797,7 +959,9 @@ class AppController extends ChangeNotifier {
         ...dependents.map((item) => item.localRef),
       ]) {
         if (localRef == null) continue;
-        await store.removeServerId(localRef);
+        if (target.kind == OutboxKind.createOrder) {
+          await store.removeServerId(_scope(localRef));
+        }
       }
       await _reloadOutbox();
     } catch (_) {
@@ -805,39 +969,71 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> syncOutbox() async {
-    if (kIsWeb || user == null || saving) return;
-    final session = _session;
-    final source = api;
+  Future<void> syncOutbox() {
+    if (_syncFuture != null) return _syncFuture!;
+    if (user == null || saving || _disposed) return Future.value();
+    final pending = _syncOutbox(_session, api, user!.id);
+    _syncFuture = pending;
+    pending.whenComplete(() {
+      if (identical(_syncFuture, pending)) _syncFuture = null;
+      _notify();
+    });
+    return pending;
+  }
+
+  Future<String> _lane(LocalStore store, OutboxCommand command) async {
+    if (command.kind == OutboxKind.markRead) {
+      return 'notification:${command.orderId}';
+    }
+    final ref = command.localRef;
+    var id = command.orderId;
+    if (id == null &&
+        ref != null &&
+        command.serverUrl != null &&
+        command.ownerId != null) {
+      id = await store.serverId(
+        localScopeKey(command.serverUrl!, command.ownerId!, ref),
+      );
+    }
+    return id == null ? 'local:$ref' : 'order:$id';
+  }
+
+  Future<void> _syncOutbox(int session, NaryadApi source, int ownerId) async {
     try {
       final store = await _local();
       if (!_current(session)) return;
       final commands = await store.outbox();
       final relevant = commands
-          .where((command) =>
-              command.ownerId == null || command.ownerId == user!.id)
-          .where((command) =>
-              command.state != OutboxState.conflict &&
-              command.state != OutboxState.running)
+          .where((command) => _owns(command, source, ownerId))
           .toList();
       if (relevant.isEmpty) return;
       var sent = false;
       final blocked = <String>{};
       for (final command in relevant) {
+        if (!_current(session)) break;
+        final lane = await _lane(store, command);
+        if (blocked.contains(lane)) continue;
+        if (command.state == OutboxState.conflict ||
+            command.state == OutboxState.running) {
+          blocked.add(lane);
+          continue;
+        }
         var orderId = command.orderId;
         if (command.kind != OutboxKind.createOrder) {
-          if (command.localRef != null && blocked.contains(command.localRef)) {
-            continue;
-          }
           if (orderId == null && command.localRef != null) {
-            final resolved = await store.serverId(command.localRef!);
+            final resolved = await store.serverId(
+              _scope(command.localRef!, source: source, ownerId: ownerId),
+            );
             if (resolved == null) {
-              blocked.add(command.localRef!);
+              blocked.add(lane);
               continue;
             }
             orderId = resolved;
           }
-          if (orderId == null) continue;
+          if (orderId == null) {
+            blocked.add(lane);
+            continue;
+          }
         }
         final handled = await _sendCommand(
           store,
@@ -846,9 +1042,19 @@ class AppController extends ChangeNotifier {
           command,
           orderId ?? 0,
         );
-        if (handled) sent = true;
+        if (handled) {
+          sent = true;
+        } else {
+          blocked.add(lane);
+        }
       }
       if (sent && _current(session)) {
+        // Drain the read started before the queued write, then fetch a new
+        // snapshot instead of coalescing with a stale in-flight refresh.
+        try {
+          await _refreshFuture;
+        } catch (_) {}
+        if (!_current(session)) return;
         try {
           await refresh(silent: true);
         } catch (_) {
@@ -867,63 +1073,34 @@ class AppController extends ChangeNotifier {
     OutboxCommand command,
     int orderId,
   ) async {
+    if (!_current(session)) return false;
     await store.updateOutbox(command.copyWith(state: OutboxState.running));
+    if (!_current(session)) {
+      await store.updateOutbox(command.copyWith(state: OutboxState.pending));
+      return false;
+    }
     try {
-      switch (command.kind) {
-        case OutboxKind.createOrder:
-          final result = await source.createOrder(
-            command.payload,
-            commandId: command.commandId,
-          );
-          if (command.localRef != null) {
-            await store.putServerId(command.localRef!, result.id);
-          }
-        case OutboxKind.transition:
-          await source.transition(
-            orderId,
-            command.payload['action'] as String,
-            reason: command.payload['reason'] as String?,
-            score: (command.payload['score'] as num?)?.toDouble(),
-            commandId: command.commandId,
-          );
-        case OutboxKind.complete:
-          await source.complete(
-            orderId,
-            command.payload,
-            commandId: command.commandId,
-          );
-        case OutboxKind.uploadPhoto:
-          final bytes = await store.outboxPhoto(command.commandId);
-          if (bytes == null) {
-            await store.updateOutbox(
-              command.copyWith(
-                state: OutboxState.conflict,
-                lastError: 'Локальная фотография недоступна.',
-              ),
-            );
-            await _reloadOutbox();
-            return false;
-          }
-          await source.uploadPhoto(
-            orderId,
-            bytes,
-            command.photoFilename ?? 'photo.jpg',
-            command.photoKind ?? 'before',
-            commandId: command.commandId,
-          );
-        case OutboxKind.markRead:
-          await source.markRead(orderId);
-      }
+      final result = await _executeCommand(store, source, command, orderId);
       if (!_current(session)) {
         await store.updateOutbox(command.copyWith(state: OutboxState.pending));
         return false;
       }
       await store.removeOutbox(command.commandId);
+      if (!_current(session)) return true;
+      ++_dataRevision;
+      if (result is WorkOrder) _upsert(result);
       await _reloadOutbox();
       return true;
     } on ApiException catch (failure) {
-      if (_current(session) && failure.statusCode == 401) {
-        _expireSession();
+      if (failure.statusCode == 401) {
+        await store.updateOutbox(
+          command.copyWith(
+            state: OutboxState.pending,
+            responseStatus: 401,
+            lastError: failure.message,
+          ),
+        );
+        if (_current(session)) _expireSession();
         return false;
       }
       final retryable =
@@ -957,11 +1134,63 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<dynamic> _executeCommand(
+    LocalStore store,
+    NaryadApi source,
+    OutboxCommand command,
+    int orderId,
+  ) async {
+    switch (command.kind) {
+      case OutboxKind.createOrder:
+        final result = await source.createOrder(
+          command.payload,
+          commandId: command.commandId,
+        );
+        if (command.localRef != null) {
+          await store.putServerId(
+            localScopeKey(source.baseUrl, command.ownerId!, command.localRef!),
+            result.id,
+          );
+        }
+        return result;
+      case OutboxKind.transition:
+        return source.transition(
+          orderId,
+          command.payload['action'] as String,
+          reason: command.payload['reason'] as String?,
+          score: (command.payload['score'] as num?)?.toDouble(),
+          commandId: command.commandId,
+        );
+      case OutboxKind.complete:
+        return source.complete(
+          orderId,
+          command.payload,
+          commandId: command.commandId,
+        );
+      case OutboxKind.uploadPhoto:
+        final bytes = await store.outboxPhoto(command.commandId);
+        if (bytes == null) {
+          throw const ApiException('Локальная фотография недоступна.', 422);
+        }
+        await source.uploadPhoto(
+          orderId,
+          bytes,
+          command.photoFilename ?? 'photo.jpg',
+          command.photoKind ?? 'before',
+          commandId: command.commandId,
+        );
+        return null;
+      case OutboxKind.markRead:
+        await source.markRead(orderId);
+        return null;
+      default:
+        throw const ApiException('Неизвестная локальная команда.', 422);
+    }
+  }
+
   Future<dynamic> _save({
     required String kind,
     required Json payload,
-    required Future<dynamic> Function(NaryadApi source, String commandId)
-    action,
     required dynamic Function(OutboxCommand command) onOffline,
     Uint8List? photoBytes,
     String? photoFilename,
@@ -978,13 +1207,117 @@ class AppController extends ChangeNotifier {
     }
     final session = _session;
     final source = api;
+    final ownerId = user!.id;
     final commandId = _newCommandId();
     saving = true;
     error = null;
     _notify();
     try {
+      await _syncFuture;
+      if (!_current(session)) {
+        throw const ApiException('Сессия изменилась.', 401);
+      }
+      LocalStore store;
       try {
-        final result = await action(source, commandId);
+        store = await _local();
+      } catch (_) {
+        throw const ApiException(
+          'Не удалось сохранить действие на устройстве. Оно не отправлено. Проверьте свободное место и повторите.',
+          507,
+        );
+      }
+      if (!_current(session)) {
+        throw const ApiException('Сессия изменилась.', 401);
+      }
+      final previous = (await store.outbox())
+          .where((item) => _owns(item, source, ownerId))
+          .toList();
+      var createdAt = DateTime.now().millisecondsSinceEpoch;
+      for (final item in previous) {
+        if (item.createdAt >= createdAt) createdAt = item.createdAt + 1;
+      }
+      // Both the key and media must exist on disk BEFORE any HTTP write.
+      // A killed process can then replay the exact same command safely.
+      late OutboxCommand command;
+      try {
+        command = await store.enqueue(
+          OutboxCommand(
+            commandId: commandId,
+            kind: kind,
+            createdAt: createdAt,
+            serverUrl: source.baseUrl,
+            ownerId: ownerId,
+            orderId: orderId,
+            localRef: localRef,
+            payload: jsonDecode(jsonEncode(payload)) as Json,
+            photoFilename: photoFilename,
+            photoKind: photoKind,
+          ),
+          photoBytes: photoBytes,
+        );
+      } catch (_) {
+        throw const ApiException(
+          'Не удалось сохранить действие на устройстве. Оно не отправлено. Проверьте свободное место и повторите.',
+          507,
+        );
+      }
+      Future<dynamic> queuedResult() async {
+        if (!_current(session)) {
+          throw const ApiException('Сессия изменилась.', 401);
+        }
+        final result = onOffline(command);
+        ++_dataRevision;
+        if (result is WorkOrder) _upsert(result);
+        await _reloadOutbox();
+        await _persistSnapshot(session, force: true);
+        return result is WorkOrder
+            ? orders.firstWhere(
+                (order) => order.id == result.id,
+                orElse: () => result,
+              )
+            : result;
+      }
+
+      var resolvedId = orderId;
+      if (resolvedId == null &&
+          localRef != null &&
+          kind != OutboxKind.createOrder) {
+        resolvedId = await store.serverId(
+          _scope(localRef, source: source, ownerId: ownerId),
+        );
+      }
+      final lane = await _lane(store, command);
+      var hasPredecessor = false;
+      for (final item in previous) {
+        if (await _lane(store, item) == lane) {
+          hasPredecessor = true;
+          break;
+        }
+      }
+      if (offline ||
+          hasPredecessor ||
+          (kind != OutboxKind.createOrder && resolvedId == null)) {
+        return await queuedResult();
+      }
+      await store.updateOutbox(command.copyWith(state: OutboxState.running));
+      try {
+        if (!_current(session)) {
+          throw const ApiException('Сессия изменилась.', 401);
+        }
+        final result = await _executeCommand(
+          store,
+          source,
+          command,
+          resolvedId ?? 0,
+        );
+        if (!_current(session)) {
+          throw const ApiException(
+            'Сессия изменилась. Проверьте результат действия перед повтором.',
+            401,
+            requestMayHaveSucceeded: true,
+          );
+        }
+        await store.removeOutbox(commandId);
         if (!_current(session)) {
           throw const ApiException(
             'Сессия изменилась. Проверьте результат действия перед повтором.',
@@ -994,6 +1327,7 @@ class AppController extends ChangeNotifier {
         }
         ++_dataRevision;
         if (result is WorkOrder) _upsert(result);
+        await _reloadOutbox();
         try {
           await _refreshFuture;
         } catch (_) {}
@@ -1008,7 +1342,8 @@ class AppController extends ChangeNotifier {
           await refresh(silent: true);
         } catch (failure) {
           if (_current(session)) {
-            error = 'Действие сохранено, но обновить данные не удалось: $failure';
+            error =
+                'Действие сохранено, но обновить данные не удалось: $failure';
           }
         }
         if (!_current(session)) {
@@ -1020,31 +1355,38 @@ class AppController extends ChangeNotifier {
         }
         return result;
       } on ApiException catch (failure) {
-        if (!_current(session)) rethrow;
-        if (failure.statusCode != 0 && !failure.requestMayHaveSucceeded) {
+        if (!_current(session) || failure.statusCode == 401) {
+          await store.updateOutbox(
+            command.copyWith(
+              state: OutboxState.pending,
+              responseStatus: failure.statusCode,
+              lastError: failure.message,
+            ),
+          );
           rethrow;
         }
-        // The write may have reached the server: keep the keyed command for replay.
-        final command = await (await _local()).enqueue(
-          OutboxCommand(
-            commandId: commandId,
-            kind: kind,
-            createdAt: DateTime.now().millisecondsSinceEpoch,
-            ownerId: user!.id,
-            orderId: orderId,
-            localRef: localRef,
-            payload: payload,
-            photoFilename: photoFilename,
-            photoKind: photoKind,
+        if (failure.statusCode != 0 && !failure.requestMayHaveSucceeded) {
+          await store.removeOutbox(commandId);
+          await _reloadOutbox();
+          rethrow;
+        }
+        await store.updateOutbox(
+          command.copyWith(
+            state: OutboxState.pending,
+            responseStatus: failure.statusCode,
+            lastError: failure.message,
           ),
-          photoBytes: photoBytes,
         );
         offline = true;
-        await _reloadOutbox();
-        final result = onOffline(command);
-        ++_dataRevision;
-        if (result is WorkOrder) _upsert(result);
-        return result;
+        return await queuedResult();
+      } catch (failure) {
+        await store.updateOutbox(
+          command.copyWith(
+            state: OutboxState.pending,
+            lastError: failure.toString(),
+          ),
+        );
+        rethrow;
       }
     } catch (failure) {
       if (_current(session)) {
@@ -1125,6 +1467,7 @@ class AppController extends ChangeNotifier {
     final existing = orders.where((order) => order.id == id).toList();
     if (existing.isNotEmpty) {
       final data = Map<String, dynamic>.from(existing.first.data);
+      data['_server_status'] ??= data['status'];
       data['_queued_status'] = data['status'];
       return WorkOrder.fromJson(data);
     }
@@ -1147,13 +1490,12 @@ class AppController extends ChangeNotifier {
   }
 
   Future<WorkOrder> createOrder(Json data) async {
-    final localRef = '-${DateTime.now().millisecondsSinceEpoch}';
+    final localRef =
+        '-${int.parse(_newCommandId().replaceAll('-', '').substring(0, 13), radix: 16)}';
     final result = await _save(
       kind: OutboxKind.createOrder,
       payload: data,
       localRef: localRef,
-      action: (source, commandId) =>
-          source.createOrder(data, commandId: commandId),
       onOffline: (_) => _offlineCreated(data, localRef),
     );
     return result as WorkOrder;
@@ -1170,13 +1512,6 @@ class AppController extends ChangeNotifier {
       payload: {'action': action, 'reason': reason, 'score': score},
       orderId: id >= 0 ? id : null,
       localRef: id < 0 ? '$id' : null,
-      action: (source, commandId) => source.transition(
-        id,
-        action,
-        reason: reason,
-        score: score,
-        commandId: commandId,
-      ),
       onOffline: (command) {
         final updated = _offlineOrderState(id, score: score);
         final data = Map<String, dynamic>.from(updated.data);
@@ -1205,8 +1540,6 @@ class AppController extends ChangeNotifier {
       payload: data,
       orderId: id >= 0 ? id : null,
       localRef: id < 0 ? '$id' : null,
-      action: (source, commandId) =>
-          source.complete(id, data, commandId: commandId),
       onOffline: (command) {
         final updated = _offlineOrderState(id);
         final updatedData = Map<String, dynamic>.from(updated.data);
@@ -1225,6 +1558,12 @@ class AppController extends ChangeNotifier {
     String filename,
     String kind,
   ) async {
+    if (!['before', 'after'].contains(kind)) {
+      throw const ApiException('Неизвестный тип фотографии.', 422);
+    }
+    if (bytes.length > 10 * 1024 * 1024) {
+      throw const ApiException('Фотография больше допустимых 10 МБ.', 413);
+    }
     await _save(
       kind: OutboxKind.uploadPhoto,
       payload: {'order_id': id},
@@ -1233,13 +1572,6 @@ class AppController extends ChangeNotifier {
       photoBytes: bytes,
       photoFilename: filename,
       photoKind: kind,
-      action: (source, commandId) => source.uploadPhoto(
-        id,
-        bytes,
-        filename,
-        kind,
-        commandId: commandId,
-      ),
       onOffline: (_) => null,
     );
   }
@@ -1249,7 +1581,6 @@ class AppController extends ChangeNotifier {
       kind: OutboxKind.markRead,
       payload: const {},
       orderId: id,
-      action: (source, commandId) => source.markRead(id),
       onOffline: (_) => null,
     );
   }

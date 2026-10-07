@@ -55,6 +55,7 @@ class _DraftPhoto {
   final Uint8List bytes;
   final String filename;
   _PhotoState state = _PhotoState.ready;
+  bool queued = false;
   String? error;
 }
 
@@ -489,7 +490,10 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
             'before',
           );
           if (!mounted) return;
-          setState(() => photo.state = _PhotoState.uploaded);
+          setState(() {
+            photo.state = _PhotoState.uploaded;
+            photo.queued = widget.controller.isOrderPending(_created!.id);
+          });
         } on ApiException catch (error) {
           if (!mounted) return;
           setState(() {
@@ -516,7 +520,9 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
         Navigator.pop(context, _created);
       } else {
         setState(
-          () => _error = 'Наряд уже выдан. Не все фото подтверждены сервером. Повторная выдача не требуется.',
+          () => _error = _created!.pendingSync
+              ? 'Наряд сохранён на устройстве. Не все фотографии сохранены для отправки. Повторная выдача не требуется.'
+              : 'Наряд уже выдан. Не все фото подтверждены сервером. Повторная выдача не требуется.',
         );
       }
     } finally {
@@ -612,7 +618,10 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
                         _PhotoState.ready =>
                           '${(photo.bytes.length / 1024).round()} КБ · не отправлен',
                         _PhotoState.uploading => 'Отправка…',
-                        _PhotoState.uploaded => 'Фото подтверждено сервером',
+                        _PhotoState.uploaded =>
+                          photo.queued
+                              ? 'Фото сохранено на устройстве. Ожидает отправки.'
+                              : 'Фото подтверждено сервером',
                         _PhotoState.failed => photo.error ?? 'Ошибка отправки',
                         _PhotoState.uncertain =>
                           photo.error ?? 'Результат неизвестен',
@@ -938,7 +947,13 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
       canPop: !_busy && !_picking,
       child: Scaffold(
         appBar: AppBar(
-          title: Text(partial ? 'Наряд выдан' : 'Выдать наряд'),
+          title: Text(
+            partial
+                ? (_created!.pendingSync
+                      ? 'Наряд ожидает отправки'
+                      : 'Наряд выдан')
+                : 'Выдать наряд',
+          ),
           leading: IconButton(
             tooltip: 'Назад',
             icon: const Icon(Icons.arrow_back),
@@ -1033,8 +1048,10 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
                           style: Theme.of(context).textTheme.headlineSmall,
                         ),
                         const SizedBox(height: 8),
-                        const Text(
-                          'Наряд сохранён на сервере. Ниже — состояние каждого снимка.',
+                        Text(
+                          _created!.pendingSync
+                              ? 'Наряд сохранён на устройстве и ожидает отправки. Ниже — состояние каждого снимка.'
+                              : 'Наряд сохранён на сервере. Ниже — состояние каждого снимка.',
                         ),
                         const SizedBox(height: 20),
                         _photoList(),

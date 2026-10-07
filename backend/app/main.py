@@ -23,7 +23,8 @@ from sqlalchemy import delete, func, select, text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .db import Base, make_engine, session_factory
+from .db import make_engine, session_factory
+from .migrations import upgrade_database
 from .models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
 from .push import StubSender, dispatch_push, env_int, get_sender
 from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPatch, Transition
@@ -92,7 +93,7 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @asynccontextmanager
     async def lifespan(app):
-        Base.metadata.create_all(engine)
+        upgrade_database(engine)
         if seed and os.getenv("SEED_DEMO", "true").lower() == "true":
             with sessions() as db:
                 seed_database(db)
@@ -190,21 +191,32 @@ def create_app(database_url=None, seed=True, monitor=True):
     def json_hash(payload):
         return request_hash(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str))
 
-    async def run_idempotent(db, user, request, kind, command_hash, status, perform):
+    async def run_idempotent(db, user, request, kind, command_hash, status, perform, order_id=None):
+        scoped_hash = request_hash("client-command-v2", kind, "" if order_id is None else str(order_id), command_hash)
         client_id = (request.headers.get("X-Client-Command-Id") or "").strip()
         if client_id:
             if not CLIENT_COMMAND_ID.fullmatch(client_id):
                 raise HTTPException(422, "Некорректный X-Client-Command-Id")
             existing = db.scalar(select(ClientCommand).where(ClientCommand.employee_id == user.id, ClientCommand.client_id == client_id))
             if existing:
-                if existing.request_hash != command_hash:
-                    raise HTTPException(409, "Команда с таким идентификатором уже выполнена с другим содержанием")
+                matches_request = existing.request_hash == scoped_hash
+                if existing.request_hash == command_hash:
+                    # Legacy transition/completion hashes omitted the URL target.
+                    # Replay only when the stored order response proves that target;
+                    # an ambiguous record must never execute the command again.
+                    matches_request = kind not in {"transition", "complete"} or (
+                        isinstance(existing.response_body, dict)
+                        and type(existing.response_body.get("id")) is int
+                        and existing.response_body["id"] == order_id
+                    )
+                if existing.kind != kind or not matches_request:
+                    raise HTTPException(409, "Команда с таким идентификатором уже выполнена с другим содержанием, действием или нарядом")
                 if existing.response_status is None:
                     raise HTTPException(409, "Предыдущая отправка этой команды не завершена. Повторите запрос позже.")
                 return JSONResponse(status_code=existing.response_status, content=existing.response_body)
         claim = None
         if client_id:
-            claim = ClientCommand(employee_id=user.id, client_id=client_id, kind=kind, request_hash=command_hash)
+            claim = ClientCommand(employee_id=user.id, client_id=client_id, kind=kind, request_hash=scoped_hash)
             db.add(claim)
             try:
                 db.flush()
@@ -392,7 +404,8 @@ def create_app(database_url=None, seed=True, monitor=True):
                 raise HTTPException(422, "Срок нового наряда должен быть в будущем")
             data = payload.model_dump()
             data["assignee_id"] = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
-            order = Order(**data, number=f"Н-{utcnow().year}-{secrets.token_hex(3).upper()}", status="issued", master_id=user.id)
+            assigned = utcnow()
+            order = Order(**data, number=f"Н-{assigned.year}-{secrets.token_hex(3).upper()}", status="issued", master_id=user.id, created_at=assigned, assigned_at=assigned)
             db.add(order)
             db.flush()
             audit(db, order, "issue", user.id, comment=payload.comment)
@@ -416,6 +429,8 @@ def create_app(database_url=None, seed=True, monitor=True):
             order.assignee_id = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
             order.brigade_id = payload.brigade_id
             order.status = "issued"
+            assigned = utcnow()
+            order.assigned_at = max(assigned, aware(order.assigned_at) + timedelta(microseconds=1))
             notify(db, [order.assignee_id], "Наряд переназначен вам", order.number, "assigned", order.id)
         if payload.deadline is not None and payload.deadline <= utcnow():
             raise HTTPException(422, "Новый срок должен быть в будущем")
@@ -472,7 +487,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             notify(db, [order.assignee_id, order.master_id], "Статус наряда изменён", f"{order.number}: {old_status} → {target}", "status", order.id)
             return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "transition", command_hash, 200, perform)
+        return await run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/complete")
     async def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
@@ -514,7 +529,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
             return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "complete", command_hash, 200, perform)
+        return await run_idempotent(db, user, request, "complete", command_hash, 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/photos", status_code=201)
     async def upload_photo(id_: int, db: DB, user: User, request: Request, file: UploadFile = File(...), kind: str = Form(...)):
@@ -552,7 +567,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             db.flush()
             return photo_dict(db, photo), [("orders.updated", id_)]
 
-        return await run_idempotent(db, user, request, "photo_upload", command_hash, 201, perform)
+        return await run_idempotent(db, user, request, "photo_upload", command_hash, 201, perform, order_id=id_)
 
     @app.get("/api/photos/{id_}")
     def get_photo(id_: int, db: DB, user: User):

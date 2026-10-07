@@ -1,6 +1,12 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'models.dart';
+
+// Length-safe, collision-free namespaces include the complete normalized API
+// address, not just its host. Legacy unscoped keys are deliberately not read.
+String localScopeKey(String serverUrl, int ownerId, String key) =>
+    'v2:${base64Url.encode(utf8.encode(serverUrl))}:$ownerId:$key';
 
 abstract final class SnapshotKeys {
   static const profile = 'profile';
@@ -49,6 +55,7 @@ class OutboxCommand {
     required this.kind,
     required this.createdAt,
     this.ownerId,
+    this.serverUrl,
     this.orderId,
     this.localRef,
     this.payload = const {},
@@ -67,6 +74,7 @@ class OutboxCommand {
     kind: json['kind'] as String,
     createdAt: (json['created_at'] as num).toInt(),
     ownerId: (json['owner_id'] as num?)?.toInt(),
+    serverUrl: json['server_url'] as String?,
     orderId: (json['order_id'] as num?)?.toInt(),
     localRef: json['local_ref'] as String?,
     payload: (json['payload'] as Json?) ?? const {},
@@ -86,6 +94,7 @@ class OutboxCommand {
   final String kind;
   final int createdAt;
   final int? ownerId;
+  final String? serverUrl;
   final int? orderId;
   final String? localRef;
   final Json payload;
@@ -103,6 +112,7 @@ class OutboxCommand {
     'kind': kind,
     'created_at': createdAt,
     'owner_id': ownerId,
+    'server_url': serverUrl,
     'order_id': orderId,
     'local_ref': localRef,
     'payload': payload,
@@ -129,6 +139,7 @@ class OutboxCommand {
     kind: kind,
     createdAt: createdAt,
     ownerId: ownerId,
+    serverUrl: serverUrl,
     orderId: identical(orderId, _undefined) ? this.orderId : orderId as int?,
     localRef: localRef,
     payload: payload,
@@ -137,14 +148,14 @@ class OutboxCommand {
         : photoPath as String?,
     photoFilename: photoFilename,
     photoKind: photoKind,
-    attempts: identical(attempts, _undefined)
-        ? this.attempts
-        : attempts as int,
+    attempts: identical(attempts, _undefined) ? this.attempts : attempts as int,
     state: identical(state, _undefined) ? this.state : state as String,
     responseStatus: identical(responseStatus, _undefined)
         ? this.responseStatus
         : responseStatus as int?,
-    response: identical(response, _undefined) ? this.response : response as Json?,
+    response: identical(response, _undefined)
+        ? this.response
+        : response as Json?,
     lastError: identical(lastError, _undefined)
         ? this.lastError
         : lastError as String?,
@@ -163,7 +174,7 @@ abstract class LocalStore {
     required DateTime updatedAt,
   });
   Future<SnapshotEntry?> getSnapshot(String key);
-  Future<void> clearSnapshots();
+  Future<void> clearSnapshots({String? prefix});
 
   Future<OutboxCommand> enqueue(OutboxCommand command, {Uint8List? photoBytes});
   Future<List<OutboxCommand>> outbox();
@@ -178,7 +189,7 @@ abstract class LocalStore {
 
   Future<void> putPhoto(String url, Uint8List bytes);
   Future<Uint8List?> getPhoto(String url);
-  Future<void> clearPhotos();
+  Future<void> clearPhotos({String? prefix});
   Future<int> photoCacheBytes();
 }
 
@@ -209,7 +220,11 @@ class MemoryLocalStore implements LocalStore {
   Future<SnapshotEntry?> getSnapshot(String key) async => _snapshots[key];
 
   @override
-  Future<void> clearSnapshots() async => _snapshots.clear();
+  Future<void> clearSnapshots({String? prefix}) async {
+    _snapshots.removeWhere(
+      (key, _) => prefix == null || key.startsWith(prefix),
+    );
+  }
 
   @override
   Future<OutboxCommand> enqueue(
@@ -224,10 +239,9 @@ class MemoryLocalStore implements LocalStore {
   }
 
   @override
-  Future<List<OutboxCommand>> outbox() async => _outbox.values
-      .map(OutboxCommand.fromJson)
-      .toList()
-    ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  Future<List<OutboxCommand>> outbox() async =>
+      _outbox.values.map(OutboxCommand.fromJson).toList()
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
   @override
   Future<void> updateOutbox(OutboxCommand command) async {
@@ -249,7 +263,10 @@ class MemoryLocalStore implements LocalStore {
   @override
   Future<void> resetRunningOutbox() async {
     for (final command in _outbox.values) {
-      if (command['state'] == OutboxState.running) {
+      if (command['server_url'] == null || command['owner_id'] == null) {
+        command['state'] = OutboxState.conflict;
+        command['last_error'] = 'Старая команда без подтверждённого сервера и аккаунта изолирована.';
+      } else if (command['state'] == OutboxState.running) {
         command['state'] = OutboxState.pending;
       }
     }
@@ -291,8 +308,12 @@ class MemoryLocalStore implements LocalStore {
   Future<Uint8List?> getPhoto(String url) async => _photos[url];
 
   @override
-  Future<void> clearPhotos() async {
-    _photos.removeWhere((key, _) => !key.startsWith('outbox:'));
+  Future<void> clearPhotos({String? prefix}) async {
+    _photos.removeWhere(
+      (key, _) =>
+          !key.startsWith('outbox:') &&
+          (prefix == null || key.startsWith(prefix)),
+    );
   }
 
   @override

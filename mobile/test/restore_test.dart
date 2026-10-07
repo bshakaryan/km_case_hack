@@ -40,7 +40,9 @@ http.Response snapshotResponse(http.Request request, {int id = 7}) =>
       '/api/orders' => jsonResponse(<Json>[orderJson(id)]),
       '/api/dashboard' => jsonResponse({'issued': id}),
       '/api/notifications' => jsonResponse(<Json>[]),
-      '/api/analytics' => jsonResponse({'summary': {'total': id}}),
+      '/api/analytics' => jsonResponse({
+        'summary': {'total': id},
+      }),
       _ => jsonResponse({'ok': true}),
     };
 
@@ -82,14 +84,18 @@ void main() {
 
   test('session saved at login restores on a fresh controller', () async {
     final first = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      localStore: MemoryLocalStore(),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     );
     addTearDown(first.dispose);
     await first.login('http://restore.test', 'master', '1234');
     expect(first.user!.id, 7);
 
     final second = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      localStore: MemoryLocalStore(),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     );
     addTearDown(second.dispose);
     await second.restoreSession();
@@ -100,7 +106,9 @@ void main() {
 
   test('restore with no saved session stays silent (fresh install)', () async {
     final controller = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      localStore: MemoryLocalStore(),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     );
     addTearDown(controller.dispose);
     final restoring = controller.restoreSession();
@@ -112,13 +120,17 @@ void main() {
 
   test('restore restores the user and clears restoring on success', () async {
     final first = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      localStore: MemoryLocalStore(),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     );
     addTearDown(first.dispose);
     await first.login('http://restore.test', 'master', '1234');
 
     final second = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      localStore: MemoryLocalStore(),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     );
     addTearDown(second.dispose);
     bool sawRestoring = false;
@@ -137,7 +149,9 @@ void main() {
       'naryad.native.ever_logged_in.v1': true,
     });
     final controller = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      localStore: MemoryLocalStore(),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     );
     addTearDown(controller.dispose);
     final restoring = controller.restoreSession();
@@ -155,7 +169,9 @@ void main() {
       'naryad.native.ever_logged_in.v1': true,
     });
     final controller = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      localStore: MemoryLocalStore(),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     )..user = const User(id: 7, name: 'Мастер', role: 'master');
     addTearDown(controller.dispose);
     await controller.logout();
@@ -166,8 +182,10 @@ void main() {
 
   test('login stays successful when secure storage write fails', () async {
     final controller = AppController(
+      localStore: MemoryLocalStore(),
       storage: _ThrowingStorage(),
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      apiFactory: (_) =>
+          NaryadApi('http://restore.test', client: mockApi(id: 7)),
     );
     addTearDown(controller.dispose);
     await controller.login('http://restore.test', 'master', '1234');
@@ -178,55 +196,165 @@ void main() {
     );
   });
 
-  test('restart without connection keeps the user from the profile snapshot',
-      () async {
-    final store = MemoryLocalStore();
-    final online = AppController(
-      localStore: store,
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
-    );
-    addTearDown(online.dispose);
-    await online.login('http://restore.test', 'master', '1234');
+  test(
+    'restart without connection keeps the user from the profile snapshot',
+    () async {
+      final store = MemoryLocalStore();
+      final online = AppController(
+        localStore: store,
+        apiFactory: (_) =>
+            NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      );
+      addTearDown(online.dispose);
+      await online.login('http://restore.test', 'master', '1234');
 
-    int meChecks = 0;
-    final offline = AppController(
-      localStore: store,
-      apiFactory: (_) => NaryadApi(
-        'http://restore.test',
-        client: MockClient((request) async {
-          if (request.url.path.endsWith('/auth/me')) meChecks++;
-          throw http.ClientException('no network');
+      int meChecks = 0;
+      final offline = AppController(
+        localStore: store,
+        apiFactory: (_) => NaryadApi(
+          'http://restore.test',
+          client: MockClient((request) async {
+            if (request.url.path.endsWith('/auth/me')) meChecks++;
+            throw http.ClientException('no network');
+          }),
+        ),
+      );
+      addTearDown(offline.dispose);
+      await offline.restoreSession();
+      expect(offline.user!.id, 7);
+      expect(offline.offline, isTrue);
+      expect(offline.error, isNull);
+      expect(meChecks, 1);
+    },
+  );
+
+  test(
+    'restart offline without a saved snapshot cannot restore the user',
+    () async {
+      final first = AppController(
+        localStore: MemoryLocalStore(),
+        apiFactory: (_) =>
+            NaryadApi('http://restore.test', client: mockApi(id: 7)),
+      );
+      addTearDown(first.dispose);
+      await first.login('http://restore.test', 'master', '1234');
+
+      final offline = AppController(
+        localStore: MemoryLocalStore(),
+        apiFactory: (_) => NaryadApi(
+          'http://restore.test',
+          client: MockClient((request) async {
+            throw http.ClientException('no network');
+          }),
+        ),
+      );
+      addTearDown(offline.dispose);
+      await offline.restoreSession();
+      expect(offline.user, isNull);
+      expect(offline.restoring, isFalse);
+      expect(offline.error, contains('Нет связи'));
+    },
+  );
+
+  test(
+    'offline restore cannot read another server or account snapshot',
+    () async {
+      final store = MemoryLocalStore();
+      for (final entry in [
+        ('http://server-a.test/api', 7),
+        ('http://server-b.test/api', 8),
+      ]) {
+        await store.putSnapshot(
+          localScopeKey(entry.$1, entry.$2, SnapshotKeys.profile),
+          {'id': entry.$2, 'name': 'Foreign cached profile', 'role': 'master'},
+          updatedAt: DateTime.now(),
+        );
+      }
+      FlutterSecureStorage.setMockInitialValues({
+        'naryad.native.session.v1': jsonEncode({
+          'base_url': 'http://server-b.test/api',
+          'owner_id': 7,
+          'token': 'test-session',
         }),
-      ),
-    );
-    addTearDown(offline.dispose);
-    await offline.restoreSession();
-    expect(offline.user!.id, 7);
-    expect(offline.offline, isTrue);
-    expect(offline.error, isNull);
-    expect(meChecks, 1);
-  });
+      });
+      final controller = AppController(
+        localStore: store,
+        apiFactory: (url) => NaryadApi(
+          url,
+          client: MockClient((_) async {
+            throw http.ClientException('no network');
+          }),
+        ),
+      );
+      addTearDown(controller.dispose);
+      await controller.restoreSession();
+      expect(controller.user, isNull);
+      expect(controller.orders, isEmpty);
+      expect(controller.error, contains('Нет связи'));
+    },
+  );
 
-  test('restart offline without a saved snapshot cannot restore the user',
-      () async {
-    final first = AppController(
-      apiFactory: (_) => NaryadApi('http://restore.test', client: mockApi(id: 7)),
-    );
-    addTearDown(first.dispose);
-    await first.login('http://restore.test', 'master', '1234');
-
-    final offline = AppController(
-      apiFactory: (_) => NaryadApi(
-        'http://restore.test',
-        client: MockClient((request) async {
-          throw http.ClientException('no network');
+  test(
+    'legacy session and unscoped profile require online ownership check',
+    () async {
+      final store = MemoryLocalStore();
+      await store.putSnapshot(SnapshotKeys.profile, {
+        'id': 7,
+        'name': 'Legacy cached profile',
+        'role': 'master',
+      }, updatedAt: DateTime.now());
+      FlutterSecureStorage.setMockInitialValues({
+        'naryad.native.session.v1': jsonEncode({
+          'base_url': 'http://restore.test/api',
+          'token': 'legacy-session',
         }),
-      ),
-    );
-    addTearDown(offline.dispose);
-    await offline.restoreSession();
-    expect(offline.user, isNull);
-    expect(offline.restoring, isFalse);
-    expect(offline.error, contains('Нет связи'));
-  });
+      });
+      final controller = AppController(
+        localStore: store,
+        apiFactory: (url) => NaryadApi(
+          url,
+          client: MockClient((_) async {
+            throw http.ClientException('no network');
+          }),
+        ),
+      );
+      addTearDown(controller.dispose);
+      await controller.restoreSession();
+      expect(controller.user, isNull);
+      expect(controller.error, contains('Старый офлайн-кэш'));
+      expect(
+        await store.getSnapshot(SnapshotKeys.profile),
+        isNotNull,
+        reason: 'Unscoped legacy data is preserved but never guessed or read.',
+      );
+    },
+  );
+
+  test(
+    'protected photo cache is separated by server and numeric user ID',
+    () async {
+      final store = MemoryLocalStore();
+      var reads = 0;
+      Future<void> view(String url, int ownerId, int expectedByte) async {
+        final controller = AppController(
+          localStore: store,
+          api: NaryadApi(
+            url,
+            client: MockClient((_) async {
+              reads++;
+              return http.Response.bytes([expectedByte], 200);
+            }),
+          ),
+        )..user = User(id: ownerId, name: 'Worker', role: 'worker');
+        addTearDown(controller.dispose);
+        expect(await controller.photoBytes(1), [expectedByte]);
+        expect(await controller.photoBytes(1), [expectedByte]);
+      }
+
+      await view('http://server-a.test', 7, 1);
+      await view('http://server-b.test', 7, 2);
+      await view('http://server-a.test', 8, 3);
+      expect(reads, 3);
+    },
+  );
 }

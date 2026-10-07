@@ -26,6 +26,8 @@ class WorkOrder {
   String get title => data['title'] as String;
   String get description => data['description'] as String? ?? '';
   String get status => data['status'] as String;
+  bool get pendingSync =>
+      data['_pending_sync'] == true || data['_queued_status'] != null || id < 0;
   String get priority => data['priority'] as String;
   String get workType => data['work_type'] as String;
   String get areaName => data['area_name'] as String? ?? '';

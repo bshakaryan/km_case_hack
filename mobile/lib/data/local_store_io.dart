@@ -8,15 +8,21 @@ import 'package:sqflite/sqflite.dart';
 import 'local_store.dart';
 
 class SqfliteLocalStore implements LocalStore {
+  SqfliteLocalStore({this.directoryPath});
+
+  final String? directoryPath;
   Database? _db;
   Directory? _root;
 
-  static const _schemaVersion = 1;
+  static const _schemaVersion = 2;
 
   @override
   Future<void> open() async {
-    final documents = await getApplicationDocumentsDirectory();
-    final root = Directory('${documents.path}/naryad_local_store');
+    if (_db != null) return;
+    final path =
+        directoryPath ??
+        '${(await getApplicationDocumentsDirectory()).path}/naryad_local_store';
+    final root = Directory(path);
     await root.create(recursive: true);
     _root = root;
     final db = await openDatabase(
@@ -26,8 +32,15 @@ class SqfliteLocalStore implements LocalStore {
         await _createSchema(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
-        // Future versions add immutable steps here without rewriting history.
-        if (oldVersion < 2) {}
+        if (oldVersion < 2) {
+          await db.execute('ALTER TABLE outbox ADD COLUMN server_url TEXT');
+          // The old schema cannot prove which server owned its commands.
+          // Preserve commands/media for recovery, but never guess ownership.
+          await db.update('outbox', {
+            'state': OutboxState.conflict,
+            'last_error': 'Старая команда без подтверждённого сервера и аккаунта изолирована.',
+          }, where: 'server_url IS NULL OR owner_id IS NULL');
+        }
       },
     );
     _db = db;
@@ -39,9 +52,11 @@ class SqfliteLocalStore implements LocalStore {
       'CREATE TABLE snapshot (key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)',
     );
     await db.execute(
-      'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, order_id INTEGER, local_ref TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
+      'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, server_url TEXT, order_id INTEGER, local_ref TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
     );
-    await db.execute('CREATE INDEX ix_outbox_state ON outbox (state, created_at)');
+    await db.execute(
+      'CREATE INDEX ix_outbox_state ON outbox (state, created_at)',
+    );
     await db.execute(
       'CREATE TABLE id_map (local_ref TEXT PRIMARY KEY, server_id INTEGER NOT NULL)',
     );
@@ -78,15 +93,11 @@ class SqfliteLocalStore implements LocalStore {
     Object? data, {
     required DateTime updatedAt,
   }) async {
-    await _database.insert(
-      'snapshot',
-      {
-        'key': key,
-        'payload': jsonEncode(data),
-        'updated_at': updatedAt.millisecondsSinceEpoch,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _database.insert('snapshot', {
+      'key': key,
+      'payload': jsonEncode(data),
+      'updated_at': updatedAt.millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   @override
@@ -106,8 +117,19 @@ class SqfliteLocalStore implements LocalStore {
   }
 
   @override
-  Future<void> clearSnapshots() async {
-    await _database.delete('snapshot');
+  Future<void> clearSnapshots({String? prefix}) async {
+    if (prefix == null) {
+      await _database.delete('snapshot');
+      return;
+    }
+    final rows = await _database.query('snapshot', columns: ['key']);
+    final batch = _database.batch();
+    for (final row in rows) {
+      if ((row['key'] as String).startsWith(prefix)) {
+        batch.delete('snapshot', where: 'key = ?', whereArgs: [row['key']]);
+      }
+    }
+    await batch.commit(noResult: true);
   }
 
   Map<String, Object?> _outboxRow(OutboxCommand command) => <String, Object?>{
@@ -115,6 +137,7 @@ class SqfliteLocalStore implements LocalStore {
     'kind': command.kind,
     'created_at': command.createdAt,
     'owner_id': command.ownerId,
+    'server_url': command.serverUrl,
     'order_id': command.orderId,
     'local_ref': command.localRef,
     'payload': jsonEncode(command.payload),
@@ -134,6 +157,7 @@ class SqfliteLocalStore implements LocalStore {
         'kind': row['kind'],
         'created_at': row['created_at'],
         'owner_id': row['owner_id'],
+        'server_url': row['server_url'],
         'order_id': row['order_id'],
         'local_ref': row['local_ref'],
         'payload': jsonDecode(row['payload'] as String),
@@ -168,7 +192,10 @@ class SqfliteLocalStore implements LocalStore {
 
   @override
   Future<List<OutboxCommand>> outbox() async {
-    final rows = await _database.query('outbox', orderBy: 'created_at, command_id');
+    final rows = await _database.query(
+      'outbox',
+      orderBy: 'created_at, command_id',
+    );
     return rows.map(_commandFromRow).toList();
   }
 
@@ -204,6 +231,11 @@ class SqfliteLocalStore implements LocalStore {
 
   @override
   Future<void> resetRunningOutbox() async {
+    await _database.update('outbox', {
+      'state': OutboxState.conflict,
+      'last_error':
+          'Старая команда без подтверждённого сервера и аккаунта изолирована.',
+    }, where: 'server_url IS NULL OR owner_id IS NULL');
     await _database.update(
       'outbox',
       {'state': OutboxState.pending},
@@ -231,11 +263,10 @@ class SqfliteLocalStore implements LocalStore {
 
   @override
   Future<void> putServerId(String localRef, int serverId) async {
-    await _database.insert(
-      'id_map',
-      {'local_ref': localRef, 'server_id': serverId},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _database.insert('id_map', {
+      'local_ref': localRef,
+      'server_id': serverId,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   @override
@@ -260,8 +291,9 @@ class SqfliteLocalStore implements LocalStore {
     );
   }
 
-  File _photoFile(String url) =>
-      File('${_directory.path}/photo_cache/${base64Url.encode(utf8.encode(url))}.img');
+  File _photoFile(String url) => File(
+    '${_directory.path}/photo_cache/${base64Url.encode(utf8.encode(url))}.img',
+  );
 
   @override
   Future<void> putPhoto(String url, Uint8List bytes) async {
@@ -269,16 +301,12 @@ class SqfliteLocalStore implements LocalStore {
     await folder.create(recursive: true);
     final file = _photoFile(url);
     await file.writeAsBytes(bytes, flush: true);
-    await _database.insert(
-      'photo_cache',
-      {
-        'url': url,
-        'path': file.path,
-        'size': bytes.length,
-        'last_used_at': DateTime.now().millisecondsSinceEpoch,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _database.insert('photo_cache', {
+      'url': url,
+      'path': file.path,
+      'size': bytes.length,
+      'last_used_at': DateTime.now().millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
     await _evictPhotos();
   }
 
@@ -329,14 +357,21 @@ class SqfliteLocalStore implements LocalStore {
   }
 
   @override
-  Future<void> clearPhotos() async {
+  Future<void> clearPhotos({String? prefix}) async {
     final rows = await _database.query('photo_cache');
     for (final row in rows) {
+      if (prefix != null && !(row['url'] as String).startsWith(prefix)) {
+        continue;
+      }
       await File(row['path'] as String)
           .delete()
           .catchError((Object _) => File(row['path'] as String));
+      await _database.delete(
+        'photo_cache',
+        where: 'url = ?',
+        whereArgs: [row['url']],
+      );
     }
-    await _database.delete('photo_cache');
   }
 
   @override

@@ -1,14 +1,14 @@
 """FCM push outbox: device token registry and pending push tasks.
 
-Self-contained DDL on purpose: new migrations must not import the current ORM
-models (the known defect of 0001_initial). Re-runnable on databases where
-startup `create_all` already created the tables.
+Runs after 0003_assignment_time in the linearized chain. Self-contained
+immutable DDL on purpose: new migrations must not import the current ORM
+models (the known defect of 0001_initial).
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "0003_push"
-down_revision = "0002_client_commands"
+down_revision = "0003_assignment_time"
 branch_labels = None
 depends_on = None
 
@@ -39,10 +39,10 @@ def upgrade():
             sa.Column("title", sa.String(length=180), nullable=False),
             sa.Column("message", sa.Text(), nullable=False),
             sa.Column("order_id", sa.Integer(), nullable=True),
-            sa.Column("priority", sa.String(length=20), nullable=False, server_default="normal"),
+            sa.Column("priority", sa.String(length=20), nullable=False),
             sa.Column("payload", sa.JSON(), nullable=False),
-            sa.Column("status", sa.String(length=20), nullable=False, server_default="pending"),
-            sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("status", sa.String(length=20), nullable=False),
+            sa.Column("attempts", sa.Integer(), nullable=False),
             sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("last_error", sa.Text(), nullable=True),
             sa.Column("provider_message_id", sa.String(length=180), nullable=True),

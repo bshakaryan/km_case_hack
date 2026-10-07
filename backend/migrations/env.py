@@ -2,11 +2,10 @@ from logging.config import fileConfig
 import os
 from alembic import context
 from sqlalchemy import engine_from_config, pool
-from app.db import Base
-from app import models  # noqa: F401
+from app.migrations import migrate_connection
 
 config = context.config
-if config.config_file_name:
+if config.config_file_name and config.attributes.get("configure_logging", True):
     fileConfig(config.config_file_name)
 database_url = os.getenv("DATABASE_URL", config.get_main_option("sqlalchemy.url"))
 if database_url.startswith("postgresql://"):
@@ -14,12 +13,15 @@ if database_url.startswith("postgresql://"):
 config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 if context.is_offline_mode():
-    context.configure(url=database_url, target_metadata=Base.metadata, literal_binds=True, dialect_opts={"paramstyle": "named"})
-    with context.begin_transaction():
-        context.run_migrations()
+    raise RuntimeError("Schema validation requires a live migration connection; offline SQL generation is unsupported")
 else:
-    connectable = engine_from_config(config.get_section(config.config_ini_section), prefix="sqlalchemy.", poolclass=pool.NullPool)
-    with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=Base.metadata)
-        with context.begin_transaction():
-            context.run_migrations()
+    external = config.attributes.get("connection")
+    if external is not None:
+        migrate_connection(external, config)
+    else:
+        connectable = engine_from_config(config.get_section(config.config_ini_section), prefix="sqlalchemy.", poolclass=pool.NullPool)
+        try:
+            with connectable.connect() as connection:
+                migrate_connection(connection, config)
+        finally:
+            connectable.dispose()
