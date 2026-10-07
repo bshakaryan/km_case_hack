@@ -2,6 +2,8 @@
 
 Набор собран из открытых источников; авторство и лицензию нужно указывать при публикации. Страницы VisA, airsoft и test-yfiry указывают CC BY 4.0. Для `project-7mbdj/999-krc03` ссылка сейчас не открывается для независимой проверки, поэтому его лицензию следует подтвердить у автора до распространения производных изображений.
 
+Для демонстрации/презентации `999-krc03` запрещён. Генерируйте отдельный `demo_safe/` через `python -m eval.photos.select_demo`: скрипт выбирает только два подтверждённых конвейерных источника и записывает атрибуцию в `manifest.csv`. Старая папка `demo/` не проверена для показа.
+
 - VisA — https://github.com/amazon-science/spot-diff (Zou et al., ECCV 2022)
 - airsoft/conveyor-belt-defects — https://universe.roboflow.com/airsoft/conveyor-belt-defects
 - project-7mbdj/999-krc03 — https://universe.roboflow.com/project-7mbdj/999-krc03

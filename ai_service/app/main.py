@@ -119,6 +119,7 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        photo_service.equipment_matcher.require_ready()
         store.initialize()
         for job in store.list_results("review_job"):
             if job["payload"].get("status") in {"pending", "running", "failed"} and job["payload"].get("attempts", 0) < 3:
@@ -186,8 +187,11 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
 
     @app.get("/ai/health")
     def health():
+        if photo_service.equipment_matcher.model_error:
+            raise HTTPException(503, photo_service.equipment_matcher.model_error)
         store.ping()
-        return {"status": "ok", "source": settings.data_source, "demo_mode": settings.demo_mode}
+        return {"status": "ok", "source": settings.data_source, "demo_mode": settings.demo_mode,
+                "equipment_model": "ready"}
 
     @app.get("/ai/source/summary", dependencies=[Depends(require_token)])
     async def source_summary():

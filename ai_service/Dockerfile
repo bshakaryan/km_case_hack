@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-co
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
+COPY eval/__init__.py eval/fetch_equipment_model.py ./eval/
+RUN python -m eval.fetch_equipment_model
 RUN useradd --create-home aiuser && mkdir -p /app/state /app/data && chown -R aiuser:aiuser /app
 USER aiuser
 EXPOSE 8090

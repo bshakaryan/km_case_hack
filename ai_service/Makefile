@@ -1,6 +1,10 @@
 PYTHON ?= python
 
-.PHONY: test data eval seed-backend
+.PHONY: setup test data eval seed-backend
+setup:
+	$(PYTHON) -m pip install -r requirements.txt
+	$(PYTHON) -m eval.fetch_equipment_model
+
 test:
 	$(PYTHON) -m pytest -q tests
 

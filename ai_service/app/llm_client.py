@@ -194,7 +194,7 @@ class LLMClient:
         identity = hashlib.sha256(serialized.encode() + (before_jpeg or b"") + after_jpeg).hexdigest()
         provider = self.settings.llm_provider
         model = self.settings.llm_model_vision
-        cache_key = hashlib.sha256(f"vision:{provider}:{model}:{identity}".encode()).hexdigest()
+        cache_key = hashlib.sha256(f"vision:v2:{provider}:{model}:{identity}".encode()).hexdigest()
         cached = self.store.get_cached(cache_key)
         if cached is not None:
             try:
@@ -221,6 +221,7 @@ class LLMClient:
         after_base64 = base64.b64encode(after_jpeg).decode("ascii")
         before_base64 = base64.b64encode(before_jpeg).decode("ascii") if before_jpeg else None
         instruction = ("Оцени только видимое на фото: аккуратность, мусор, незакреплённые элементы, кожухи. "
+                       "Не считай дефект ни устранённым, ни оставшимся заранее; текст о работах не доказательство. "
                        "Не делай выводов о невидимых дефектах, не пиши цифры или имена в пояснении. "
                        "Если фото до нет или сравнение неубедительно, верни null для неподтверждённого вывода.")
         async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:

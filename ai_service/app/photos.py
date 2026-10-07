@@ -63,14 +63,42 @@ def ssim(first: Image.Image, second: Image.Image):
     return float(np.clip(np.mean(numerator / np.maximum(denominator, 1e-9)), -1, 1))
 
 
+def orb_overlap(first: Image.Image, second: Image.Image):
+    detector = cv2.ORB_create(nfeatures=1000)
+    images = []
+    for source in (first, second):
+        source = source.copy()
+        source.thumbnail((640, 640))
+        images.append(cv2.cvtColor(np.asarray(source), cv2.COLOR_RGB2GRAY))
+    first_points, first_descriptors = detector.detectAndCompute(images[0], None)
+    second_points, second_descriptors = detector.detectAndCompute(images[1], None)
+    if first_descriptors is None or second_descriptors is None:
+        return {"matches": 0, "inliers": 0, "overlap": 0.0}
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    good = [match for match, alternate in matcher.knnMatch(first_descriptors, second_descriptors, k=2)
+            if match.distance < 0.75 * alternate.distance]
+    inliers = 0
+    if len(good) >= 4:
+        source_points = np.float32([first_points[match.queryIdx].pt for match in good]).reshape(-1, 1, 2)
+        target_points = np.float32([second_points[match.trainIdx].pt for match in good]).reshape(-1, 1, 2)
+        _, mask = cv2.findHomography(source_points, target_points, cv2.RANSAC, 5.0)
+        inliers = int(mask.sum()) if mask is not None else 0
+    return {"matches": len(good), "inliers": inliers,
+            "overlap": round(inliers / max(1, min(len(first_points), len(second_points))), 4)}
+
+
 def compare_images(first_raw: bytes, second_raw: bytes):
     first_hash, first_image = fingerprint(first_raw)
     second_hash, second_image = fingerprint(second_raw)
     distance = int(imagehash.hex_to_hash(first_hash["phash"]) - imagehash.hex_to_hash(second_hash["phash"]))
     similarity = ssim(first_image, second_image)
-    duplicate = first_hash["sha256"] == second_hash["sha256"] or (distance <= 10 and similarity >= 0.45)
+    local_features = orb_overlap(first_image, second_image)
+    duplicate = (first_hash["sha256"] == second_hash["sha256"] or
+                 (distance <= 10 and similarity >= 0.45) or
+                 (local_features["inliers"] >= 20 and local_features["overlap"] >= 0.15) or
+                 (similarity >= 0.995 and distance < 32))
     return {"duplicate": bool(duplicate), "exact": first_hash["sha256"] == second_hash["sha256"],
-            "phash_distance": distance, "ssim": round(similarity, 4)}
+            "phash_distance": distance, "ssim": round(similarity, 4), **local_features}
 
 
 def uploaded_in_work_window(photo: PhotoRecord, started_at: datetime | None, completed_at: datetime | None):
@@ -92,10 +120,13 @@ def photo_version(photo: PhotoRecord):
 
 class PhotoReviewService:
     def __init__(self, source: DataSource, store: AIStore, llm: LLMClient, settings: Settings):
+        from .equipment_match import EquipmentMatcher
+
         self.source = source
         self.store = store
         self.llm = llm
         self.settings = settings
+        self.equipment_matcher = EquipmentMatcher()
 
     async def cached_fingerprint(self, photo: PhotoRecord):
         version = photo_version(photo)
@@ -136,6 +167,7 @@ class PhotoReviewService:
                   "before_photo_id": before.id if before else None, "capture_time_status": "unknown",
                   "upload_in_work_window": uploaded_in_work_window(after, order.started_at, order.completed_at)
                   if after else None, "duplicate_before": None, "duplicate_history": None,
+                  "equipment_check": None,
                   "history_photos_scanned": 0, "history_scan_complete": True,
                   "vision": None, "score": None, "status": "needs_master_review", "needs_master_review": True,
                   "is_recommendation": True, "reasons": ["Время съёмки не подтверждено"]}
@@ -148,6 +180,7 @@ class PhotoReviewService:
                 if before:
                     before_raw = await self.source.photo_bytes(before)
                     result["duplicate_before"] = compare_images(before_raw, after_raw)
+                    result["equipment_check"] = self.equipment_matcher.compare(before_raw, after_raw)
                 else:
                     before_raw = None
                     result["reasons"].append("Нет фото до для сравнения видимого дефекта")
@@ -162,7 +195,7 @@ class PhotoReviewService:
                         older = await self.cached_fingerprint(photo)
                         result["history_photos_scanned"] += 1
                         distance = imagehash.hex_to_hash(after_details["phash"]) - imagehash.hex_to_hash(older["phash"])
-                        if older["sha256"] == after_details["sha256"] or distance <= 10:
+                        if older["sha256"] == after_details["sha256"] or distance <= 32:
                             older_raw = await self.source.photo_bytes(photo)
                             comparison = compare_images(older_raw, after_raw)
                             if comparison["duplicate"]:
@@ -179,9 +212,15 @@ class PhotoReviewService:
                     result["reasons"].append("Фото после технически повторяет фото до")
                 if result["duplicate_history"]:
                     result["reasons"].append("Фото после повторяет ранее загруженное фото")
+                if result["equipment_check"] and result["equipment_check"]["status"] == "different":
+                    result["reasons"].append("Кодовая проверка: вероятно другое оборудование")
+                if result["equipment_check"] and not result["equipment_check"]["model_available"]:
+                    result["reasons"].append("CPU-модель проверки оборудования не установлена")
                 if not result["history_scan_complete"]:
                     result["reasons"].append("История фото проверена не полностью")
-                if self.settings.data_source == "synthetic" and self.llm.vision_enabled():
+                if (self.settings.data_source == "synthetic" and self.llm.vision_enabled() and
+                        result["equipment_check"] and result["equipment_check"]["model_available"] and
+                        result["equipment_check"]["status"] != "different"):
                     prompt = {"equipment_id": order.equipment_id,
                               "problem": scrub(order.description or order.title, snapshot),
                               "work_done": scrub(order.completion.work_done, snapshot),
@@ -192,7 +231,8 @@ class PhotoReviewService:
                         result["vision"] = assessment.model_dump()
                     elif assessment:
                         result["reasons"].append("Ответ vision-модели не прошёл проверку")
-                if result["vision"] is None:
+                if (result["vision"] is None and
+                        not (result["equipment_check"] and result["equipment_check"]["status"] == "different")):
                     result["reasons"].append("Видимое устранение дефекта не подтверждено моделью")
                 else:
                     assessment = VisionAssessment.model_validate(result["vision"])

@@ -567,10 +567,28 @@ def main():
     if photo_metrics_path.exists() and photo_report_path.exists():
         photo_metrics = read_json(photo_metrics_path)
         metrics["vision"] = {"status": "public_proxy_benchmark", "model": photo_metrics["model"],
-                             "groups": {kind: {"count": group["count"], "accuracy": group["accuracy"],
+                             "groups": {kind: {"count": group["count"], "coverage": group["coverage"],
+                                               "accuracy_decided": group["accuracy_decided"],
                                                "needs_master_review_rate": group["needs_master_review_rate"]}
                                         for kind, group in photo_metrics["pairs"].items()},
                              "real_repair_accuracy": None}
+        strong_path = args.reports_dir / "photo_eval_strong_full.json"
+        if strong_path.exists():
+            strong = read_json(strong_path)
+            if strong.get("split") == photo_metrics.get("split"):
+                from eval.photo_benchmark import category_metrics
+
+                metrics["vision"]["comparison"] = {}
+                for report in (photo_metrics, strong):
+                    holdout_ids = set(report["split"]["holdout_ids"])
+                    holdout = category_metrics([row for row in report["cases"]
+                                                if row["pair_id"] in holdout_ids])
+                    metrics["vision"]["comparison"][report["model"]] = {
+                        "holdout_coverage": holdout["coverage"],
+                        "holdout_accuracy_decided": holdout["accuracy_decided"],
+                        "elapsed_seconds": report["timing"]["elapsed_seconds"],
+                        "estimated_cost_usd": report["usage"]["estimated_cost_usd"],
+                    }
     (args.reports_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
                                                     encoding="utf-8")
     report = markdown(metrics)

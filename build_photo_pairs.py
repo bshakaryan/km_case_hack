@@ -315,8 +315,9 @@ def main():
     # Демо: по одной паре каждого типа, предпочтительно конвейеры/масло
     demo = []
     for want in ("fixed", "not_fixed", "other_equipment"):
-        cand = [r for r in rows if r["label"] == want and r["source"] != "VisA"] or \
-               [r for r in rows if r["label"] == want]
+        cand = [r for r in rows if r["label"] == want and r["source"] != "VisA" and
+                r["source"] != "project-7mbdj/999-krc03"] or \
+               [r for r in rows if r["label"] == want and r["source"] == "VisA"]
         if cand:
             demo.append(cand[0])
     for r in demo:
@@ -342,6 +343,8 @@ def main():
         "- `semi_synthetic`: «после» получено закрашиванием размеченной области дефекта (cv2.inpaint), "
         "а не реальным ремонтом. Показывать отдельной строкой.\n"
         "- `real_same_image`: «после» = то же фото, проблема не устранена.\n"
+        "- Для демо и презентации `project-7mbdj/999-krc03` не использовать; "
+        "создайте `demo_safe/` отдельной командой.\n"
         "- Ни одна метрика здесь не является точностью на реальном ремонте.\n\n"
         f"## Состав (seed={args.seed})\n\n"
         + "\n".join(f"- {k}: {v}" for k, v in sorted(stats.items()))

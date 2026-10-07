@@ -297,26 +297,44 @@
     "groups": {
       "proxy": {
         "count": 60,
-        "accuracy": 0.1833,
-        "needs_master_review_rate": 0.6667
+        "coverage": 0.8667,
+        "accuracy_decided": 0.2115,
+        "needs_master_review_rate": 0.1333
       },
       "semi_synthetic": {
         "count": 30,
-        "accuracy": 0.2,
-        "needs_master_review_rate": 0.0667
+        "coverage": 0.5333,
+        "accuracy_decided": 0.5625,
+        "needs_master_review_rate": 0.4667
       },
       "real_same_image": {
         "count": 30,
-        "accuracy": 1.0,
+        "coverage": 1.0,
+        "accuracy_decided": 1.0,
         "needs_master_review_rate": 0.0
       },
       "cross_class": {
         "count": 60,
-        "accuracy": 0.1,
-        "needs_master_review_rate": 0.8167
+        "coverage": 0.8167,
+        "accuracy_decided": 0.9796,
+        "needs_master_review_rate": 0.1833
       }
     },
-    "real_repair_accuracy": null
+    "real_repair_accuracy": null,
+    "comparison": {
+      "gpt-4.1-mini": {
+        "holdout_coverage": 0.7778,
+        "holdout_accuracy_decided": 0.6857,
+        "elapsed_seconds": 226.23,
+        "estimated_cost_usd": 0.084366
+      },
+      "gpt-4.1": {
+        "holdout_coverage": 0.7667,
+        "holdout_accuracy_decided": 0.7826,
+        "elapsed_seconds": 212.755,
+        "estimated_cost_usd": 0.280458
+      }
+    }
   },
   "anomalies": {
     "status": "measured_synthetic",

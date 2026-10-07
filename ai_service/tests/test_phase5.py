@@ -98,6 +98,31 @@ def test_photo_fallback_duplicate_and_missing_after():
     store.close()
 
 
+def test_photo_review_does_not_call_vision_without_cpu_model():
+    class ForbiddenVision:
+        def vision_enabled(self):
+            return True
+
+        async def inspect_photo(self, *_args):
+            raise AssertionError("Vision API вызван без проверки оборудования")
+
+    class MissingMatcher:
+        def compare(self, *_args):
+            return {"status": "unknown", "model_available": False, "embedding_cosine": None,
+                    "orb_inliers": None, "orb_overlap": None, "ssim": None}
+
+    source = MemorySource(photo_snapshot(), {1: drawing((190, 30, 20)),
+                                             2: drawing((25, 135, 80))})
+    store = AIStore("sqlite:///:memory:")
+    store.initialize()
+    service = PhotoReviewService(source, store, ForbiddenVision(), Settings(data_source="synthetic"))
+    service.equipment_matcher = MissingMatcher()
+    result = run(service.review(7))
+    assert result["equipment_check"]["status"] == "unknown"
+    assert result["vision"] is None and result["needs_master_review"]
+    store.close()
+
+
 def test_reused_historical_photo_is_flagged():
     before = drawing((190, 30, 20))
     after = drawing((25, 135, 80))

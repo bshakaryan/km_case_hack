@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 state/
+models/
 data/
 reports/*
 !reports/metrics.md
