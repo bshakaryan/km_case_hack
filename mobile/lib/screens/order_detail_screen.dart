@@ -113,7 +113,11 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Сервер подтвердил: ${_status(updated.status)}'),
+          content: Text(
+            updated.pendingSync || widget.controller.isOrderPending(updated.id)
+                ? 'Действие сохранено на устройстве. Ожидает отправки.'
+                : 'Сервер подтвердил: ${_status(updated.status)}',
+          ),
         ),
       );
     } catch (error) {
@@ -245,8 +249,13 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       await _load();
       if (result == true && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Отчёт получен сервером. Ожидается приёмка мастера.'),
+          SnackBar(
+            content: Text(
+              widget.controller.isOrderPending(widget.orderId) ||
+                      (_order?.pendingSync ?? false)
+                  ? 'Отчёт сохранён на устройстве. Ожидает отправки.'
+                  : 'Отчёт получен сервером. Ожидается приёмка мастера.',
+            ),
           ),
         );
       }
@@ -426,6 +435,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           runSpacing: 8,
           children: [
             _tag(_status(order.status), _blue),
+            if (order.pendingSync || widget.controller.isOrderPending(order.id))
+              _tag('Ожидает синхронизации', const Color(0xFF8C5A00)),
             _tag(
               _priority(order.priority),
               order.priority == 'emergency' ? _red : const Color(0xFF5B6575),
@@ -457,15 +468,19 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
         if (order.status == 'ai_review') ...[
           const Divider(height: 28),
-          const Text(
-            'Работы сданы. Окончательное решение принимает мастер.',
-            style: TextStyle(fontWeight: FontWeight.w600),
+          Text(
+            order.pendingSync || widget.controller.isOrderPending(order.id)
+                ? 'Отчёт сохранён на устройстве. Сервер ещё не подтвердил сдачу.'
+                : 'Работы сданы. Окончательное решение принимает мастер.',
+            style: const TextStyle(fontWeight: FontWeight.w600),
           ),
         ],
         if (order.score != null) ...[
           const SizedBox(height: 12),
           Text(
-            'Итоговая оценка мастера: ${_number(order.score)} / 5',
+            order.pendingSync || widget.controller.isOrderPending(order.id)
+                ? 'Выбранная оценка: ${_number(order.score)} / 5 · ожидает подтверждения сервера'
+                : 'Итоговая оценка мастера: ${_number(order.score)} / 5',
             style: const TextStyle(fontWeight: FontWeight.w700),
           ),
         ],

@@ -250,6 +250,11 @@ class OrderCard extends StatelessWidget {
                   runSpacing: 6,
                   children: [
                     Tag(statuses[o.status] ?? o.status),
+                    if (o.pendingSync)
+                      const Tag(
+                        'Ожидает синхронизации',
+                        color: Color(0xFF8C5A00),
+                      ),
                     if (urgent || o.priority == 'high')
                       Tag(
                         priorities[o.priority]!,

@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/app_controller.dart';
+import 'package:naryad_ai/data/local_store.dart';
 import 'package:naryad_ai/data/models.dart';
 
 Json orderJson(int id) => {
@@ -247,6 +248,7 @@ void main() {
     final gate = Completer<void>();
     var reads = 0;
     final controller = AppController(
+      localStore: MemoryLocalStore(),
       api: NaryadApi(
         'http://server.test',
         client: MockClient((request) async {
@@ -281,6 +283,7 @@ void main() {
         }),
       );
       final controller = AppController(
+        localStore: MemoryLocalStore(),
         api: oldApi,
         apiFactory: (url) => NaryadApi(
           url,
@@ -322,6 +325,7 @@ void main() {
         }),
       );
       final controller = AppController(
+        localStore: MemoryLocalStore(),
         api: oldApi,
         apiFactory: (url) => NaryadApi(
           url,
@@ -361,6 +365,7 @@ void main() {
   test('saved write stays successful when following refresh fails', () async {
     var writes = 0;
     final controller = AppController(
+      localStore: MemoryLocalStore(),
       api: NaryadApi(
         'http://server.test',
         client: MockClient((request) async {
@@ -385,6 +390,7 @@ void main() {
     () async {
       final controller =
           AppController(
+              localStore: MemoryLocalStore(),
               api: NaryadApi(
                 'http://server.test',
                 client: MockClient(

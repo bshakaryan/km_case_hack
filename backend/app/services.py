@@ -36,7 +36,7 @@ def order_dict(db, order, detail=False, refs=None):
     equipment = refs.get("equipment", {}).get(order.equipment_id) or db.get(Equipment, order.equipment_id)
     employee = refs.get("employees", {}).get(order.assignee_id) or db.get(Employee, order.assignee_id)
     result = {key: getattr(order, key) for key in ["id", "number", "title", "description", "work_type", "area_id", "equipment_id", "assignee_id", "brigade_id", "master_id", "priority", "status", "comment", "normal_hours", "downtime_minutes", "score"]}
-    result.update({key: iso(getattr(order, key)) for key in ["deadline", "created_at", "started_at", "completed_at", "closed_at"]})
+    result.update({key: iso(getattr(order, key)) for key in ["deadline", "created_at", "assigned_at", "started_at", "completed_at", "closed_at"]})
     result["downtime_minutes"] = downtime_minutes(order)
     result.update(area_name=area.name, equipment_name=equipment.name, assignee_name=employee.name, is_overdue=order.status not in EXECUTION_FINISHED and aware(order.deadline) < utcnow())
     if detail:
@@ -91,8 +91,8 @@ def monitor_deadlines(db, now=None):
         elif minutes <= due_soon_minutes:
             added += notify(db, [order.assignee_id, order.master_id], f"До срока менее {due_soon_minutes} минут", detail, "due_soon", order.id, f"due_soon:{key}")
         acceptance_minutes = int(os.getenv("EMERGENCY_ACCEPT_MINUTES", "3")) if order.priority == "emergency" else int(os.getenv("ACCEPT_MINUTES", "10"))
-        if order.status == "issued" and (now - aware(order.created_at)).total_seconds() >= acceptance_minutes * 60:
-            added += notify(db, [order.assignee_id, order.master_id], f"Наряд не принят {acceptance_minutes} минут", detail, "unaccepted", order.id, f"unaccepted:{order.id}:{order.assignee_id}:{iso(order.created_at)}")
+        if order.status == "issued" and (now - aware(order.assigned_at)).total_seconds() >= acceptance_minutes * 60:
+            added += notify(db, [order.assignee_id, order.master_id], f"Наряд не принят {acceptance_minutes} минут", detail, "unaccepted", order.id, f"unaccepted:{order.id}:{order.assignee_id}:{iso(order.assigned_at)}")
     db.commit()
     return added
 

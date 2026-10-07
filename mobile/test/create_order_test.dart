@@ -7,12 +7,13 @@ import 'package:image/image.dart' as imaging;
 import 'package:image_picker/image_picker.dart';
 import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/app_controller.dart';
+import 'package:naryad_ai/data/local_store.dart';
 import 'package:naryad_ai/data/models.dart';
 import 'package:naryad_ai/screens/create_order_screen.dart';
 import 'package:naryad_ai/ui.dart';
 
 class _CreateController extends AppController {
-  _CreateController() {
+  _CreateController() : super(localStore: MemoryLocalStore()) {
     user = const User(id: 1, name: 'Мастер', role: 'master');
     reference = {
       'areas': [
