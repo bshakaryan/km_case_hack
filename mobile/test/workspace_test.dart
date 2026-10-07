@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/app_controller.dart';
 import 'package:naryad_ai/data/models.dart';
 import 'package:naryad_ai/main.dart';
+import 'package:naryad_ai/screens/login_screen.dart';
+import 'package:naryad_ai/screens/order_detail_screen.dart';
+import 'package:naryad_ai/screens/workspace_screen.dart';
 
 class TestController extends AppController {
   int logins = 0;
@@ -15,6 +19,15 @@ class TestController extends AppController {
 
   @override
   Future<void> refresh({bool silent = false}) async {}
+
+  @override
+  Future<WorkOrder> loadOrder(int id) async {
+    for (final o in orders) {
+      if (o.id == id) return o;
+    }
+    throw const ApiException('Нет связи с сервером', 0);
+  }
+
   void expire() {
     user = null;
     notifyListeners();
@@ -39,6 +52,32 @@ WorkOrder order(String status) => WorkOrder.fromJson({
 });
 
 void main() {
+  testWidgets('Session restore shows a splash instead of flashing login', (
+    tester,
+  ) async {
+    final c = TestController()..restoring = true;
+    addTearDown(c.dispose);
+    await tester.pumpWidget(NaryadApp(controller: c));
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byType(LoginScreen), findsNothing);
+
+    c
+      ..user = const User(id: 1, name: 'Мастер', role: 'master')
+      ..restoring = false;
+    c.notifyListeners();
+    await tester.pumpAndSettle();
+    expect(find.byType(WorkspaceScreen), findsOneWidget);
+  });
+
+  testWidgets('Fresh start without a session lands on login, not splash', (
+    tester,
+  ) async {
+    final c = TestController();
+    addTearDown(c.dispose);
+    await tester.pumpWidget(NaryadApp(controller: c));
+    expect(find.byType(LoginScreen), findsOneWidget);
+  });
+
   testWidgets('Rating drilldown includes the closed work behind the score', (
     tester,
   ) async {
@@ -124,6 +163,43 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets(
+    'Offline banner builds without a color/decoration conflict',
+    (tester) async {
+      final c = TestController()
+        ..user = const User(id: 1, name: 'Мастер', role: 'master')
+        ..offline = true;
+      addTearDown(c.dispose);
+      await tester.pumpWidget(NaryadApp(controller: c));
+      expect(
+        find.text(
+          'Нет соединения. Действия сохраняются на устройстве и отправятся после восстановления связи.',
+        ),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Order detail opens instantly from cache while offline', (
+    tester,
+  ) async {
+    final c = TestController()
+      ..user = const User(id: 1, name: 'Мастер', role: 'master')
+      ..offline = true
+      ..orders = [order('issued')];
+    addTearDown(c.dispose);
+    await tester.pumpWidget(
+      MaterialApp(home: OrderDetailScreen(controller: c, orderId: 12)),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('НР-123'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'Expired session returns to login without retaining a protected route',

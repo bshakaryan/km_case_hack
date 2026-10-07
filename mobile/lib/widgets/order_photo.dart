@@ -31,8 +31,9 @@ class _OrderPhotoState extends State<OrderPhoto> {
     _bytes = _load();
   }
 
-  Future<Uint8List> _load() =>
-      widget.controller.api.photo((widget.photo['id'] as num).toInt());
+  Future<Uint8List> _load() => widget.controller.photoBytes(
+    (widget.photo['id'] as num).toInt(),
+  );
 
   @override
   void didUpdateWidget(covariant OrderPhoto oldWidget) {

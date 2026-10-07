@@ -31,6 +31,7 @@ class NaryadApi {
   final http.Client _client;
   String? token;
   static const _timeout = Duration(seconds: 30);
+  static const _readTimeout = Duration(seconds: 8);
 
   static String normalizeBaseUrl(String input) {
     final value = input.trim().replaceFirst(RegExp(r'/+$'), '');
@@ -53,11 +54,12 @@ class NaryadApi {
 
   Future<http.Response> _send(http.BaseRequest request) async {
     final changesData = request.method != 'GET';
+    final timeout = changesData ? _timeout : _readTimeout;
     try {
       final response = await _client
           .send(request)
           .then(http.Response.fromStream)
-          .timeout(_timeout);
+          .timeout(timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw ApiException(
           _errorMessage(response),
@@ -124,9 +126,13 @@ class NaryadApi {
     String path, {
     String method = 'GET',
     Json? body,
+    String? commandId,
   }) async {
     final request = http.Request(method, Uri.parse('$baseUrl$path'));
     request.headers.addAll(_headers);
+    if (commandId != null) {
+      request.headers['X-Client-Command-Id'] = commandId;
+    }
     if (body != null) {
       request.headers['Content-Type'] = 'application/json; charset=utf-8';
       request.body = jsonEncode(body);
@@ -143,8 +149,13 @@ class NaryadApi {
     }
   }
 
-  Future<Json> _object(String path, {String method = 'GET', Json? body}) async {
-    final result = await _json(path, method: method, body: body);
+  Future<Json> _object(
+    String path, {
+    String method = 'GET',
+    Json? body,
+    String? commandId,
+  }) async {
+    final result = await _json(path, method: method, body: body, commandId: commandId);
     if (result is Map<String, dynamic>) return result;
     throw ApiException(
       'Неожиданный формат ответа сервера.',
@@ -175,7 +186,8 @@ class NaryadApi {
     return result;
   }
 
-  Future<User> me() async => User.fromJson(await _object('/auth/me'));
+  Future<Json> meData() => _object('/auth/me');
+  Future<User> me() async => User.fromJson(await meData());
   Future<Json> reference() => _object('/reference');
   Future<List<Json>> employees() => _list('/employees');
   Future<List<Json>> orders() => _list('/orders?limit=5000');
@@ -184,30 +196,45 @@ class NaryadApi {
   Future<Json> analytics() => _object('/analytics');
   Future<WorkOrder> order(int id) async =>
       WorkOrder.fromJson(await _object('/orders/$id'));
-  Future<WorkOrder> createOrder(Json data) async =>
-      WorkOrder.fromJson(await _object('/orders', method: 'POST', body: data));
+  Future<WorkOrder> createOrder(Json data, {String? commandId}) async =>
+      WorkOrder.fromJson(
+        await _object('/orders',
+            method: 'POST', body: data, commandId: commandId),
+      );
   Future<WorkOrder> transition(
     int id,
     String action, {
     String? reason,
     double? score,
+    String? commandId,
   }) async => WorkOrder.fromJson(
     await _object(
       '/orders/$id/transition',
       method: 'POST',
       body: {'action': action, 'reason': ?reason, 'score': ?score},
+      commandId: commandId,
     ),
   );
-  Future<WorkOrder> complete(int id, Json data) async => WorkOrder.fromJson(
-    await _object('/orders/$id/complete', method: 'POST', body: data),
+  Future<WorkOrder> complete(
+    int id,
+    Json data, {
+    String? commandId,
+  }) async => WorkOrder.fromJson(
+    await _object(
+      '/orders/$id/complete',
+      method: 'POST',
+      body: data,
+      commandId: commandId,
+    ),
   );
 
   Future<void> uploadPhoto(
     int id,
     Uint8List bytes,
     String filename,
-    String kind,
-  ) async {
+    String kind, {
+    String? commandId,
+  }) async {
     if (!['before', 'after'].contains(kind)) {
       throw const ApiException('Неизвестный тип фотографии.', 422);
     }
@@ -221,6 +248,9 @@ class NaryadApi {
           ..files.add(
             http.MultipartFile.fromBytes('file', bytes, filename: filename),
           );
+    if (commandId != null) {
+      request.headers['X-Client-Command-Id'] = commandId;
+    }
     await _send(request);
   }
 
