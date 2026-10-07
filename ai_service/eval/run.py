@@ -10,10 +10,12 @@ from datetime import datetime
 from pathlib import Path
 
 from app.analytics import AnalyticsService
+from app.assistant import MasterAssistant
 from app.config import BASE_DIR, DEFAULT_RATING_WEIGHTS, Settings
 from app.datasource import DataSource
 from app.deadlines import DeadlineController, utc
 from app.llm_client import LLMClient
+from app.intake import OrderIntake
 from app.photos import compare_images
 from app.rating import RatingService
 from app.schemas import OrderRecord, Snapshot
@@ -360,6 +362,71 @@ async def evaluate_analytics(snapshot: Snapshot, truth: dict):
             "scope": "seeded_patterns_not_independent_ground_truth_causality_unproven"}
 
 
+async def evaluate_intake(snapshot: Snapshot, cases: list[dict]):
+    store = AIStore("sqlite:///:memory:")
+    store.initialize()
+    service = OrderIntake(MemorySource(snapshot), LLMClient(Settings(demo_mode=True), store))
+    fields = ("equipment_id", "area_id", "fault_code_id", "time_norm_id", "deadline")
+    correct = {name: 0 for name in fields}
+    valid = total = 0
+    errors = []
+    valid_ids = {"equipment_id": {item.id for item in snapshot.equipment},
+                 "area_id": {item.id for item in snapshot.areas},
+                 "fault_code_id": {item.id for item in snapshot.fault_codes},
+                 "time_norm_id": {item.id for item in snapshot.time_norms}}
+    try:
+        for case in cases:
+            result = await service.from_text(case["phrase"], datetime.fromisoformat(case["reference_time"]))
+            draft = result["draft"]
+            differences = {}
+            for name in fields:
+                predicted = draft[name]
+                expected = case["expected"][name]
+                if name == "deadline" and predicted:
+                    predicted = utc(datetime.fromisoformat(predicted)).isoformat().replace("+00:00", "Z")
+                correct[name] += int(predicted == expected)
+                if predicted != expected:
+                    differences[name] = {"expected": expected, "actual": predicted}
+            for name, allowed in valid_ids.items():
+                if draft[name] is not None:
+                    total += 1
+                    valid += int(draft[name] in allowed)
+            if differences:
+                errors.append({"case_id": case["id"], "fields": differences})
+    finally:
+        store.close()
+    return {"status": "measured_synthetic", "cases": len(cases),
+            "field_accuracy": {name: ratio(count, len(cases)) for name, count in correct.items()},
+            "valid_id_rate": ratio(valid, total), "error_count": len(errors), "error_examples": errors[:3],
+            "scope": "template_cases_not_independent_real_speech"}
+
+
+async def evaluate_assistant(snapshot: Snapshot, cases: list[dict]):
+    store = AIStore("sqlite:///:memory:")
+    store.initialize()
+    service = MasterAssistant(MemorySource(snapshot), LLMClient(Settings(demo_mode=True), store))
+    tools_correct = numbers_correct = 0
+    errors = []
+    try:
+        for case in cases:
+            result = await service.ask(case["question"], datetime.fromisoformat(case["reference_time"]))
+            tool_ok = result["tool"] == case["expected_tool"]
+            number_ok = result["facts"].get(case["expected_metric"]) == case["expected_value"]
+            tools_correct += int(tool_ok)
+            numbers_correct += int(number_ok)
+            if not tool_ok or not number_ok:
+                errors.append({"case_id": case["id"], "expected_tool": case["expected_tool"],
+                               "actual_tool": result["tool"], "expected_number": case["expected_value"],
+                               "actual_number": result["facts"].get(case["expected_metric"])})
+    finally:
+        store.close()
+    return {"status": "measured_synthetic", "cases": len(cases),
+            "tool_accuracy": ratio(tools_correct, len(cases)),
+            "numeric_answer_accuracy": ratio(numbers_correct, len(cases)),
+            "error_count": len(errors), "error_examples": errors[:3],
+            "scope": "four_read_only_tools_template_questions_not_real_query_distribution"}
+
+
 def llm_summary(verification: dict, input_price: float | None, output_price: float | None):
     stats = verification["llm"]
     latencies = sorted(stats.pop("request_latencies_ms"))
@@ -382,7 +449,7 @@ def markdown(metrics: dict):
     llm = metrics["llm"]
     photos = metrics["photo_duplicates"]
     anomalies = metrics["anomalies"]
-    lines = ["# Метрики ИИ-сервиса — фаза 5", "",
+    lines = ["# Метрики ИИ-сервиса — фаза 6", "",
              "Офлайн-оценка на фиксированной синтетике. Эталоны размечены генератором, а не независимыми экспертами; это проверка реализации относительно учебных сценариев, **не accuracy на производстве**. Числа и вердикты считает код. Основная БД и API не изменены.", "",
              "## Контроль сроков 6.1", "",
              f"- Случаи: {deadlines['cases']}; событий: {deadlines['expected_notifications']} ожидается, {deadlines['predicted_notifications']} предсказано.",
@@ -411,12 +478,19 @@ def markdown(metrics: dict):
                   "## Аналитика 6.5", "",
                   f"- Найдено заложенных сигналов: {anomalies['found_of_six']}/6; срабатываний на трёх приманках: {anomalies['false_positive_decoys']}; дополнительных неразмеченных гипотез: {anomalies.get('additional_unlabeled_findings')}. Они требуют проверки, а не считаются автоматически ошибками или доказанной причинностью.",
                   f"- Примеры неразмеченных гипотез: {json.dumps(anomalies.get('additional_examples', []), ensure_ascii=False)}.", "",
+                  "## Ввод наряда 6.8", "",
+                  f"- {metrics['intake']['cases']} шаблонных фраз; точность полей: {json.dumps(metrics['intake']['field_accuracy'], ensure_ascii=False)}; доля существующих ID: {metrics['intake']['valid_id_rate']}.",
+                  "- Это текстовый ввод на синтетике; распознавание реального аудио отдельно не проверено.", "",
+                  "## Ассистент мастера 6.7", "",
+                  f"- {metrics['assistant']['cases']} шаблонных вопросов; выбор инструмента: {metrics['assistant']['tool_accuracy']}; совпадение чисел с эталоном: {metrics['assistant']['numeric_answer_accuracy']}.",
+                  "- Ответы и числа формируются кодом из снимка, не моделью; внешние tool-call API не проверялись.", "",
                   "## Ещё не измерено", "",
                   "- Vision-оценка устранения дефекта и качества: нужны 15–20 реальных пар с независимой экспертной разметкой; процедурные рисунки непригодны.",
-                  "- Ввод и ассистент: точность ID/полей/инструмента и чисел не измерена до фазы 6.", "",
+                  "- STT-accuracy на реальных аудиозаписях и качество LLM-выбора инструментов/полей не измерены.", "",
                   "## Ошибки и ограничения", ""])
     for title, item in (("Сроки", deadlines), ("Проверка", rules), ("Рейтинг", rating),
-                        ("Фото-дубли", photos)):
+                        ("Фото-дубли", photos), ("Ввод", metrics["intake"]),
+                        ("Ассистент", metrics["assistant"])):
         examples = item.get("error_examples", [])
         lines.append(f"- {title}: {item.get('error_count', len(examples))} ошибок; примеры: " +
                      ("; ".join(json.dumps(example, ensure_ascii=False) for example in examples[:3])
@@ -454,7 +528,7 @@ async def evaluate(data_dir: Path, cases_dir: Path, with_llm=False,
         llm_mode = {"status": "measured", **llm_result}
     rules.pop("llm")
     result = {
-        "phase": 5, "dataset": "synthetic", "label_source": "generator_code_not_expert",
+        "phase": 6, "dataset": "synthetic", "label_source": "generator_code_not_expert",
         "snapshot_sha256": hashlib.sha256(snapshot_path.read_bytes()).hexdigest(),
         "case_counts": {name: len(cases[name]) if isinstance(cases[name], list) else len(cases[name].get("patterns", []))
                         for name in case_names},
@@ -464,9 +538,8 @@ async def evaluate(data_dir: Path, cases_dir: Path, with_llm=False,
         "photo_duplicates": evaluate_photo_duplicates(cases["photos_dup"]),
         "vision": {"status": "real_labeled_pairs_required", "score": None},
         "anomalies": await evaluate_analytics(snapshot, cases["analytics"]),
-        "intake": {"status": "not_implemented_phase_6", "field_accuracy": None, "valid_id_rate": None},
-        "assistant": {"status": "not_implemented_phase_6", "tool_accuracy": None,
-                      "numeric_answer_accuracy": None},
+        "intake": await evaluate_intake(snapshot, cases["intake"]),
+        "assistant": await evaluate_assistant(snapshot, cases["assistant"]),
     }
     result["case_counts"]["analytics_decoys"] = len(cases["analytics"].get("decoys", [])) if isinstance(
         cases["analytics"], dict) else 0

@@ -1,5 +1,5 @@
 {
-  "phase": 5,
+  "phase": 6,
   "dataset": "synthetic",
   "label_source": "generator_code_not_expert",
   "snapshot_sha256": "49e3a556a8a080e79cf77a7ac6a478b0e736fcbc63585d1d1d68abf83c2e4c09",
@@ -339,14 +339,28 @@
     "scope": "seeded_patterns_not_independent_ground_truth_causality_unproven"
   },
   "intake": {
-    "status": "not_implemented_phase_6",
-    "field_accuracy": null,
-    "valid_id_rate": null
+    "status": "measured_synthetic",
+    "cases": 40,
+    "field_accuracy": {
+      "equipment_id": 1.0,
+      "area_id": 1.0,
+      "fault_code_id": 1.0,
+      "time_norm_id": 1.0,
+      "deadline": 1.0
+    },
+    "valid_id_rate": 1.0,
+    "error_count": 0,
+    "error_examples": [],
+    "scope": "template_cases_not_independent_real_speech"
   },
   "assistant": {
-    "status": "not_implemented_phase_6",
-    "tool_accuracy": null,
-    "numeric_answer_accuracy": null
+    "status": "measured_synthetic",
+    "cases": 25,
+    "tool_accuracy": 1.0,
+    "numeric_answer_accuracy": 1.0,
+    "error_count": 0,
+    "error_examples": [],
+    "scope": "four_read_only_tools_template_questions_not_real_query_distribution"
   },
   "llm": {
     "prompts": 0,

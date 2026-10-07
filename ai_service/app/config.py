@@ -34,6 +34,7 @@ class Settings(BaseModel):
     llm_model_fast: str = ""
     llm_model_smart: str = ""
     llm_model_vision: str = ""
+    stt_model: str = ""
     openai_api_key: SecretStr = SecretStr("")
     anthropic_api_key: SecretStr = SecretStr("")
     telegram_bot_token: SecretStr = SecretStr("")
@@ -80,6 +81,7 @@ class Settings(BaseModel):
             llm_model_fast=os.getenv("LLM_MODEL_FAST", ""),
             llm_model_smart=os.getenv("LLM_MODEL_SMART", ""),
             llm_model_vision=os.getenv("LLM_MODEL_VISION", ""),
+            stt_model=os.getenv("STT_MODEL", ""),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),

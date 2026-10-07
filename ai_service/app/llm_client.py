@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import base64
+import re
 from typing import Literal
 
 import httpx
@@ -95,6 +96,87 @@ class LLMClient:
         if self.settings.llm_provider == "anthropic":
             return bool(self.settings.anthropic_api_key.get_secret_value())
         return False
+
+    def safe_text_enabled(self):
+        return self.settings.data_source == "synthetic" and self.enabled()
+
+    @staticmethod
+    def redact(value: str, employees: list):
+        redacted = value
+        for person in employees:
+            for secret in (person.name, person.login):
+                if secret and len(secret) >= 4:
+                    redacted = re.sub(re.escape(secret), "[сотрудник]", redacted, flags=re.IGNORECASE)
+        return re.sub(r"(?<!\w)\+?\d[\d\s()\-]{8,}\d(?!\w)", "[телефон]", redacted)
+
+    async def structured_response(self, purpose: str, prompt: dict, schema: dict, response_model: type[BaseModel],
+                                  smart: bool = False):
+        if not self.safe_text_enabled():
+            return None
+        serialized = json.dumps(prompt, ensure_ascii=False, sort_keys=True)
+        provider = self.settings.llm_provider
+        model = self.settings.llm_model_smart if smart and self.settings.llm_model_smart else self.settings.llm_model_fast
+        cache_key = hashlib.sha256(f"structured:{purpose}:{provider}:{model}:{serialized}".encode()).hexdigest()
+        cached = self.store.get_cached(cache_key)
+        if cached is not None:
+            try:
+                result = response_model.model_validate(cached)
+                self.cache_hits += 1
+                return result
+            except ValidationError:
+                pass
+        for attempt in range(2):
+            started = time.perf_counter()
+            self.request_count += 1
+            try:
+                payload = await self._request_structured(purpose, serialized, schema, model)
+                result = response_model.model_validate(payload)
+                self.store.put_cached(cache_key, provider, model, result.model_dump(mode="json"))
+                return result
+            except (httpx.HTTPError, KeyError, ValueError, ValidationError, TypeError) as error:
+                LOG.warning("Structured %s failed on attempt %s: %s", purpose, attempt + 1, type(error).__name__)
+            finally:
+                self.request_latencies_ms.append(round((time.perf_counter() - started) * 1000, 2))
+        return None
+
+    async def _request_structured(self, purpose: str, serialized: str, schema: dict, model: str):
+        instruction = "Выбирай только переданные ID и инструменты. Не придумывай сотрудников, факты, числа и сроки."
+        async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
+            if self.settings.llm_provider == "openai":
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={"Authorization": f"Bearer {self.settings.openai_api_key.get_secret_value()}"},
+                    json={"model": model, "store": False,
+                          "input": [{"role": "system", "content": instruction},
+                                    {"role": "user", "content": serialized}],
+                          "text": {"format": {"type": "json_schema", "name": purpose,
+                                              "strict": True, "schema": schema}}},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                self.record_usage(payload)
+                for item in payload["output"]:
+                    for part in item.get("content", []):
+                        if part.get("type") == "output_text":
+                            return json.loads(part["text"])
+                raise ValueError("No structured output")
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": self.settings.anthropic_api_key.get_secret_value(),
+                         "anthropic-version": "2023-06-01"},
+                json={"model": model, "max_tokens": 600, "system": instruction,
+                      "messages": [{"role": "user", "content": serialized}],
+                      "tools": [{"name": purpose, "description": "Выбор из разрешённого списка",
+                                 "input_schema": schema}],
+                      "tool_choice": {"type": "tool", "name": purpose}},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            self.record_usage(payload)
+            for item in payload["content"]:
+                if item.get("type") == "tool_use" and item.get("name") == purpose:
+                    return item["input"]
+            raise ValueError("No structured tool result")
 
     def vision_enabled(self):
         if self.settings.demo_mode or self.settings.data_source != "synthetic" or not self.settings.llm_model_vision:

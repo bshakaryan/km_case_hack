@@ -5,16 +5,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .backend_source import BackendDataSource
 from .analytics import AnalyticsService
+from .assistant import MasterAssistant
 from .config import Settings
 from .datasource import DataSource, DataSourceError, IncompleteHistory
 from .deadlines import DeadlineController
 from .llm_client import LLMClient
+from .intake import OpenAITranscriber, OrderIntake
 from .notifier import LogNotifier, TelegramNotifier
 from .photos import PhotoReviewService
 from .rating import RatingService
@@ -39,6 +41,16 @@ class MasterOverrideRequest(BaseModel):
     reason: str = Field(min_length=1)
 
 
+class AssistantRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    now: datetime | None = None
+
+
+class IntakeRequest(BaseModel):
+    phrase: str = Field(min_length=1, max_length=2000)
+    now: datetime | None = None
+
+
 def create_app(settings: Settings | None = None, source: DataSource | None = None, store: AIStore | None = None):
     settings = settings or Settings.from_env()
     store = store or AIStore(settings.ai_database_url, settings.ai_db_confirmed_separate)
@@ -54,6 +66,11 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
     verifier = CompletionVerifier(source, store, llm_client)
     photo_service = PhotoReviewService(source, store, llm_client, settings)
     analytics = AnalyticsService(source)
+    assistant = MasterAssistant(source, llm_client)
+    transcriber = (OpenAITranscriber(settings.openai_api_key.get_secret_value(), settings.stt_model)
+                   if settings.data_source == "synthetic" and not settings.demo_mode and
+                   settings.llm_provider == "openai" and settings.stt_model else None)
+    intake = OrderIntake(source, llm_client, transcriber)
     reports = ReportService(source, store)
     rating = RatingService(source, settings, store)
     review_tasks = set()
@@ -140,6 +157,8 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
     app.state.verifier = verifier
     app.state.photo_service = photo_service
     app.state.analytics = analytics
+    app.state.assistant = assistant
+    app.state.intake = intake
 
     @app.exception_handler(IncompleteHistory)
     async def incomplete_history_handler(request, error):
@@ -274,6 +293,21 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
     async def weekly_analytics(end: datetime | None = None, area_id: int | None = None):
         end = end or datetime.now(timezone.utc)
         return await analytics.analyze(end - timedelta(days=7), end, area_id)
+
+    @app.post("/ai/assistant/ask", dependencies=[Depends(require_token)])
+    async def assistant_ask(request: AssistantRequest):
+        return await assistant.ask(request.question, request.now or datetime.now(timezone.utc))
+
+    @app.post("/ai/intake/text", dependencies=[Depends(require_token)])
+    async def intake_text(request: IntakeRequest):
+        return await intake.from_text(request.phrase, request.now or datetime.now(timezone.utc))
+
+    @app.post("/ai/intake/voice", dependencies=[Depends(require_token)])
+    async def intake_voice(file: UploadFile = File(...), now: datetime | None = None):
+        if file.content_type not in {"audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4", "audio/webm"}:
+            raise HTTPException(415, "Нужен WAV, MP3, MP4 или WebM")
+        audio = await file.read(10_000_001)
+        return await intake.from_voice(audio, file.filename or "recording.wav", now or datetime.now(timezone.utc))
 
     @app.get("/ai/reports/orders/{order_id}", dependencies=[Depends(require_token)])
     async def order_report(order_id: int, audience: str = "master", format: str = "json"):
