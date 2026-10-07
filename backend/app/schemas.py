@@ -90,3 +90,13 @@ class Completion(Payload):
         if len(ids) != len(set(ids)):
             raise ValueError("Материал можно указать только один раз")
         return self
+
+
+class DeviceRegistration(Payload):
+    token: str = Field(min_length=8, max_length=4096)
+    platform: Literal["android"]
+    app_version: str | None = Field(default=None, max_length=40)
+
+
+class DeviceUnregister(Payload):
+    token: str = Field(min_length=1, max_length=4096)

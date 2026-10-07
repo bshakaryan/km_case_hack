@@ -28,7 +28,21 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-naryad}:${POSTGRES_PASSWORD:-demo-only-change-me}@db:5432/${POSTGRES_DB:-naryad_ai}
       SEED_DEMO: ${SEED_DEMO:-true}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      # FCM push: without FIREBASE_CREDENTIALS(_JSON) the backend stays in stub mode.
+      FIREBASE_CREDENTIALS: ${FIREBASE_CREDENTIALS:-}
+      FIREBASE_CREDENTIALS_JSON: ${FIREBASE_CREDENTIALS_JSON:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-km-case-hack}
+      PUSH_ENABLED: ${PUSH_ENABLED:-true}
+      PUSH_DISPATCH_SECONDS: ${PUSH_DISPATCH_SECONDS:-3}
+      PUSH_MAX_ATTEMPTS: ${PUSH_MAX_ATTEMPTS:-8}
+      # Real FCM delivery fallback: mount the git-ignored backend/secrets/
+      # directory read-only and set FIREBASE_CREDENTIALS to the key inside.
+      # When uncommented, this environment entry must stay at this indentation
+      # to remain inside the `environment:` block.
+      # FIREBASE_CREDENTIALS: /run/secrets/km-case-hack-firebase-adminsdk-fbsvc-43f1ce1b97.json
       TZ: Asia/Almaty
+    # volumes:
+    #   - ./backend/secrets:/run/secrets:ro
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     healthcheck:

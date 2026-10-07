@@ -8,3 +8,6 @@ uploads
 *.db
 *.db-*
 .venv*
+secrets
+**/secrets
+*service-account*.json

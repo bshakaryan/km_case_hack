@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "716637680468",
+    "project_id": "km-case-hack",
+    "storage_bucket": "km-case-hack.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:716637680468:android:55fd3dd527e18e0a098ec1",
+        "android_client_info": {
+          "package_name": "kz.km.naryad_ai"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA1A9rctrtf-J4pMiQiCSWX9a43wqFLnhU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

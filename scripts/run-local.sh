@@ -19,8 +19,24 @@ export SEED_DEMO="${SEED_DEMO:-true}"
 export CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}"
 export TZ=Asia/Almaty
 
+# FCM push: если учётные данные заданы неявно, берём первый ключ из backend/secrets/*.json.
+if [[ -z "${FIREBASE_CREDENTIALS:-}" && -z "${FIREBASE_CREDENTIALS_JSON:-}" ]]; then
+  CRED_FILE=""
+  for f in "$PROJECT_DIR"/backend/secrets/*.json; do
+    [[ -f "$f" ]] || continue
+    CRED_FILE="$f"
+    break
+  done
+  if [[ -n "$CRED_FILE" ]]; then
+    export FIREBASE_CREDENTIALS="$CRED_FILE"
+    echo "FCM: использован ключ сервисного аккаунта ${CRED_FILE#"$PROJECT_DIR"/}."
+  fi
+fi
+export FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID:-km-case-hack}"
+export PUSH_ENABLED="${PUSH_ENABLED:-true}"
+
 cd "$PROJECT_DIR/backend"
-"$PYTHON_BIN" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+"$PYTHON_BIN" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 cd "$PROJECT_DIR/frontend"
 node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort &

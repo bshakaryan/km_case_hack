@@ -1,5 +1,75 @@
 # Проверки реализации
 
+## Push для Android (FCM) · 8 октября 2026
+
+Пакет FCM-push на ветке `feature/fcm-push-notifications`: серверные таблицы `push_tasks`/`device_tokens` и неизменяемая миграция `0003_push`, фоновый диспетчер FCM внутри процесса API, маршруты `POST /api/devices` и `POST /api/devices/unregister`, клиентские `firebase_core`/`firebase_messaging`/`flutter_local_notifications` с внедряемым `PushService`. Среда: Python 3.14.7 (`.venv` в корне репозитория), Flutter 3.47.0 / Dart 3.13.0 на этой машине. Физический телефон и iOS не использовались.
+
+Связка учётных данных (этап 1): ключ сервисного аккаунта проекта лежит в `backend/secrets/km-case-hack-firebase-adminsdk-fbsvc-43f1ce1b97.json` — каталог `backend/secrets/*` (кроме `.gitkeep`) и шаблон `*service-account*.json` в `.gitignore`, в Docker-образ файл не входит. Сервер читает ключ из окружения: inline JSON в `FIREBASE_CREDENTIALS_JSON` (приоритет) либо путь в `FIREBASE_CREDENTIALS`; при отсутствии обоих каналов `scripts/run-local.sh` сам берёт первый `backend/secrets/*.json` и печатает выбранный файл, а Docker Compose пропускает `FIREBASE_CREDENTIALS_JSON` и оставляет закомментированный fallback — монтирование каталога `backend/secrets` только на чтение. `mobile/android/app/google-services.json` отслеживается Git: это публичная клиентская конфигурация (идентификаторы проекта/приложения и Android API-ключ) без серверного секрета.
+
+Проверки пакета:
+
+- Сервер: `pytest -q` из `backend/` — **48 passed** (33 прежних + 15 новых в `test_push.py`). Новые проверки: upsert токена, перепривязка чужого токена текущему пользователю, идемпотентный отзыв и `422` на некорректном теле, постановка `push_tasks` в одной транзакции с уведомлением БД, поведение диспетчера с подставным отправителем (успех/недействительный токен/нет устройств/повторы/исчерпание попыток) и режим `StubSender` при отсутствии учётных данных. Сервер проверен на SQLite; `google-auth==2.60.0` входит в `requirements.txt` и нужен только реальной отправке — тестам он не требуется.
+- Миграция `0003_push`: самодостаточный DDL без импорта ORM-моделей (D13); проверены применение с нуля, повторный прогон (идемпотентность) и путь «существующая база после `create_all`». Старые данные при обновлении не теряются; PostgreSQL-конкурентность не проверялась.
+- Клиент: `flutter analyze` — **No issues found**; `flutter test --concurrency=1` — **59 passed, 1 skipped** (было 50+1; +9 тестов `push_test.dart`, прежние тесты не ослаблены). Проверены регистрация токена после входа, отзыв при выходе, отложенное открытие наряда по нажатию до входа и безопасная работа без Firebase (подставной `PushService`).
+- Сборка: `flutter build apk --debug` успешна; `google-services.json` (проект `km-case-hack`, пакет `kz.km.naryad_ai`) подключает Google Services, в объединённом манифесте есть `POST_NOTIFICATIONS`, канал `naryad_default` и сервис FCM. Это подтверждает сборку, а не доставку.
+
+Смоук-прогон серверной стороны (этап 1) с реальным ключом. Первый терминал, из каталога `backend/`; без `DATABASE_URL` используется база по умолчанию `backend/data/km.db`:
+
+```bash
+# Однократно: зависимости сервера, включая google-auth для чтения ключа
+../.venv/bin/python -m pip install -r requirements.txt
+
+# Запуск API с файлом ключа (канал FIREBASE_CREDENTIALS)
+FIREBASE_CREDENTIALS=secrets/km-case-hack-firebase-adminsdk-fbsvc-43f1ce1b97.json \
+  ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Второй терминал, из корня репозитория (логины/ПИН из `seed`: `worker` и `master`, PIN `1234`):
+
+```bash
+# Два входа: исполнитель регистрирует устройство, мастер создаёт наряд
+TOKEN_W=$(curl -sS -X POST http://127.0.0.1:8000/api/auth/login \
+  -H 'Content-Type: application/json' -d '{"login":"worker","pin":"1234"}' \
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["token"])')
+TOKEN_M=$(curl -sS -X POST http://127.0.0.1:8000/api/auth/login \
+  -H 'Content-Type: application/json' -d '{"login":"master","pin":"1234"}' \
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["token"])')
+
+# Режим интеграции должен стать native: fcm/active
+curl -sS http://127.0.0.1:8000/api/integrations -H "Authorization: Bearer $TOKEN_M"
+
+# Подставное устройство под исполнителем worker (id 5)
+curl -sS -X POST http://127.0.0.1:8000/api/devices \
+  -H "Authorization: Bearer $TOKEN_W" -H 'Content-Type: application/json' \
+  -d '{"token":"fake-invalid-token-smoke","platform":"android","app_version":"smoke"}'
+
+# Триггер: назначение наряда исполнителю создаёт уведомление и push-задачу
+curl -sS -X POST http://127.0.0.1:8000/api/orders \
+  -H "Authorization: Bearer $TOKEN_M" -H 'Content-Type: application/json' \
+  -d '{"title":"FCM smoke","description":"","work_type":"planned","area_id":1,"equipment_id":1,"assignee_id":5,"priority":"normal","deadline":"2026-10-09T12:00:00+06:00","normal_hours":2,"comment":"smoke"}'
+
+# После цикла диспетчера (3 с): outbox и трассировка интеграций
+sleep 5
+sqlite3 backend/data/km.db 'SELECT id, status, attempts, provider_message_id, last_error FROM push_tasks ORDER BY id DESC LIMIT 5;'
+sqlite3 backend/data/km.db 'SELECT adapter, operation, substr(payload,1,160) FROM integration_logs ORDER BY id DESC LIMIT 5;'
+```
+
+Тот же серверный сценарий оформлен исполняемым скриптом `scripts/smoke_fcm.py`; он требует настроенных учётных данных FCM и не подтверждает доставку на физическое устройство.
+
+Результат серверного смоук-прогона (успех): оба хоста доступны, обмен OAuth2 access-token проходит — `oauth2.googleapis.com` и `fcm.googleapis.com`. `GET /api/integrations` вернул `native.mode = "fcm"`. Подставной токен `fake-invalid-token-smoke` зарегистрирован (`POST /api/devices`, id=1); уведомление вызвано созданием наряда `Н-2026-FC87A5` (id 557). Итоговая строка `push_tasks` id=25: `status="failed"`, `attempts=0`, `last_error="all_tokens_invalid"`; в `integration_logs` (`adapter="fcm"`, id=25) записано `{"task_id": 25, "order_id": 557, "token": "fake-invalid-token-smoke", "attempts": 0, "error": "The registration token is not a valid FCM registration token"}`. Строка `device_tokens` с подставным токеном отозвана (`revoked_at` установлен). Это подтверждает учётные данные, исходящий доступ к обоим хостам Google, работу FCM v1 endpoint и отзыв недействительного токена; доставку на реальное устройство это не подтверждает — она остаётся отдельной проверкой.
+
+Зависимости: `psycopg[binary]` поднят с `3.2.6` до `3.3.6`, чтобы `pip install -r backend/requirements.txt` работал на Python 3.14 (для cp314 нет бинарного wheel 3.2.6). PostgreSQL по-прежнему нужен только полному запуску/Compose, а не тестам на SQLite и не FCM-смоуку.
+
+В этом пакете НЕ проверяется:
+
+- Физическое Android-устройство: системное разрешение на уведомления, показ в фоне и после закрытия, звук и красное выделение аварийного, открытие наряда по нажатию, ротация токена.
+- iOS/APNs: не реализовано, сборка и приёмка не выполнялись.
+- Несколько процессов API: диспетчер, как и монитор сроков, однопроцессный; согласование процессов и PostgreSQL-конкуренция не проверялись.
+- Подтверждение аварийного уведомления исполнителем (R18 полностью) не реализовано.
+- SLA 5/10 секунд, 6 нажатий, нагрузка, TalkBack и крупный шрифт.
+
+Смоук-прогон проверяет серверную отправку в FCM и запись результата; доставку на устройстве он не подтверждает — для этого нужен физический телефон и отдельная приёмка.
+
 ## Офлайн-очередь и идемпотентные ключи · 7 октября 2026
 
 Пакет постоянного офлайн-состояния на `feature/offline-persistent-state`: серверные `X-Client-Command-Id`, локальная очередь команд/медиа и экран очереди. Среда: Python 3.14 (backend `.venv`, `httpx 0.28.1`), Flutter на этой машине. Телефон, эмулятор и реальная выключенная сеть не использовались.
