@@ -89,7 +89,7 @@ class LLMClient:
         self.request_latencies_ms = []
 
     def enabled(self):
-        if self.settings.demo_mode or not self.settings.llm_model_fast:
+        if self.settings.data_source != "synthetic" or self.settings.demo_mode or not self.settings.llm_model_fast:
             return False
         if self.settings.llm_provider == "openai":
             return bool(self.settings.openai_api_key.get_secret_value())
@@ -107,7 +107,10 @@ class LLMClient:
             for secret in (person.name, person.login):
                 if secret and len(secret) >= 4:
                     redacted = re.sub(re.escape(secret), "[сотрудник]", redacted, flags=re.IGNORECASE)
-        return re.sub(r"(?<!\w)\+?\d[\d\s()\-]{8,}\d(?!\w)", "[телефон]", redacted)
+        redacted = re.sub(r"(?<!\w)\+?\d[\d\s()\-]{8,}\d(?!\w)", "[телефон]", redacted)
+        redacted = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", redacted)
+        return re.sub(r"\bтаб(?:ельный)?\.?\s*(?:№|номер)?\s*\d{3,}\b", "[табельный номер]",
+                      redacted, flags=re.IGNORECASE)
 
     async def structured_response(self, purpose: str, prompt: dict, schema: dict, response_model: type[BaseModel],
                                   smart: bool = False):
