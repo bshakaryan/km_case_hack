@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
+from anyio import from_thread
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,6 +37,36 @@ log = logging.getLogger(__name__)
 STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "completed", "ai_review", "rework", "closed", "cancelled"}
 PRIORITY = {"emergency", "high", "normal", "planned"}
 WS_AUTH_RECHECK_SECONDS = 30
+ORDER_NUMBER_ATTEMPTS = 5
+
+
+def order_number(assigned):
+    return f"Н-{assigned.year}-{secrets.token_hex(3).upper()}"
+
+
+def number_collision(error):
+    """Retry only the unique constraint on our generated order number."""
+    original = error.orig
+    if getattr(original, "sqlstate", None) == "23505":
+        return getattr(getattr(original, "diag", None), "constraint_name", None) == "ix_orders_number"
+    return str(original) == "UNIQUE constraint failed: orders.number"
+
+
+def prepare_photo(data):
+    """Decode and compress outside the transaction holding the order lock."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as original:
+                original.verify()
+            with Image.open(io.BytesIO(data)) as original:
+                photo_image = ImageOps.exif_transpose(original).convert("RGB")
+                photo_image.thumbnail((1920, 1920))
+                output = io.BytesIO()
+                photo_image.save(output, format="JPEG", quality=82, optimize=True)
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise HTTPException(422, "Файл не является допустимым изображением")
+    return output.getvalue()
 
 
 class Realtime:
@@ -177,11 +208,12 @@ def create_app(database_url=None, seed=True, monitor=True):
             raise HTTPException(422, "Работник вне смены")
         return person.id
 
-    async def changed(db, order):
+    def changed(db, order):
+        body = order_dict(db, order, detail=True)
         db.commit()
-        await realtime.publish("orders.updated", order.id)
-        await realtime.publish("notifications.updated")
-        return order_dict(db, order, detail=True)
+        from_thread.run(realtime.publish, "orders.updated", order.id)
+        from_thread.run(realtime.publish, "notifications.updated")
+        return body
 
     CLIENT_COMMAND_ID = re.compile(r"[A-Za-z0-9._:-]{8,64}")
 
@@ -191,7 +223,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     def json_hash(payload):
         return request_hash(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str))
 
-    async def run_idempotent(db, user, request, kind, command_hash, status, perform, order_id=None):
+    def run_idempotent(db, user, request, kind, command_hash, status, perform, order_id=None):
         scoped_hash = request_hash("client-command-v2", kind, "" if order_id is None else str(order_id), command_hash)
         client_id = (request.headers.get("X-Client-Command-Id") or "").strip()
         if client_id:
@@ -223,13 +255,13 @@ def create_app(database_url=None, seed=True, monitor=True):
             except IntegrityError:
                 db.rollback()
                 raise HTTPException(409, "Команда с таким идентификатором уже выполняется")
-        body, events = await perform()
+        body, events = perform()
         if claim is not None:
             claim.response_status = status
             claim.response_body = body
         db.commit()
         for type_, order_id in events:
-            await realtime.publish(type_, order_id)
+            from_thread.run(realtime.publish, type_, order_id)
         return JSONResponse(status_code=status, content=body)
 
     def filtered(db, user, area_id=None, equipment_id=None, assignee_id=None, brigade_id=None, priority=None, status=None, search=None, from_date=None, to_date=None):
@@ -407,11 +439,11 @@ def create_app(database_url=None, seed=True, monitor=True):
         return order_dict(db, get_order(db, id_, user), detail=True)
 
     @app.post("/api/orders", status_code=201)
-    async def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
+    def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
         require_role(user, "master", "admin")
         command_hash = json_hash(payload.model_dump())
 
-        async def perform():
+        def perform():
             equipment = db.get(Equipment, payload.equipment_id)
             if not equipment or equipment.area_id != payload.area_id:
                 raise HTTPException(422, "Оборудование не принадлежит выбранному участку")
@@ -420,17 +452,34 @@ def create_app(database_url=None, seed=True, monitor=True):
             data = payload.model_dump()
             data["assignee_id"] = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
             assigned = utcnow()
-            order = Order(**data, number=f"Н-{assigned.year}-{secrets.token_hex(3).upper()}", status="issued", master_id=user.id, created_at=assigned, assigned_at=assigned)
-            db.add(order)
-            db.flush()
+            if db.bind.dialect.name == "sqlite" and not db.connection().connection.driver_connection.in_transaction:
+                # sqlite3's legacy transaction mode does not BEGIN for SELECT.
+                # A first SAVEPOINT must not become an independently committed
+                # transaction when it is released before audit/notifications.
+                db.connection().exec_driver_sql("BEGIN")
+            for attempt in range(ORDER_NUMBER_ATTEMPTS):
+                order = Order(**data, number=order_number(assigned), status="issued", master_id=user.id, created_at=assigned, assigned_at=assigned)
+                try:
+                    # Preserve the command claim and any assignment locks while
+                    # rolling back only a collided candidate, on either backend.
+                    with db.begin_nested():
+                        db.add(order)
+                        db.flush()
+                except IntegrityError as error:
+                    if not number_collision(error):
+                        raise
+                    if attempt == ORDER_NUMBER_ATTEMPTS - 1:
+                        raise HTTPException(503, "Не удалось выделить номер наряда. Повторите запрос позже.", headers={"Retry-After": "1"})
+                else:
+                    break
             audit(db, order, "issue", user.id, comment=payload.comment)
             notify(db, [order.assignee_id], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
             return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "order_create", command_hash, 201, perform)
+        return run_idempotent(db, user, request, "order_create", command_hash, 201, perform)
 
     @app.patch("/api/orders/{id_}")
-    async def order_update(id_: int, payload: OrderPatch, db: DB, user: User):
+    def order_update(id_: int, payload: OrderPatch, db: DB, user: User):
         require_role(user, "master", "admin")
         order = get_order(db, id_, user, lock=True)
         if order.status in TERMINAL:
@@ -454,10 +503,10 @@ def create_app(database_url=None, seed=True, monitor=True):
                 setattr(order, key, value)
             audit_fields.append(f"{key}={iso(value) if isinstance(value, datetime) else value}")
         audit(db, order, "edit", user.id, old_status, "; ".join(audit_fields))
-        return await changed(db, order)
+        return changed(db, order)
 
     @app.post("/api/orders/{id_}/transition")
-    async def transition(id_: int, payload: Transition, db: DB, user: User, request: Request):
+    def transition(id_: int, payload: Transition, db: DB, user: User, request: Request):
         require_role(user, "worker", "master", "admin")
         action = payload.action
         if action in ["accept", "start", "pause", "resume", "reject"]:
@@ -471,7 +520,7 @@ def create_app(database_url=None, seed=True, monitor=True):
         order = get_order(db, id_, user, lock=True)
         command_hash = json_hash(payload.model_dump())
 
-        async def perform():
+        def perform():
             if action == "queue" and order.status == "queued":
                 return order_dict(db, order, detail=True), [("orders.updated", order.id)]
             if action in ["reject", "pause", "rework", "cancel"] and not payload.reason:
@@ -525,15 +574,15 @@ def create_app(database_url=None, seed=True, monitor=True):
             notify(db, [order.assignee_id, order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
             return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
+        return run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/complete")
-    async def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
+    def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
         require_role(user, "worker")
         order = get_order(db, id_, user, lock=True)
         command_hash = json_hash(payload.model_dump())
 
-        async def perform():
+        def perform():
             if order.status != "in_progress":
                 raise HTTPException(409, "Завершить можно только наряд в работе")
             if not db.get(FaultCode, payload.fault_code_id):
@@ -567,45 +616,44 @@ def create_app(database_url=None, seed=True, monitor=True):
             notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
             return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "complete", command_hash, 200, perform, order_id=id_)
+        return run_idempotent(db, user, request, "complete", command_hash, 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/photos", status_code=201)
-    async def upload_photo(id_: int, db: DB, user: User, request: Request, file: UploadFile = File(...), kind: str = Form(...)):
+    def upload_photo(id_: int, db: DB, user: User, request: Request, file: UploadFile = File(...), kind: str = Form(...)):
         require_role(user, "worker", "master", "admin")
-        order = get_order(db, id_, user, lock=True)
+        get_order(db, id_, user)
+        # Release the read transaction/connection before potentially slow file
+        # IO and decoding. No row lock is held during either operation.
+        db.rollback()
         if kind not in ["before", "after"]:
             raise HTTPException(422, "Тип фото: before или after")
-        data = await file.read(10 * 1024 * 1024 + 1)
-        await file.close()
+        try:
+            data = file.file.read(10 * 1024 * 1024 + 1)
+        finally:
+            file.file.close()
         if len(data) > 10 * 1024 * 1024:
             raise HTTPException(413, "Размер фото не должен превышать 10 МБ")
         command_hash = request_hash(str(id_), kind, hashlib.sha256(data).hexdigest())
+        prepared = prepare_photo(data)
+        # A logout, reassignment or completion may have happened while the file
+        # was processed. Authenticate and authorize again against current data.
+        user = lookup_user(db, request.headers.get("Authorization", "")[7:])
+        require_role(user, "worker", "master", "admin")
+        order = get_order(db, id_, user, lock=True)
 
-        async def perform():
+        def perform():
             if order.status in TERMINAL or order.status == "ai_review":
                 raise HTTPException(409, "Фотографии нельзя менять после сдачи или закрытия наряда")
             count = db.scalar(select(func.count()).select_from(Photo).where(Photo.order_id == id_, Photo.kind == kind))
             if count >= 5:
                 raise HTTPException(422, "Можно загрузить не более 5 фотографий каждого типа")
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", Image.DecompressionBombWarning)
-                    with Image.open(io.BytesIO(data)) as original:
-                        original.verify()
-                    with Image.open(io.BytesIO(data)) as original:
-                        photo_image = ImageOps.exif_transpose(original).convert("RGB")
-                        photo_image.thumbnail((1920, 1920))
-                        output = io.BytesIO()
-                        photo_image.save(output, format="JPEG", quality=82, optimize=True)
-            except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-                raise HTTPException(422, "Файл не является допустимым изображением")
-            photo = Photo(order_id=id_, kind=kind, data=output.getvalue(), author_id=user.id)
+            photo = Photo(order_id=id_, kind=kind, data=prepared, author_id=user.id)
             db.add(photo)
             audit(db, order, "photo", user.id, order.status, f"Добавлена фотография: {kind}")
             db.flush()
             return photo_dict(db, photo), [("orders.updated", id_)]
 
-        return await run_idempotent(db, user, request, "photo_upload", command_hash, 201, perform, order_id=id_)
+        return run_idempotent(db, user, request, "photo_upload", command_hash, 201, perform, order_id=id_)
 
     @app.get("/api/photos/{id_}")
     def get_photo(id_: int, db: DB, user: User):
@@ -630,13 +678,13 @@ def create_app(database_url=None, seed=True, monitor=True):
         return [{"id": n.id, "title": n.title, "message": n.message, "kind": n.kind, "order_id": n.order_id, "created_at": iso(n.created_at), "read": n.read} for n in db.scalars(select(Notification).where(Notification.employee_id == user.id).order_by(Notification.created_at.desc(), Notification.id.desc()).limit(200))]
 
     @app.post("/api/notifications/{id_}/read")
-    async def mark_read(id_: int, db: DB, user: User):
+    def mark_read(id_: int, db: DB, user: User):
         notification = db.get(Notification, id_)
         if not notification or notification.employee_id != user.id:
             raise HTTPException(404, "Уведомление не найдено")
         notification.read = True
         db.commit()
-        await realtime.publish("notifications.updated")
+        from_thread.run(realtime.publish, "notifications.updated")
         return {"ok": True}
 
     @app.post("/api/devices", status_code=201)

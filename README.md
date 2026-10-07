@@ -130,7 +130,7 @@ Push доставляет Firebase Cloud Messaging через HTTP v1 API по �
 
 Если обе переменные учётных данных не заданы (или путь не существует), сервер работает как раньше: `GET /api/integrations` отдаёт для `native` режим `stub/demo`, отправки на устройство нет. При настроенном push там же `native: {mode:"fcm", status:"active"}`. Серверу нужен исходящий HTTPS-доступ к `oauth2.googleapis.com` (получение токена доступа) и `fcm.googleapis.com` (отправка сообщений).
 
-`psycopg[binary]` в `backend/requirements.txt` обновлён до `3.3.6` для установки на Python 3.14; PostgreSQL нужен только полному запуску/Compose, не тестам на SQLite и не FCM-смоуку.
+`backend/requirements.txt` фиксирует `psycopg[binary]==3.2.6` и `SQLAlchemy==2.0.40`; проверяемая среда сервера — Python 3.12. Для тестов SQLite и подменного FCM PostgreSQL не нужен; отдельные интеграционные проверки ниже используют настоящий PostgreSQL 17.
 
 Серверная сторона, команды смоук-прогона и границы проверки — [docs/verification.md](docs/verification.md). Доставка на физическом устройстве и push на iOS ещё не принимались: нужны телефон и отдельная приёмка.
 
@@ -159,6 +159,16 @@ python3 scripts/smoke_api.py
 `Makefile` содержит сокращения `make up`, `make down`, `make logs`, `make local`, `make build`, `make test`. Сквозная проверка создает отдельные тестовые наряды в текущей базе: запускайте ее в демонстрационной среде.
 
 `pnpm test` использует Node.js 24 и изолированные проверки API-клиента/выборок (`frontend/tests/`). Он не заменяет браузерный сценарий, испытание камеры или реального переподключения сети. Результаты конкретной версии и окружение фиксируются в [docs/verification.md](docs/verification.md).
+
+GitHub Actions в [.github/workflows/ci.yml](.github/workflows/ci.yml) проверяет backend с SQLite и PostgreSQL 17, тесты/сборку веба, анализ/тесты Flutter и лёгкие проверки границ AI. Зависимости берутся из фиксированных файлов; реальные push/ИИ и эмулятор не запускаются. Повторные запуски одной ветки отменяют предыдущий незавершённый прогон.
+
+Для локальных PostgreSQL-проверок задайте `TEST_POSTGRESQL_URL` к тестовой БД, пользователь которой может создавать схемы. Тесты создают отдельную случайную схему `codex_pgtest_<uuid>` для каждого сценария и удаляют только её; `public` и существующие таблицы приложения не очищаются. Без URL эти проверки явно пропускаются; `REQUIRE_POSTGRESQL_TESTS=true` запрещает такой пропуск в CI. Обычный `DATABASE_URL` не используется как разрешение менять существующую базу тестами.
+
+```bash
+cd backend
+TEST_POSTGRESQL_URL='postgresql+psycopg://test_user:test_password@127.0.0.1:5432/test_db' \
+REQUIRE_POSTGRESQL_TESTS=true python -m pytest -q tests/test_postgresql.py
+```
 
 ## Текущая готовность и ограничения
 

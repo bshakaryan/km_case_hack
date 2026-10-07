@@ -16,7 +16,7 @@ class Login(Payload):
 
 class OrderCreate(Payload):
     title: str = Field(min_length=3, max_length=200)
-    description: str = Field(default="", max_length=5000)
+    description: str = Field(min_length=1, max_length=5000)
     work_type: Literal["planned", "unplanned"]
     area_id: int = Field(gt=0)
     equipment_id: int = Field(gt=0)
@@ -42,6 +42,7 @@ class OrderCreate(Payload):
 
 
 class OrderPatch(Payload):
+    description: str | None = Field(default=None, min_length=1, max_length=5000)
     assignee_id: int | None = Field(default=None, gt=0)
     brigade_id: int | None = Field(default=None, gt=0)
     priority: Priority | None = None
