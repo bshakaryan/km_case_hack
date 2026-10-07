@@ -485,7 +485,7 @@ def markdown(metrics: dict):
                   f"- {metrics['assistant']['cases']} шаблонных вопросов; выбор инструмента: {metrics['assistant']['tool_accuracy']}; совпадение чисел с эталоном: {metrics['assistant']['numeric_answer_accuracy']}.",
                   "- Ответы и числа формируются кодом из снимка, не моделью; внешние tool-call API не проверялись.", "",
                   "## Ещё не измерено", "",
-                  "- Vision-оценка устранения дефекта и качества: нужны 15–20 реальных пар с независимой экспертной разметкой; процедурные рисунки непригодны.",
+                  "- Точность vision на реальных ремонтах не измерена: нужны 15–20 пар одного оборудования до/после с независимой экспертной разметкой. Открытый proxy-бенчмарк приведён отдельно, если запускался.",
                   "- STT-accuracy на реальных аудиозаписях и качество LLM-выбора инструментов/полей не измерены.", "",
                   "## Ошибки и ограничения", ""])
     for title, item in (("Сроки", deadlines), ("Проверка", rules), ("Рейтинг", rating),
@@ -562,9 +562,21 @@ def main():
     metrics = asyncio.run(evaluate(args.data_dir, args.cases_dir, args.with_llm,
                                    args.input_price_per_million, args.output_price_per_million))
     args.reports_dir.mkdir(parents=True, exist_ok=True)
+    photo_metrics_path = args.reports_dir / "photo_eval_full.json"
+    photo_report_path = args.reports_dir / "photo_eval.md"
+    if photo_metrics_path.exists() and photo_report_path.exists():
+        photo_metrics = read_json(photo_metrics_path)
+        metrics["vision"] = {"status": "public_proxy_benchmark", "model": photo_metrics["model"],
+                             "groups": {kind: {"count": group["count"], "accuracy": group["accuracy"],
+                                               "needs_master_review_rate": group["needs_master_review_rate"]}
+                                        for kind, group in photo_metrics["pairs"].items()},
+                             "real_repair_accuracy": None}
     (args.reports_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
                                                     encoding="utf-8")
-    (args.reports_dir / "metrics.md").write_text(markdown(metrics), encoding="utf-8")
+    report = markdown(metrics)
+    if photo_report_path.exists():
+        report += "\n" + photo_report_path.read_text(encoding="utf-8").rstrip() + "\n"
+    (args.reports_dir / "metrics.md").write_text(report, encoding="utf-8")
     print(json.dumps({"reports": str(args.reports_dir), "deadline_precision": metrics["deadlines"]["precision"],
                       "verification_accuracy": metrics["verification"]["rules_only"]["accuracy"],
                       "rating_targets_bottom_third": metrics["rating"]["both_targets_bottom_third"]},

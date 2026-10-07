@@ -292,8 +292,31 @@
     "scope": "technical_duplicates_only_not_visible_repair_quality"
   },
   "vision": {
-    "status": "real_labeled_pairs_required",
-    "score": null
+    "status": "public_proxy_benchmark",
+    "model": "gpt-4.1-mini",
+    "groups": {
+      "proxy": {
+        "count": 60,
+        "accuracy": 0.1833,
+        "needs_master_review_rate": 0.6667
+      },
+      "semi_synthetic": {
+        "count": 30,
+        "accuracy": 0.2,
+        "needs_master_review_rate": 0.0667
+      },
+      "real_same_image": {
+        "count": 30,
+        "accuracy": 1.0,
+        "needs_master_review_rate": 0.0
+      },
+      "cross_class": {
+        "count": 60,
+        "accuracy": 0.1,
+        "needs_master_review_rate": 0.8167
+      }
+    },
+    "real_repair_accuracy": null
   },
   "anomalies": {
     "status": "measured_synthetic",
