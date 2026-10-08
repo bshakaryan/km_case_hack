@@ -802,6 +802,11 @@ type OrderSuggestion = {
   } | null;
   explanation: string;
 };
+type FaultSuggestion = {
+  source: "openai" | "unavailable";
+  fault_code: { id: number; code: string; name: string } | null;
+  explanation: string;
+};
 type CreateFormDraft = {
   form: CreateFormFields;
   step: number;
@@ -1872,6 +1877,12 @@ export function OrderDialog({
   const [score, setScore] = useState("");
   const [completionValidationError, setCompletionValidationError] =
     useState("");
+  const [faultSuggestionResult, setFaultSuggestionResult] = useState<{
+    key: string;
+    value: FaultSuggestion;
+  } | null>(null);
+  const [faultSuggestionLoadingKey, setFaultSuggestionLoadingKey] = useState<string | null>(null);
+  const faultSuggestionRequest = useRef(0);
   const [aiRetryUncertain, setAiRetryUncertain] = useState(false);
   const [formVersion, setFormVersion] = useState<number | null>(null);
   const [versionConflict, setVersionConflict] = useState(false);
@@ -1899,6 +1910,13 @@ export function OrderDialog({
     recoverCompletionDraft,
   );
   const { complete, materials, baseline: completionVersion } = draft.data;
+  const faultSuggestionKey = JSON.stringify([id, order?.version, complete.work_done.trim()]);
+  const latestFaultSuggestionKey = useRef(faultSuggestionKey);
+  latestFaultSuggestionKey.current = faultSuggestionKey;
+  const faultSuggestion = faultSuggestionResult?.key === faultSuggestionKey
+    ? faultSuggestionResult.value : null;
+  const faultSuggesting = faultSuggestionLoadingKey === faultSuggestionKey;
+  useEffect(() => () => { faultSuggestionRequest.current += 1; }, []);
   const setComplete = draftFieldSetter(draft.change, "complete");
   const setMaterials = draftFieldSetter(draft.change, "materials");
   const setCompletionVersion = draftFieldSetter(draft.change, "baseline");
@@ -1987,6 +2005,31 @@ export function OrderDialog({
     draftBlocked ||
     photoUncertain ||
     completionUncertain;
+  async function loadCompletionFaultSuggestion() {
+    if (!order || !worker || order.status !== "in_progress" || writeBlocked || busy) return;
+    const key = faultSuggestionKey;
+    const request = ++faultSuggestionRequest.current;
+    setFaultSuggestionLoadingKey(key);
+    try {
+      const value = await post<FaultSuggestion>(`/orders/${id}/fault-suggestion`, {
+        work_done: complete.work_done.trim(),
+      });
+      if (request === faultSuggestionRequest.current &&
+          latestFaultSuggestionKey.current === key && sessionValid()) {
+        setFaultSuggestionResult({ key, value });
+      }
+    } catch {
+      if (request === faultSuggestionRequest.current &&
+          latestFaultSuggestionKey.current === key && sessionValid()) {
+        setFaultSuggestionResult({ key, value: {
+          source: "unavailable", fault_code: null,
+          explanation: "Подсказка сейчас недоступна. Выберите шифр вручную.",
+        } });
+      }
+    } finally {
+      if (request === faultSuggestionRequest.current) setFaultSuggestionLoadingKey(null);
+    }
+  }
   function beginForm(nextMode: "complete" | "edit" | "action") {
     if (
       !order ||
@@ -3177,6 +3220,30 @@ export function OrderDialog({
                           ))}
                         </select>
                       </label>
+                      <button
+                        type="button"
+                        className="button secondary"
+                        disabled={!worker || writeBlocked || busy || faultSuggesting || order.status !== "in_progress"}
+                        onClick={() => void loadCompletionFaultSuggestion()}
+                      >
+                        <Sparkles size={16} /> Подсказать шифр неисправности
+                      </button>
+                      {faultSuggesting && <p className="field-hint">Подбираем шифр по наряду и выполненным работам…</p>}
+                      {faultSuggestion && (
+                        <div className="info-banner" role="status">
+                          <Sparkles size={18} />
+                          <p>{faultSuggestion.fault_code
+                            ? `Рекомендуемый шифр: ${faultSuggestion.fault_code.code} — ${faultSuggestion.fault_code.name}. ${faultSuggestion.explanation}`
+                            : faultSuggestion.explanation}</p>
+                          {faultSuggestion.fault_code &&
+                            String(faultSuggestion.fault_code.id) !== complete.fault_code_id && (
+                              <button type="button" className="text-button"
+                                onClick={() => setComplete({ ...complete, fault_code_id: String(faultSuggestion.fault_code!.id) })}>
+                                Выбрать шифр
+                              </button>
+                            )}
+                        </div>
+                      )}
                       <div className="materials-form-title">
                         <strong>Использованные материалы</strong>
                         <button

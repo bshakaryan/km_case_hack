@@ -29,12 +29,17 @@ class CompletionScreen extends StatefulWidget {
 class _CompletionScreenState extends State<CompletionScreen>
     with WidgetsBindingObserver {
   final _form = GlobalKey<FormState>();
+  final _faultField = GlobalKey<FormFieldState<int>>();
   final _work = TextEditingController();
   final _comment = TextEditingController();
   final _materials = <_MaterialLine>[];
   final _photos = <_PendingPhoto>[];
   List<Json> _serverPhotos = [];
   int? _faultId;
+  Json? _faultSuggestion;
+  String? _faultSuggestionWork;
+  bool _suggestingFault = false;
+  int _faultSuggestionRequest = 0;
   bool _sending = false;
   bool _leaving = false;
   bool _picking = false;
@@ -378,6 +383,52 @@ class _CompletionScreenState extends State<CompletionScreen>
     _changed();
   }
 
+  void _invalidateFaultSuggestion() {
+    if (_faultSuggestion != null || _suggestingFault) {
+      setState(() {
+        _faultSuggestion = null;
+        _faultSuggestionWork = null;
+        _suggestingFault = false;
+        _faultSuggestionRequest++;
+      });
+    }
+  }
+
+  Future<void> _requestFaultSuggestion() async {
+    if (_locked || _done || _uncertain || _stale ||
+        widget.order.status != 'in_progress') return;
+    final work = _work.text.trim();
+    final request = ++_faultSuggestionRequest;
+    setState(() {
+      _suggestingFault = true;
+      _faultSuggestion = null;
+      _faultSuggestionWork = null;
+    });
+    try {
+      final result = await _draftApi.suggestCompletionFault(widget.order.id, work);
+      if (!mounted || request != _faultSuggestionRequest ||
+          work != _work.text.trim() || !_canComplete) return;
+      setState(() {
+        _faultSuggestion = result;
+        _faultSuggestionWork = work;
+      });
+    } catch (_) {
+      if (!mounted || request != _faultSuggestionRequest ||
+          work != _work.text.trim() || !_canComplete) return;
+      setState(() {
+        _faultSuggestion = {
+          'source': 'unavailable',
+          'explanation': 'Подсказка сейчас недоступна. Выберите шифр вручную.',
+        };
+        _faultSuggestionWork = work;
+      });
+    } finally {
+      if (mounted && request == _faultSuggestionRequest) {
+        setState(() => _suggestingFault = false);
+      }
+    }
+  }
+
   Future<void> _deleteDraft() async {
     if (_locked || _draftSession == null) return;
     final confirmed = await showDialog<bool>(
@@ -448,6 +499,7 @@ class _CompletionScreenState extends State<CompletionScreen>
       // Materials are incremental on resubmission: never prefill previous totals.
     }
     _work.addListener(_changed);
+    _work.addListener(_invalidateFaultSuggestion);
     _comment.addListener(_changed);
     _openedAsResponsible = _canComplete;
     if (_openedAsResponsible) {
@@ -961,6 +1013,9 @@ class _CompletionScreenState extends State<CompletionScreen>
     }
     final faults = _maps(widget.controller.reference['fault_codes']);
     final hasPrevious = widget.order.data['completion'] is Map;
+    final faultSuggestion = _faultSuggestionWork == _work.text.trim()
+        ? _faultSuggestion
+        : null;
     return PopScope(
       canPop: _draftClosed,
       onPopInvokedWithResult: (didPop, result) {
@@ -1082,7 +1137,7 @@ class _CompletionScreenState extends State<CompletionScreen>
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<int>(
-                      key: const ValueKey('completion-fault'),
+                      key: _faultField,
                       initialValue: faults.any((row) => row['id'] == _faultId)
                           ? _faultId
                           : null,
@@ -1118,6 +1173,38 @@ class _CompletionScreenState extends State<CompletionScreen>
                           style: TextStyle(color: Color(0xFFB4232D)),
                         ),
                       ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: _locked || _done || _uncertain || _stale ||
+                              _suggestingFault || faults.isEmpty
+                          ? null
+                          : _requestFaultSuggestion,
+                      icon: const Icon(Icons.auto_awesome_outlined),
+                      label: const Text('Подсказать шифр неисправности'),
+                    ),
+                    if (_suggestingFault) const LinearProgressIndicator(),
+                    if (faultSuggestion != null) ...[
+                      const SizedBox(height: 8),
+                      if (faultSuggestion['fault_code'] is Map) ...[
+                        Text('Рекомендуемый шифр: ${faultSuggestion['fault_code']['code']} — ${faultSuggestion['fault_code']['name']}'),
+                        TextButton(
+                          onPressed: _locked || _done || _uncertain || _stale ||
+                                  _faultId == faultSuggestion['fault_code']['id']
+                              ? null
+                              : () {
+                                  final id = (faultSuggestion['fault_code']['id'] as num).toInt();
+                                  if (!faults.any((row) => row['id'] == id)) return;
+                                  _faultField.currentState?.didChange(id);
+                                  _edit(() {
+                                    _faultId = id;
+                                    _dirty = true;
+                                  });
+                                },
+                          child: const Text('Выбрать шифр'),
+                        ),
+                      ],
+                      Text('${faultSuggestion['explanation'] ?? 'Проверьте шифр перед сдачей.'}'),
+                    ],
                     const SizedBox(height: 24),
                     _title('Материалы и запчасти'),
                     if (hasPrevious) ...[

@@ -14,10 +14,18 @@ class Login(Payload):
     pin: str = Field(min_length=4, max_length=32)
 
 
+class MasterAssistantQuestion(Payload):
+    message: str = Field(min_length=2, max_length=500)
+
+
 class OrderSuggestionRequest(Payload):
     description: str = Field(min_length=3, max_length=5000)
     area_id: int = Field(gt=0)
     equipment_id: int = Field(gt=0)
+
+
+class FaultSuggestionRequest(Payload):
+    work_done: str = Field(default="", max_length=5000)
 
 
 class OrderCreate(Payload):

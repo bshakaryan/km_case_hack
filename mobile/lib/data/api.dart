@@ -521,6 +521,13 @@ class NaryadApi {
   Future<Json> suggestOrder(Json data) =>
       _object('/orders/suggestions', method: 'POST', body: data);
 
+  Future<Json> suggestCompletionFault(int orderId, String workDone) =>
+      _object('/orders/$orderId/fault-suggestion',
+          method: 'POST', body: {'work_done': workDone});
+
+  Future<Json> askMasterAssistant(String message) =>
+      _object('/assistant/ask', method: 'POST', body: {'message': message});
+
   Future<WorkOrder> createOrder(Json data, {String? commandId}) async =>
       _orderReceipt(
         await _object(

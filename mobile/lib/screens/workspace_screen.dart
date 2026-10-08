@@ -15,6 +15,7 @@ import 'overview_screen.dart';
 import 'orders_screen.dart';
 import 'reports_screen.dart';
 import 'reference_catalog_screen.dart';
+import 'master_assistant_sheet.dart';
 
 class _NoticeTarget {
   const _NoticeTarget(this.id, this.orderId, this.scope);
@@ -249,6 +250,17 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
         .where((n) => n['is_read'] != true && n['read'] != true)
         .length;
     return Scaffold(
+      floatingActionButton: c.user!.role == 'master'
+          ? FloatingActionButton(
+              tooltip: 'Ассистент мастера',
+              onPressed: () => showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                builder: (_) => MasterAssistantSheet(controller: c),
+              ),
+              child: const Icon(Icons.chat_bubble_outline),
+            )
+          : null,
       appBar: AppBar(
         title: Row(
           children: [

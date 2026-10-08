@@ -1,5 +1,6 @@
 from app import order_suggestions
 from types import SimpleNamespace
+from conftest import auth_headers
 
 
 PAYLOAD = {"description": "Течь масла на насосе, проверить уплотнение", "area_id": 2, "equipment_id": 8}
@@ -71,3 +72,35 @@ def test_model_output_is_bounded_and_excludes_personal_data(monkeypatch):
     assert result is None
     assert "Данияр" not in str(sent)
     assert sent["store"] is False
+
+
+def test_worker_fault_hint_is_scoped_read_only_and_catalogue_bounded(client, monkeypatch):
+    worker = auth_headers(client, "worker")
+    other_worker = auth_headers(client, "worker2")
+    active = next(row for row in client.get("/api/orders", headers=worker).json()
+                  if row["status"] == "in_progress" and row["assignee_id"] == 5)
+    path = f"/api/orders/{active['id']}/fault-suggestion"
+    assert client.post(path, json={"work_done": "Проверил насос"}, headers=other_worker).status_code == 403
+    assert client.post(path, json={}, headers=auth_headers(client, "master")).status_code == 403
+    before = client.get(f"/api/orders/{active['id']}", headers=worker).json()
+    monkeypatch.setattr(order_suggestions, "classify_completion_fault", lambda *args: {"fault_code_id": 5})
+    answer = client.post(path, json={"work_done": "Устранил течь масла"}, headers=worker)
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["fault_code"]["code"] == "F05"
+    after = client.get(f"/api/orders/{active['id']}", headers=worker).json()
+    assert after["version"] == before["version"]
+    assert after["completion"] == before["completion"]
+    monkeypatch.setattr(order_suggestions, "classify_completion_fault", lambda *args: {"fault_code_id": 9999})
+    answer = client.post(path, json={}, headers=worker)
+    assert answer.status_code == 200
+    assert answer.json()["fault_code"] is None
+
+
+def test_worker_fault_hint_requires_in_progress_order(client, monkeypatch):
+    worker = auth_headers(client, "worker")
+    assigned = [row for row in client.get("/api/orders", headers=worker).json()
+                if row["assignee_id"] == 5 and row["status"] != "in_progress"]
+    assert assigned
+    monkeypatch.setattr(order_suggestions, "classify_completion_fault", lambda *args: {"fault_code_id": 5})
+    answer = client.post(f"/api/orders/{assigned[0]['id']}/fault-suggestion", json={}, headers=worker)
+    assert answer.status_code == 409

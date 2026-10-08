@@ -53,6 +53,7 @@ import { workerOrderGroups } from "./brigade";
 import { WorkerOrderSections } from "./WorkerOrderSections";
 import { OrderJournal } from "./OrderJournal";
 import { EquipmentHistory } from "./EquipmentHistory";
+import { MasterAssistant } from "./MasterAssistant";
 import { canViewEquipmentHistory } from "./journal";
 import {
   AnalyticsPage,
@@ -1219,6 +1220,7 @@ export default function App() {
           }}
         />
       )}
+      {user.role === "master" && <MasterAssistant key={`${user.id}:${session.current}`} />}
       {toast && (
         <div className="toast" role="status">
           <CheckCheck size={19} />

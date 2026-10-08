@@ -26,13 +26,14 @@ from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
 from .analytics_ai import add_narrative
-from .order_suggestions import suggest_order
+from .master_assistant import answer as answer_master_question
+from .order_suggestions import suggest_completion_fault, suggest_order
 from .conditional_response import conditional_json_response
 from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
 from .migrations import upgrade_database
 from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
 from .push import StubSender, dispatch_push, env_int, get_sender
-from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPage, OrderPatch, OrderSuggestionRequest, Transition
+from .schemas import Completion, DeviceRegistration, DeviceUnregister, FaultSuggestionRequest, Login, MasterAssistantQuestion, OrderCreate, OrderPage, OrderPatch, OrderSuggestionRequest, Transition
 from .order_paging import after_cursor, apply_scope, broad_search, decode_cursor, encode_cursor, fingerprint, order_tuple, sort_columns
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
@@ -506,6 +507,11 @@ def create_app(database_url=None, seed=True, monitor=True):
             result.append({**employee_dict(person), "status": "off_shift" if not person.on_shift else "busy" if current else "queued" if queue_count else "free", "current_order": current.number if current else None, "queue_count": queue_count, "rating": rating.get("score", 0), "completed_count": rating.get("closed_count", 0)})
         return result
 
+    @app.post("/api/assistant/ask")
+    def ask_master_assistant(payload: MasterAssistantQuestion, db: DB, user: User):
+        require_role(user, "master")
+        return answer_master_question(db, payload.message.strip())
+
     @app.post("/api/orders/suggestions")
     def order_suggestions(payload: OrderSuggestionRequest, db: DB, user: User):
         require_role(user, "master", "admin")
@@ -796,6 +802,15 @@ def create_app(database_url=None, seed=True, monitor=True):
             return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
+
+    @app.post("/api/orders/{id_}/fault-suggestion")
+    def completion_fault_suggestion(id_: int, payload: FaultSuggestionRequest, db: DB, user: User):
+        require_role(user, "worker")
+        order = get_order(db, id_, user)
+        require_responsible(user, order)
+        if order.status != "in_progress":
+            raise HTTPException(409, "Подсказка доступна только для наряда в работе")
+        return suggest_completion_fault(db, order, payload.work_done)
 
     @app.post("/api/orders/{id_}/complete")
     def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
