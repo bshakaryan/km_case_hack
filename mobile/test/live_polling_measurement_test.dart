@@ -1,6 +1,8 @@
 // Opt-in desktop polling comparison; production app and real transport.
 // flutter test test/live_polling_measurement_test.dart \
 //   --dart-define=LIVE_POLLING_FIXTURE_FILE=<fresh synthetic fixture.json>
+// Optional actual SQLite: --dart-define=LIVE_POLLING_SQLITE_DIRECTORY=
+//   <fixture parent>/snapshot-sqlite-<run marker> (must not exist).
 // Each phase lasts 60 REAL seconds. FullyLive binding uses no FakeAsync;
 // no pump(Duration), fake clock, transport mocks or cadence substitutions.
 import 'dart:async';
@@ -16,16 +18,22 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/app_controller.dart';
+import 'package:naryad_ai/data/local_store.dart';
 import 'package:naryad_ai/data/models.dart';
 import 'package:naryad_ai/main.dart';
 import 'package:naryad_ai/screens/order_detail_screen.dart';
 import 'package:naryad_ai/ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'support/http_fault_proxy.dart' show isLoopbackHttpUri;
 import 'support/polling_metrics_client.dart';
+import 'support/snapshot_sqlite_observer.dart';
 
 const _manifestPath = String.fromEnvironment('LIVE_POLLING_FIXTURE_FILE');
+const _sqliteDirectory = String.fromEnvironment(
+  'LIVE_POLLING_SQLITE_DIRECTORY',
+);
 const _viewport = Size(480, 1000);
 const _phaseDuration = Duration(seconds: 60);
 const _editAt = Duration(seconds: 31);
@@ -176,8 +184,10 @@ Future<Map<String, Object?>> _measurePhase({
   required _CompletedFrames frames,
   required bool Function() renderedTargetVersion,
   required Future<_EditAck> Function() edit,
+  SnapshotSqliteObserver? snapshotObserver,
 }) async {
   await recorder.waitForIdle();
+  await snapshotObserver?.drain();
   final phase = recorder.beginPhase(name);
   final startFrameCount = frames.count;
   Future<void>? editFuture;
@@ -259,10 +269,12 @@ Future<Map<String, Object?>> _measurePhase({
   final finalHasError = controller.error != null;
   final finalOutboxCount = controller.outbox.length;
   recorder.endPhase(phase);
+  snapshotObserver?.endPhase(phase);
   await editFuture;
   // Drain requests enrolled BEFORE the boundary; their late completions stay
   // in that phase. New post-boundary traffic is excluded from both phases.
   await recorder.waitForIdle();
+  await snapshotObserver?.drain();
   if (editFailure != null) {
     throw StateError('The isolated external edit failed.');
   }
@@ -278,6 +290,8 @@ Future<Map<String, Object?>> _measurePhase({
   final firstPresent = firstPresentMicros!;
   return {
     ...phase.toJson(),
+    if (snapshotObserver != null)
+      'snapshot_sqlite': snapshotObserver.phaseJson(phase),
     'live_frames_completed': endFrameCount - startFrameCount,
     'render_samples': samples,
     'max_sample_gap_ms': maxSampleGapMicros / 1000,
@@ -354,7 +368,24 @@ Future<void> _liveMeasurement(
   final clock = Stopwatch()..start();
   final recorder = PollingMetricsRecorder(clock);
   final frames = _CompletedFrames(binding, clock);
-  final store = PollingMetricsMemoryStore(recorder);
+  SnapshotSqliteObserver? snapshotObserver;
+  Directory? sqliteDirectory;
+  final LocalStore store;
+  if (_sqliteDirectory.isEmpty) {
+    store = PollingMetricsMemoryStore(recorder);
+  } else {
+    sqliteDirectory = await prepareSnapshotDirectory(
+      _sqliteDirectory,
+      manifestFile,
+      marker,
+    );
+    sqfliteFfiInit();
+    snapshotObserver = SnapshotSqliteObserver(recorder, databaseFactoryFfi);
+    store = PollingMetricsSqliteStore(
+      directory: sqliteDirectory.path,
+      observer: snapshotObserver,
+    );
+  }
   NaryadApi meteredApi(String url) => _ObservedApi(
     url,
     client: PollingMetricsClient(IOClient(HttpClient()), recorder),
@@ -372,6 +403,16 @@ Future<void> _liveMeasurement(
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = _viewport;
   await binding.setSurfaceSize(_viewport);
+  var sceneStopped = false;
+  Future<void> stopScene() async {
+    if (sceneStopped) return;
+    await tester.pumpWidget(const SizedBox.shrink());
+    frames.dispose();
+    controller.dispose();
+    externalApi.close();
+    sceneStopped = true;
+  }
+
   try {
     // Mount the production app BEFORE login so its real empty-session restore
     // completes normally. login's real apiFactory starts the unchanged timer.
@@ -446,6 +487,7 @@ Future<void> _liveMeasurement(
       recorder: recorder,
       controller: controller,
       frames: frames,
+      snapshotObserver: snapshotObserver,
       renderedTargetVersion: () =>
           _card(overviewId).evaluate().any(
             (e) =>
@@ -490,6 +532,7 @@ Future<void> _liveMeasurement(
       recorder: recorder,
       controller: controller,
       frames: frames,
+      snapshotObserver: snapshotObserver,
       renderedTargetVersion: () =>
           controller.orders.any(
             (o) => o.id == detailId && o.version == detail.version! + 1,
@@ -505,6 +548,44 @@ Future<void> _liveMeasurement(
         clock: clock,
       ),
     );
+    Map<String, Object?>? snapshotReopen;
+    if (snapshotObserver != null) {
+      // Cancel widget/controller timers before the final drain. Never flush or
+      // restore: either action would hide the measured persistence outcome.
+      await stopScene();
+      await snapshotObserver.drain();
+      final beforeClose = await snapshotObserver.beforeClose(
+        server: uri.toString(),
+        owner: controller.user!.id,
+        currentSections: {
+          SnapshotKeys.orders: controller.orders
+              .map((order) => order.toJson())
+              .toList(),
+          SnapshotKeys.reference: controller.reference,
+          SnapshotKeys.employees: controller.employees,
+          SnapshotKeys.dashboard: controller.dashboard,
+          SnapshotKeys.notifications: controller.notifications,
+          SnapshotKeys.analytics: controller.analytics,
+        },
+        overviewId: overviewId,
+        detailId: detailId,
+        expectedDeadline: newDeadline,
+        expectedDescription: newDescription,
+      );
+      await store.close();
+      final reopened = await databaseFactoryFfi.openDatabase(
+        '${sqliteDirectory!.path}/local_store.db',
+        options: OpenDatabaseOptions(readOnly: true, singleInstance: false),
+      );
+      try {
+        snapshotReopen = {
+          ...beforeClose,
+          ...await snapshotObserver.afterReopen(reopened),
+        };
+      } finally {
+        await reopened.close();
+      }
+    }
     final result = <String, Object?>{
       'schema': 1,
       'kind': 'naryad-live-polling-baseline',
@@ -531,7 +612,9 @@ Future<void> _liveMeasurement(
         'latency': 'send entry to complete response stream consumption; excludes JSON decode and controller apply',
         'display': '50ms real sampling of version-bound RenderParagraph after live frame, no pending layout/paint, inside view/scroll clips',
         'lag': 'client full-body 200 ACK to sampled first visible scene; last-absent/first-present interval, signed early observation retained',
-        'snapshot': 'MemoryLocalStore.putSnapshot call counts only; no physical I/O/fsync/durability claims',
+        'snapshot': snapshotObserver == null
+            ? 'MemoryLocalStore.putSnapshot call counts only; no physical I/O/fsync/durability claims'
+            : 'Production SqfliteLocalStore with real SQLite FFI, actual serialized INSERT OR REPLACE arguments; no second JSON encode in timed path. SQL events grouped by exact originating put entry/Zone; completed callback preserves late events. SQL start inferred from stopped SDK Stopwatch, exact SQL in-flight unknown. Awaited SQL wrapper includes lock/isolate/wrapper and excludes production JSON encode/observer callback. Put includes serialization, SQL and observer overhead; callback time separately recorded. Content comparison is exact serialized JSON string equality versus the last successful scoped SQL payload, updated_at compared separately. Duration percentiles use nearest rank, matching HTTP metrics. HTTP plus entered-put drain with a real 100ms quiet tick; private queued captures may be cancelled by dispose/session fence. Close/reopen verifies seven rows and other tables without flush/restore; not crash/fsync proof.',
         'application': '50ms sampled offline/error/outbox state; successful global refresh observed from lastUpdated changes inside phase, not individual GET success',
         'warmup_excluded': true,
         'target_phase_seconds': 60,
@@ -545,7 +628,9 @@ Future<void> _liveMeasurement(
         'viewport_logical_height': _viewport.height,
         'device_pixel_ratio': 1,
         'role': 'master',
-        'local_store': 'counted memory platform double',
+        'local_store': snapshotObserver == null
+            ? 'counted memory platform double'
+            : 'production SqfliteLocalStore; real SQLite FFI; fresh owned directory outside Git',
         'secure_storage': 'platform double',
         'shared_preferences': 'platform double',
         'push': 'NoopPushService',
@@ -563,9 +648,13 @@ Future<void> _liveMeasurement(
         'One isolated synthetic master and two phases; not load testing or a worst-case freshness SLA.',
         'Flutter scene/layout/paint witness, not physical screen pixels, GPU presentation or Android device proof.',
         'Loopback HTTP logical body bytes do not measure mobile radio, wire traffic or battery.',
-        'Local storage/session plugins and push are platform doubles; snapshot counts are controller calls only.',
+        if (snapshotObserver == null)
+          'Local storage/session plugins and push are platform doubles; snapshot counts are controller calls only.'
+        else
+          'SQLite FFI and ordinary clean close/reopen are desktop evidence, not Android plugin, power-loss, fsync or physical disk-byte evidence; session plugins and push remain doubles.',
       ],
       'phases': [overviewResult, detailResult],
+      'snapshot_close_reopen': ?snapshotReopen,
     };
     expect(tester.takeException(), isNull);
     await resultFile.writeAsString(
@@ -579,12 +668,63 @@ Future<void> _liveMeasurement(
       isTrue,
       reason: 'Evidence was saved, but sampled offline/error/queue changes prevent accepting a nominal application baseline.',
     );
+    if (snapshotReopen != null) {
+      expect(snapshotReopen['observer_errors_total'], 0);
+      expect(snapshotReopen['active_puts_after_drain'], 0);
+      expect(snapshotReopen['row_count'], 7);
+      expect(snapshotReopen['row_count_after_reopen'], 7);
+      for (final key in [
+        'all_seven_expected_scoped_keys',
+        'all_payloads_and_timestamps_match_last_successful_sql',
+        'profile_owner_matches',
+        'latest_overview_deadline_matches_edit',
+        'latest_detail_description_matches_edit',
+        'detail_ai_review_job_is_null',
+        'all_other_tables_empty',
+        'reopened_payloads_and_timestamps_match_before_close',
+        'reopened_payloads_and_timestamps_match_last_successful_sql',
+        'other_tables_unchanged',
+      ]) {
+        expect(
+          snapshotReopen[key],
+          isTrue,
+          reason: 'Snapshot acceptance: $key',
+        );
+      }
+      expect(
+        (snapshotReopen['matches_controller_sections'] as Map).values.every(
+          (value) => value == true,
+        ),
+        isTrue,
+      );
+      expect(
+        (snapshotReopen['detail_history_fields_present'] as Map).values.every(
+          (value) => value == true,
+        ),
+        isTrue,
+      );
+      expect(snapshotReopen['latest_overview_version'], overview.version! + 1);
+      expect(snapshotReopen['latest_detail_version'], detail.version! + 1);
+      expect(
+        snapshotReopen['detail_assignment_history_count'],
+        greaterThanOrEqualTo(1),
+      );
+      expect(snapshotReopen['detail_submission_attempts_count'], 0);
+      for (final phase in [overviewResult, detailResult]) {
+        final measured = phase['snapshot_sqlite'] as Map;
+        expect(measured['unfinished_puts_after_drain'], 0);
+        for (final section
+            in (measured['sections'] as Map).values.cast<Map>()) {
+          expect(section['put_failures'], 0);
+          expect(section['sql_failures'], 0);
+          expect(section['put_attempts'], section['completed_sql_attempts']);
+        }
+      }
+    }
   } finally {
     recorder.activePhase = null;
-    await tester.pumpWidget(const SizedBox.shrink());
-    frames.dispose();
-    controller.dispose();
-    externalApi.close();
+    await stopScene();
+    await snapshotObserver?.drain();
     await store.close();
     await binding.setSurfaceSize(null);
     tester.view.resetPhysicalSize();
