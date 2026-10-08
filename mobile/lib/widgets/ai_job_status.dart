@@ -55,11 +55,6 @@ class AiJobStatus extends StatelessWidget {
                 ? 'Эта проверка больше не меняет текущий наряд. Смотрите более новую сдачу.'
                 : 'Отчёт сохранён на сервере. Результат появится после завершения проверки.',
           ),
-          const SizedBox(height: 8),
-          const Text(
-            'Формальная проверка · демо. Содержимое снимков не анализируется. Окончательное решение принимает мастер.',
-            style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
-          ),
           if (uncertain)
             const Padding(
               padding: EdgeInsets.only(top: 8),

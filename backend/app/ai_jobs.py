@@ -28,7 +28,7 @@ def begin_sqlite_write(db):
 
 
 class ReviewResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+    model_config = ConfigDict(extra="ignore", strict=False, str_strip_whitespace=True)
     verdict: Literal["passed", "needs_attention", "needs_rework"]
     score: float = Field(ge=1, le=5, allow_inf_nan=False)
     explanation: str = Field(min_length=1, max_length=2000)
@@ -48,6 +48,8 @@ class OpenAIProvider:
         import os
         import httpx
         import json
+        import base64
+        
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             return FormalStub().review(snapshot)
@@ -56,25 +58,37 @@ class OpenAIProvider:
         work_done = report.get("work_done", "")
         comment = report.get("comment", "")
         materials = report.get("materials", [])
-
+        
+        order = snapshot.get("order", {})
+        title = order.get("title", "")
+        desc = order.get("description", "")
+        
         mat_text = ", ".join([f"{m.get('name', '???')} ({m.get('quantity', 0)} {m.get('unit', '')})" for m in materials])
+        
         prompt = (
-            "ИИ- проверка закрытого наряда и отчёт с оценкой исполнителю и мастеру.\n"
-            f"Выполненные работы: {work_done}\n"
-            f"Комментарий: {comment}\n"
-            f"Материалы: {mat_text}\n"
-            "Пожалуйста, проанализируйте эти данные. Если предоставлены фото (до и после), вкратце сравни их. "
-            "Верните ответ строго в JSON формате:\n"
-            '{"verdict": "passed" или "needs_attention" или "needs_rework", '
-            '"score": оценка от 1 до 5 (число), '
-            '"explanation": "отчёт с оценкой исполнителю и мастеру, включая краткое сравнение фото (строка до 2000 символов)", '
+            "ИИ-проверка закрытого наряда.\n\n"
+            f"ОПИСАНИЕ ПРОБЛЕМЫ ПРИ ВЫДАЧЕ:\nНазвание: {title}\nДетали: {desc}\n\n"
+            f"ОТЧЁТ ИСПОЛНИТЕЛЯ:\nВыполненные работы: {work_done}\nКомментарий: {comment}\nМатериалы: {mat_text}\n"
+            f"Сроки: назначен {order.get('assigned_at')}, дедлайн {order.get('deadline')}, сдан {order.get('submitted_at')}.\n\n"
+            "ЗАДАЧА: Проверьте отчёт и фото.\n"
+            "1. Полнота: указаны ли работы, материалы. Есть ли фото 'after' (после).\n"
+            "2. Соответствие: решают ли выполненные работы изначальную проблему?\n"
+            "3. Логичность материалов: нет ли завышения расхода для таких работ?\n"
+            "4. Время: уложился ли исполнитель в срок?\n"
+            "5. Качество по фото: если есть 'before' и 'after', устранена ли видимая проблема? Нет ли оставленного мусора, незакреплённых деталей, отсутствующих кожухов?\n"
+            "6. Метаданные: проверьте время создания фото, если они переданы.\n\n"
+            "Если есть сомнения, признаки брака, завышения материалов или мусор на фото — ставьте 'needs_attention' (проверит мастер).\n"
+            "Верните строго JSON:\n"
+            '{"verdict": "passed", "needs_attention" или "needs_rework", '
+            '"score": оценка качества от 1 до 5, '
+            '"explanation": "Структурированный отчёт (используйте переносы строк \\n и маркеры списка -, чтобы было удобно читать. НЕ ИСПОЛЬЗУЙТЕ звездочки ** для выделения текста) по всем 6 пунктам (строка до 2000 символов)", '
             '"is_stub": false, "master_score": null}'
         )
 
-        import base64
         user_content = [{"type": "text", "text": prompt}]
         for photo in snapshot.get("photos", []):
             kind = photo.get("kind", "unknown")
+            meta = photo.get("meta", {})
             b64_data = base64.b64encode(photo["data"]).decode("utf-8")
             user_content.append({
                 "type": "image_url",
@@ -83,7 +97,7 @@ class OpenAIProvider:
                     "detail": "low"
                 }
             })
-            user_content[0]["text"] += f"\n[Приложено фото: {kind}]"
+            user_content[0]["text"] += f"\n[Приложено фото: {kind}, EXIF: {meta}]"
 
         try:
             resp = httpx.post(
@@ -130,17 +144,61 @@ def enqueue_job(db, attempt):
 
 
 def review_snapshot(db, attempt):
-    # Names and quantities come from the frozen report, and photos exclusively
-    # from its links. Current order reports/media never enter the provider.
-    return {"attempt_id": attempt.id, "report": deepcopy(attempt.payload),
-        "photos": [{"id": photo.id, "kind": photo.kind, "data": bytes(photo.data)}
-            for photo in db.scalars(select(Photo).join(SubmissionPhoto, SubmissionPhoto.photo_id == Photo.id).where(SubmissionPhoto.attempt_id == attempt.id).order_by(Photo.id))]}
+    import io
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+    except ImportError:
+        Image, TAGS = None, None
+
+    order = db.get(Order, attempt.order_id)
+    photos_data = []
+    
+    for photo in db.scalars(select(Photo).join(SubmissionPhoto, SubmissionPhoto.photo_id == Photo.id).where(SubmissionPhoto.attempt_id == attempt.id).order_by(Photo.id)):
+        meta = {}
+        if Image:
+            try:
+                img = Image.open(io.BytesIO(photo.data))
+                exif = img.getexif()
+                if exif:
+                    for tag_id in exif:
+                        tag = TAGS.get(tag_id, tag_id)
+                        if tag == "DateTime":
+                            meta["datetime"] = str(exif.get(tag_id))
+            except Exception:
+                pass
+                
+        photos_data.append({
+            "id": photo.id, 
+            "kind": photo.kind, 
+            "data": bytes(photo.data),
+            "meta": meta
+        })
+
+    return {
+        "attempt_id": attempt.id, 
+        "order": {
+            "title": order.title,
+            "description": order.description,
+            "priority": order.priority,
+            "assigned_at": iso(order.assigned_at),
+            "deadline": iso(order.deadline),
+            "submitted_at": iso(attempt.submitted_at)
+        },
+        "report": deepcopy(attempt.payload),
+        "photos": photos_data
+    }
 
 
 def validate_result(result):
     if not isinstance(result, dict) or type(result.get("is_stub")) is not bool:
         raise ValueError("invalid_result")
-    return ReviewResult.model_validate(result).model_dump()
+    try:
+        return ReviewResult.model_validate(result).model_dump()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception(f"AI result validation failed: {result}")
+        raise ValueError("invalid_result")
 
 
 def apply_success(db, order, attempt, job, result):

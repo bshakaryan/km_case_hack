@@ -110,7 +110,7 @@ def create_app(database_url=None, seed=True, monitor=True):
                 raise
             except Exception:
                 # No provider exception text or submitted data enters logs.
-                log.warning("AI job dispatch unavailable; retrying")
+                log.exception("AI job dispatch unavailable; retrying")
             await asyncio.sleep(1)
 
     def run_monitor():

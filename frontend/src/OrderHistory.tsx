@@ -202,7 +202,7 @@ export function OrderHistory({
                         · предварительная оценка{" "}
                         {number(attempt.ai_review.score, 1)} / 5
                       </p>
-                      <p>{attempt.ai_review.explanation}</p>
+                      <p style={{ whiteSpace: "pre-wrap" }}>{attempt.ai_review.explanation}</p>
                       {attempt.ai_review.is_stub && (
                         <p className="muted">
                           Проверяется наличие фото; содержимое снимков не

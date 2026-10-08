@@ -3006,7 +3006,7 @@ export function OrderDialog({
                         Предварительная оценка: {order.ai_review.score} / 5
                       </span>
                     </div>
-                    <p>{order.ai_review.explanation}</p>
+                    <p style={{ whiteSpace: "pre-wrap" }}>{order.ai_review.explanation}</p>
                     <small>
                       {order.ai_review.is_stub
                         ? "Проверяется наличие фотографий. Содержимое снимков не анализируется. "

@@ -305,12 +305,34 @@ def monitor_deadlines(db, now=None):
         latest = db.scalar(select(OrderEvent).where(OrderEvent.order_id == order.id, OrderEvent.comment != "").order_by(OrderEvent.created_at.desc(), OrderEvent.id.desc()).limit(1))
         detail = f"{order.number}: {order.title}. {equipment.name}; {area.name}; исполнитель: {worker.name}. Срок: {aware(order.deadline).astimezone(ZoneInfo('Asia/Almaty')).strftime('%d.%m %H:%M')}. Просрочка: {max(0, round(-minutes))} мин. Комментарий: {latest.comment if latest else order.comment or 'нет'}."
         if minutes < 0:
-            added += notify(db, [order.assignee_id, order.master_id], "Срок наряда истёк", detail, "overdue", order.id, f"overdue:{key}")
+            overdue_interval = int(os.getenv("OVERDUE_INTERVAL_MINUTES", "15"))
+            escalate_minutes = int(os.getenv("OVERDUE_ESCALATE_MINUTES", "60"))
+            
+            overdue_count = int(max(0, -minutes) // overdue_interval)
+            iteration_key = f"overdue:{key}:i{overdue_count}"
+            added += notify(db, [order.assignee_id, order.master_id], "Срок наряда истёк", detail, "overdue", order.id, iteration_key)
+            
+            if -minutes >= escalate_minutes:
+                managers = db.scalars(select(Employee.id).where(Employee.role == "manager")).all()
+                if managers:
+                    escalation_key = f"overdue_escalation:{key}:i{overdue_count}"
+                    added += notify(db, managers, "Длительная просрочка наряда!", detail, "overdue", order.id, escalation_key)
         elif minutes <= due_soon_minutes:
             added += notify(db, [order.assignee_id, order.master_id], f"До срока менее {due_soon_minutes} минут", detail, "due_soon", order.id, f"due_soon:{key}")
+        
         acceptance_minutes = int(os.getenv("EMERGENCY_ACCEPT_MINUTES", "3")) if order.priority == "emergency" else int(os.getenv("ACCEPT_MINUTES", "10"))
         if order.status == "issued" and (now - aware(order.assigned_at)).total_seconds() >= acceptance_minutes * 60:
-            added += notify(db, [order.assignee_id, order.master_id], f"Наряд не принят {acceptance_minutes} минут", detail, "unaccepted", order.id, f"unaccepted:{order.id}:{order.assignee_id}:{iso(order.assigned_at)}")
+            from sqlalchemy import and_
+            unaccepted_key = f"unaccepted:{order.id}:{order.assignee_id}:{iso(order.assigned_at)}"
+            
+            free_worker = db.scalar(select(Employee).where(Employee.role == "worker", Employee.on_shift == True, Employee.id != order.assignee_id)
+                .outerjoin(Order, and_(Order.assignee_id == Employee.id, Order.status.notin_(["closed", "cancelled"])))
+                .group_by(Employee.id).order_by(func.count(Order.id), Employee.id).limit(1))
+            
+            extra_msg = f" Предлагаем переназначить на: {free_worker.name}." if free_worker else " Нет свободных исполнителей на смене."
+            
+            added += notify(db, [order.master_id], f"Наряд не принят {acceptance_minutes} минут", detail + extra_msg, "unaccepted", order.id, unaccepted_key + ":master")
+            added += notify(db, [order.assignee_id], f"Наряд не принят {acceptance_minutes} минут", detail, "unaccepted", order.id, unaccepted_key + ":worker")
     db.commit()
     return added
 
