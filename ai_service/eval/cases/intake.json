@@ -1,0 +1,522 @@
+[
+  {
+    "id": "I-01",
+    "phrase": "Дробилка КМД-1750: износ ролика, уч-к Дробильно-сортировочный комплекс. Сделать за 1 ч.",
+    "reference_time": "2026-07-01T03:00:00Z",
+    "expected": {
+      "equipment_id": 1,
+      "area_id": 1,
+      "fault_code_id": 1,
+      "time_norm_id": 1,
+      "deadline": "2026-07-01T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-02",
+    "phrase": "На Дробилка ККД-1500 износ подшипника; Дробильно-сортировочный комплекс, устранить в течение 2 ч.",
+    "reference_time": "2026-07-02T03:00:00Z",
+    "expected": {
+      "equipment_id": 2,
+      "area_id": 1,
+      "fault_code_id": 2,
+      "time_norm_id": 2,
+      "deadline": "2026-07-02T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-03",
+    "phrase": "Оборуд. Конвейер К-3: обрыв ремня. Участок Дробильно-сортировочный комплекс, срок через 3 ч.",
+    "reference_time": "2026-07-03T03:00:00Z",
+    "expected": {
+      "equipment_id": 3,
+      "area_id": 1,
+      "fault_code_id": 3,
+      "time_norm_id": 3,
+      "deadline": "2026-07-03T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-04",
+    "phrase": "Дробильно-сортировочный комплекс, Грохот ГИ-01: замечен вибрация привода, нужен ремонт за 4 ч.",
+    "reference_time": "2026-07-04T03:00:00Z",
+    "expected": {
+      "equipment_id": 4,
+      "area_id": 1,
+      "fault_code_id": 4,
+      "time_norm_id": 4,
+      "deadline": "2026-07-04T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-05",
+    "phrase": "Дробилка КСД-2200: повреждение кабеля, участок Дробильно-сортировочный комплекс. Сделать за 1 ч.",
+    "reference_time": "2026-07-05T03:00:00Z",
+    "expected": {
+      "equipment_id": 5,
+      "area_id": 1,
+      "fault_code_id": 5,
+      "time_norm_id": 5,
+      "deadline": "2026-07-05T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-06",
+    "phrase": "На Конвейер К-1 отказ контактора; Дробильно-сортировочный комплекс, устранить в течение 2 ч.",
+    "reference_time": "2026-07-06T03:00:00Z",
+    "expected": {
+      "equipment_id": 6,
+      "area_id": 1,
+      "fault_code_id": 6,
+      "time_norm_id": 6,
+      "deadline": "2026-07-06T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-07",
+    "phrase": "Оборуд. Конвейер К-2: перегрев двигателя. Участок Дробильно-сортировочный комплекс, срок через 3 ч.",
+    "reference_time": "2026-07-07T03:00:00Z",
+    "expected": {
+      "equipment_id": 7,
+      "area_id": 1,
+      "fault_code_id": 7,
+      "time_norm_id": 7,
+      "deadline": "2026-07-07T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-08",
+    "phrase": "Дробильно-сортировочный комплекс, Питатель ПЛ-01: замечен сбой датчика, нужен ремонт за 4 ч.",
+    "reference_time": "2026-07-08T03:00:00Z",
+    "expected": {
+      "equipment_id": 8,
+      "area_id": 1,
+      "fault_code_id": 8,
+      "time_norm_id": 8,
+      "deadline": "2026-07-08T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-09",
+    "phrase": "Мельница МШЦ-3600: утечка масла, участок Обогатительная фабрика. Сделать за 1 ч.",
+    "reference_time": "2026-07-09T03:00:00Z",
+    "expected": {
+      "equipment_id": 9,
+      "area_id": 2,
+      "fault_code_id": 9,
+      "time_norm_id": 9,
+      "deadline": "2026-07-09T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-10",
+    "phrase": "На Насос НС-01 износ уплотнения; Обогатительная фабрика, устранить в течение 2 ч.",
+    "reference_time": "2026-07-10T03:00:00Z",
+    "expected": {
+      "equipment_id": 10,
+      "area_id": 2,
+      "fault_code_id": 10,
+      "time_norm_id": 10,
+      "deadline": "2026-07-10T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-11",
+    "phrase": "Оборуд. Насос НС-02: падение давления. Участок Обогатительная фабрика, срок через 3 ч.",
+    "reference_time": "2026-07-11T03:00:00Z",
+    "expected": {
+      "equipment_id": 11,
+      "area_id": 2,
+      "fault_code_id": 11,
+      "time_norm_id": 11,
+      "deadline": "2026-07-11T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-12",
+    "phrase": "Обогатительная фабрика, Сепаратор СМ-01: замечен засорение фильтра, нужен ремонт за 4 ч.",
+    "reference_time": "2026-07-12T03:00:00Z",
+    "expected": {
+      "equipment_id": 12,
+      "area_id": 2,
+      "fault_code_id": 12,
+      "time_norm_id": 12,
+      "deadline": "2026-07-12T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-13",
+    "phrase": "Мельница МШЦ-2700: плановый осмотр, участок Обогатительная фабрика. Сделать за 1 ч.",
+    "reference_time": "2026-07-13T03:00:00Z",
+    "expected": {
+      "equipment_id": 13,
+      "area_id": 2,
+      "fault_code_id": 13,
+      "time_norm_id": 13,
+      "deadline": "2026-07-13T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-14",
+    "phrase": "На Фильтр ФР-01 смазка узла; Обогатительная фабрика, устранить в течение 2 ч.",
+    "reference_time": "2026-07-14T03:00:00Z",
+    "expected": {
+      "equipment_id": 14,
+      "area_id": 2,
+      "fault_code_id": 14,
+      "time_norm_id": 14,
+      "deadline": "2026-07-14T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-15",
+    "phrase": "Оборуд. Насос НС-03: проверка центровки. Участок Обогатительная фабрика, срок через 3 ч.",
+    "reference_time": "2026-07-15T03:00:00Z",
+    "expected": {
+      "equipment_id": 15,
+      "area_id": 2,
+      "fault_code_id": 15,
+      "time_norm_id": 15,
+      "deadline": "2026-07-15T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-16",
+    "phrase": "Обогатительная фабрика, Сепаратор СМ-02: замечен замена фильтра, нужен ремонт за 4 ч.",
+    "reference_time": "2026-07-16T03:00:00Z",
+    "expected": {
+      "equipment_id": 16,
+      "area_id": 2,
+      "fault_code_id": 16,
+      "time_norm_id": 16,
+      "deadline": "2026-07-16T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-17",
+    "phrase": "Конвейер К-4: трещина кожуха, участок Транспортный участок. Сделать за 1 ч.",
+    "reference_time": "2026-07-17T03:00:00Z",
+    "expected": {
+      "equipment_id": 17,
+      "area_id": 3,
+      "fault_code_id": 17,
+      "time_norm_id": 17,
+      "deadline": "2026-07-17T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-18",
+    "phrase": "На Грохот ГИ-02 ослабление крепежа; Транспортный участок, устранить в течение 2 ч.",
+    "reference_time": "2026-07-18T03:00:00Z",
+    "expected": {
+      "equipment_id": 18,
+      "area_id": 3,
+      "fault_code_id": 18,
+      "time_norm_id": 18,
+      "deadline": "2026-07-18T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-19",
+    "phrase": "Оборуд. Тельфер ТЭ-01: загрязнение зоны. Уч-к Транспортный уч-к, срок через 3 ч.",
+    "reference_time": "2026-07-19T03:00:00Z",
+    "expected": {
+      "equipment_id": 19,
+      "area_id": 3,
+      "fault_code_id": 19,
+      "time_norm_id": 19,
+      "deadline": "2026-07-19T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-20",
+    "phrase": "Транспортный участок, Кран КМ-01: замечен нарушение ограждения, нужен ремонт за 4 ч.",
+    "reference_time": "2026-07-20T03:00:00Z",
+    "expected": {
+      "equipment_id": 20,
+      "area_id": 3,
+      "fault_code_id": 20,
+      "time_norm_id": 20,
+      "deadline": "2026-07-20T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-21",
+    "phrase": "Компрессор КВ-01: износ ролика, участок Энергетический участок. Сделать за 1 ч.",
+    "reference_time": "2026-07-21T03:00:00Z",
+    "expected": {
+      "equipment_id": 21,
+      "area_id": 4,
+      "fault_code_id": 1,
+      "time_norm_id": 1,
+      "deadline": "2026-07-21T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-22",
+    "phrase": "На Трансформатор ТМ-01 износ подшипнка; Энергетический участок, устранить в течение 2 ч.",
+    "reference_time": "2026-07-22T03:00:00Z",
+    "expected": {
+      "equipment_id": 22,
+      "area_id": 4,
+      "fault_code_id": 2,
+      "time_norm_id": 2,
+      "deadline": "2026-07-22T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-23",
+    "phrase": "Оборуд. Насос НС-04: обрыв ремня. Участок Энергетический участок, срок через 3 ч.",
+    "reference_time": "2026-07-23T03:00:00Z",
+    "expected": {
+      "equipment_id": 23,
+      "area_id": 4,
+      "fault_code_id": 3,
+      "time_norm_id": 3,
+      "deadline": "2026-07-23T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-24",
+    "phrase": "Обогатительная фабрика, Сепаратор СМ-03: замечен вибрация привода, нужен ремонт за 4 ч.",
+    "reference_time": "2026-07-24T03:00:00Z",
+    "expected": {
+      "equipment_id": 24,
+      "area_id": 2,
+      "fault_code_id": 4,
+      "time_norm_id": 4,
+      "deadline": "2026-07-24T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-25",
+    "phrase": "Дробилка КМД-1200: повреждение кабеля, участок Дробильно-сортировочный комплекс. Сделать за 1 ч.",
+    "reference_time": "2026-07-25T03:00:00Z",
+    "expected": {
+      "equipment_id": 25,
+      "area_id": 1,
+      "fault_code_id": 5,
+      "time_norm_id": 5,
+      "deadline": "2026-07-25T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-26",
+    "phrase": "На Дробилка КМД-1750 отказ контактора; Дробильно-сортировочный комплекс, устранить в течение 2 ч.",
+    "reference_time": "2026-07-26T03:00:00Z",
+    "expected": {
+      "equipment_id": 1,
+      "area_id": 1,
+      "fault_code_id": 6,
+      "time_norm_id": 6,
+      "deadline": "2026-07-26T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-27",
+    "phrase": "Оборуд. Дробилка ККД-1500: перегрев двигателя. Участок Дробильно-сортировочный комплекс, срок через 3 ч.",
+    "reference_time": "2026-07-27T03:00:00Z",
+    "expected": {
+      "equipment_id": 2,
+      "area_id": 1,
+      "fault_code_id": 7,
+      "time_norm_id": 7,
+      "deadline": "2026-07-27T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-28",
+    "phrase": "Дробильно-сортировочный комплекс, Конвейер К-3: замечен сбой датчика, нужен ремонт за 4 ч.",
+    "reference_time": "2026-07-28T03:00:00Z",
+    "expected": {
+      "equipment_id": 3,
+      "area_id": 1,
+      "fault_code_id": 8,
+      "time_norm_id": 8,
+      "deadline": "2026-07-28T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-29",
+    "phrase": "Грохот ГИ-01: утечка масла, участок Дробильно-сортировочный комплекс. Сделать за 1 ч.",
+    "reference_time": "2026-07-29T03:00:00Z",
+    "expected": {
+      "equipment_id": 4,
+      "area_id": 1,
+      "fault_code_id": 9,
+      "time_norm_id": 9,
+      "deadline": "2026-07-29T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-30",
+    "phrase": "На Дробилка КСД-2200 износ уплотнения; Дробильно-сортировочный комплекс, устранить в течение 2 ч.",
+    "reference_time": "2026-07-30T03:00:00Z",
+    "expected": {
+      "equipment_id": 5,
+      "area_id": 1,
+      "fault_code_id": 10,
+      "time_norm_id": 10,
+      "deadline": "2026-07-30T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-31",
+    "phrase": "Оборуд. Конвейер К-1: падение давления. Участок Дробильно-сортировочный комплекс, срок через 3 ч.",
+    "reference_time": "2026-07-31T03:00:00Z",
+    "expected": {
+      "equipment_id": 6,
+      "area_id": 1,
+      "fault_code_id": 11,
+      "time_norm_id": 11,
+      "deadline": "2026-07-31T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-32",
+    "phrase": "Дробильно-сортировочный комплекс, Конвейер К-2: замечен засорение фильтра, нужен ремонт за 4 ч.",
+    "reference_time": "2026-08-01T03:00:00Z",
+    "expected": {
+      "equipment_id": 7,
+      "area_id": 1,
+      "fault_code_id": 12,
+      "time_norm_id": 12,
+      "deadline": "2026-08-01T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-33",
+    "phrase": "Питатель ПЛ-01: плановый осмотр, участок Дробильно-сортировочный комплекс. Сделать за 1 ч.",
+    "reference_time": "2026-08-02T03:00:00Z",
+    "expected": {
+      "equipment_id": 8,
+      "area_id": 1,
+      "fault_code_id": 13,
+      "time_norm_id": 13,
+      "deadline": "2026-08-02T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-34",
+    "phrase": "На Мельница МШЦ-3600 смазка узла; Обогатительная фабрика, устранить в течение 2 ч.",
+    "reference_time": "2026-08-03T03:00:00Z",
+    "expected": {
+      "equipment_id": 9,
+      "area_id": 2,
+      "fault_code_id": 14,
+      "time_norm_id": 14,
+      "deadline": "2026-08-03T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-35",
+    "phrase": "Оборуд. Насос НС-01: проверка центровки. Участок Обогатительная фабрика, срок через 3 ч.",
+    "reference_time": "2026-08-04T03:00:00Z",
+    "expected": {
+      "equipment_id": 10,
+      "area_id": 2,
+      "fault_code_id": 15,
+      "time_norm_id": 15,
+      "deadline": "2026-08-04T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-36",
+    "phrase": "Обогатительная фабрика, Насос НС-02: замечен замена фильтра, нужен ремонт за 4 ч.",
+    "reference_time": "2026-08-05T03:00:00Z",
+    "expected": {
+      "equipment_id": 11,
+      "area_id": 2,
+      "fault_code_id": 16,
+      "time_norm_id": 16,
+      "deadline": "2026-08-05T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-37",
+    "phrase": "Сепаратор СМ-01: трещина кожуха, уч-к Обогатительная фабрика. Сделать за 1 ч.",
+    "reference_time": "2026-08-06T03:00:00Z",
+    "expected": {
+      "equipment_id": 12,
+      "area_id": 2,
+      "fault_code_id": 17,
+      "time_norm_id": 17,
+      "deadline": "2026-08-06T04:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-38",
+    "phrase": "На Мельница МШЦ-2700 ослабление крепежа; Обогатительная фабрика, устранить в течение 2 ч.",
+    "reference_time": "2026-08-07T03:00:00Z",
+    "expected": {
+      "equipment_id": 13,
+      "area_id": 2,
+      "fault_code_id": 18,
+      "time_norm_id": 18,
+      "deadline": "2026-08-07T05:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-39",
+    "phrase": "Оборуд. Фильтр ФР-01: загрязнение зоны. Участок Обогатительная фабрика, срок через 3 ч.",
+    "reference_time": "2026-08-08T03:00:00Z",
+    "expected": {
+      "equipment_id": 14,
+      "area_id": 2,
+      "fault_code_id": 19,
+      "time_norm_id": 19,
+      "deadline": "2026-08-08T06:00:00Z"
+    },
+    "label_source": "template_parameters"
+  },
+  {
+    "id": "I-40",
+    "phrase": "Обогатительная фабрика, Насос НС-03: замечен нарушение ограждения, нужен ремонт за 4 ч.",
+    "reference_time": "2026-08-09T03:00:00Z",
+    "expected": {
+      "equipment_id": 15,
+      "area_id": 2,
+      "fault_code_id": 20,
+      "time_norm_id": 20,
+      "deadline": "2026-08-09T07:00:00Z"
+    },
+    "label_source": "template_parameters"
+  }
+]

@@ -27,6 +27,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-naryad}:${POSTGRES_PASSWORD:-demo-only-change-me}@db:5432/${POSTGRES_DB:-naryad_ai}
       SEED_DEMO: ${SEED_DEMO:-true}
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+      AI_SERVICE_URL: http://ai:8090
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       # Without FCM credentials the API records notifications but does not deliver push.
       FIREBASE_CREDENTIALS: ${FIREBASE_CREDENTIALS:-}

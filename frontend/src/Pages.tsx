@@ -407,8 +407,19 @@ export function AnalyticsPage({
   });
   const [advanced, setAdvanced] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [aiFindings, setAiFindings] = useState<{
+    orders_analyzed: number;
+    findings: { summary: string; recommendation: string }[];
+  } | null>(null);
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [aiAnswer, setAiAnswer] = useState("");
+  const [aiError, setAiError] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
   const [tab, setTab] = useState("overview");
   const selection = JSON.stringify([days, filters]);
+  useEffect(() => {
+    setAiFindings(null);
+  }, [selection]);
   const request = useMemo(() => {
     const now = new Date();
     const duration = ["7", "30", "90"].includes(days) ? Number(days) : 90;
@@ -493,6 +504,38 @@ export function AnalyticsPage({
   function choosePeriod(period: string) {
     setDays(period);
     setFilters((current) => ({ ...current, from_date: "", to_date: "" }));
+  }
+  async function findAiAnomalies() {
+    if (!loaded || loaded.selection !== selection) return;
+    setAiBusy(true);
+    setAiError("");
+    try {
+      const params = new URLSearchParams({ start: loaded.bounds.from_date, end: loaded.bounds.to_date });
+      if (filters.area_id) params.set("area_id", filters.area_id);
+      setAiFindings(await api<{
+        orders_analyzed: number;
+        findings: { summary: string; recommendation: string }[];
+      }>(`/ai/analytics?${params.toString()}`));
+    } catch (failure) {
+      setAiError((failure as Error).message);
+    } finally {
+      setAiBusy(false);
+    }
+  }
+  async function askAiAssistant() {
+    if (!aiQuestion.trim()) return;
+    setAiBusy(true);
+    setAiError("");
+    try {
+      const result = await api<{ answer: string }>("/ai/assistant", {
+        method: "POST", body: JSON.stringify({ question: aiQuestion.trim() }),
+      });
+      setAiAnswer(result.answer);
+    } catch (failure) {
+      setAiError((failure as Error).message);
+    } finally {
+      setAiBusy(false);
+    }
   }
   function filter(key: string, value: string) {
     if (key === "from_date" || key === "to_date") {
@@ -701,6 +744,28 @@ export function AnalyticsPage({
           </button>
         )}
       </div>
+      <section className="panel-note">
+        <div>
+          <strong>ИИ-аналитика и ассистент мастера</strong>
+          <p>Рекомендации требуют проверки мастером. ИИ-анализ учитывает период и участок; остальные фильтры здесь не применяются.</p>
+          <button className="button secondary" disabled={aiBusy || !loaded || loaded.selection !== selection}
+            onClick={() => void findAiAnomalies()}>Найти аномалии</button>
+          {aiFindings && <div>
+            <p>Проанализировано нарядов: {aiFindings.orders_analyzed}</p>
+            {aiFindings.findings.length === 0 && <p>Подтверждённых закономерностей по правилам не найдено.</p>}
+            {aiFindings.findings.map((finding, index) =>
+              <p key={index}>{finding.summary} {finding.recommendation}</p>)}
+          </div>}
+          <label>Вопрос ассистенту
+            <input value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)}
+              placeholder="Кто сейчас свободен из электриков?" />
+          </label>
+          <button className="button secondary" disabled={aiBusy || !aiQuestion.trim()}
+            onClick={() => void askAiAssistant()}>Спросить</button>
+          {aiAnswer && <p>{aiAnswer}</p>}
+          {aiError && <p role="alert">{aiError}</p>}
+        </div>
+      </section>
       <div className="panel-note">
         <Info size={15} />
         <span>

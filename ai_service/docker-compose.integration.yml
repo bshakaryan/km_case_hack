@@ -1,0 +1,26 @@
+services:
+  ai:
+    build:
+      context: ./ai_service
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    env_file:
+      - path: ./ai_service/.env
+        required: false
+    environment:
+      DATA_SOURCE: backend
+      BACKEND_URL: http://backend:8000
+      BACKEND_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+      AI_DATABASE_URL: sqlite:////app/state/ai.db
+      DEMO_MODE: ${AI_DEMO_MODE:-true}
+      DEADLINE_SCHEDULER_ENABLED: "false"
+    volumes:
+      - ai_state:/app/state
+    ports:
+      - "127.0.0.1:${AI_PORT:-8090}:8090"
+
+volumes:
+  ai_state:

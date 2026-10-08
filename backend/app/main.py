@@ -20,11 +20,13 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select, text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import begin_sqlite_write, make_engine, session_factory
+from .ai_service_client import call_ai
 from .conditional_response import conditional_json_response
 from .migrations import upgrade_database
 from .models import Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
@@ -40,6 +42,14 @@ STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "
 PRIORITY = {"emergency", "high", "normal", "planned"}
 WS_AUTH_RECHECK_SECONDS = 30
 ORDER_NUMBER_ATTEMPTS = 5
+
+
+class AIQuestion(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+
+
+class AIIntake(BaseModel):
+    phrase: str = Field(min_length=1, max_length=2000)
 
 
 def order_number(assigned):
@@ -389,6 +399,105 @@ def create_app(database_url=None, seed=True, monitor=True):
             return {"areas": [], "equipment": [], "employees": [], "brigades": [], "fault_codes": rows(db, FaultCode, ["id", "code", "name"]), "materials": rows(db, Material, ["id", "name", "unit"]), "time_norms": []}
         result = {"areas": rows(db, Area, ["id", "name"]), "equipment": rows(db, Equipment, ["id", "name", "inventory_number", "area_id", "type", "criticality"]), "employees": [employee_dict(p) for p in db.scalars(select(Employee).order_by(Employee.id))], "brigades": rows(db, Brigade, ["id", "name"]), "fault_codes": rows(db, FaultCode, ["id", "code", "name"]), "materials": rows(db, Material, ["id", "name", "unit"]), "time_norms": rows(db, TimeNorm, ["id", "name", "hours"])}
         return result
+
+    def require_ai_service(request: Request):
+        expected = os.getenv("AI_SERVICE_TOKEN", "")
+        authorization = request.headers.get("Authorization", "")
+        supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if not expected:
+            raise HTTPException(503, "Сервисный доступ ИИ не настроен")
+        if not secrets.compare_digest(supplied, expected):
+            raise HTTPException(401, "Неверный токен ИИ-сервиса")
+
+    @app.get("/api/ai-service/snapshot")
+    def ai_service_snapshot(request: Request, db: DB):
+        require_ai_service(request)
+        orders = list(db.scalars(select(Order).order_by(Order.id).limit(5001)))
+        if len(orders) > 5000:
+            raise HTTPException(409, "История превышает 5000 нарядов; полный снимок недоступен")
+        return {
+            "areas": rows(db, Area, ["id", "name"]),
+            "equipment": rows(db, Equipment, ["id", "name", "inventory_number", "area_id", "type", "criticality"]),
+            "employees": [employee_dict(person) for person in db.scalars(select(Employee).order_by(Employee.id))],
+            "brigades": rows(db, Brigade, ["id", "name"]),
+            "fault_codes": rows(db, FaultCode, ["id", "code", "name"]),
+            "materials": rows(db, Material, ["id", "name", "unit"]),
+            "material_norms": [],
+            "time_norms": rows(db, TimeNorm, ["id", "name", "hours"]),
+            "orders": [order_dict(db, order, detail=True) for order in orders],
+        }
+
+    @app.get("/api/ai-service/photos/{id_}")
+    def ai_service_photo(id_: int, request: Request, db: DB):
+        require_ai_service(request)
+        photo = db.get(Photo, id_)
+        if photo is None:
+            raise HTTPException(404, "Фото не найдено")
+        return Response(photo.data, media_type="image/jpeg", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
+    @app.get("/api/ai/source", tags=["AI"])
+    async def ai_source(user: User):
+        require_role(user, "master", "manager", "admin")
+        return await call_ai("GET", "/ai/source/summary")
+
+    @app.post("/api/ai/assistant", tags=["AI"])
+    async def ai_assistant(payload: AIQuestion, user: User):
+        require_role(user, "master", "manager", "admin")
+        return await call_ai("POST", "/ai/assistant/ask", payload=payload.model_dump())
+
+    @app.post("/api/ai/intake", tags=["AI"])
+    async def ai_intake(payload: AIIntake, user: User):
+        require_role(user, "master", "admin")
+        return await call_ai("POST", "/ai/intake/text", payload=payload.model_dump())
+
+    @app.get("/api/ai/analytics", tags=["AI"])
+    async def ai_analytics(start: datetime, end: datetime, user: User, area_id: int | None = None):
+        require_role(user, "master", "manager", "admin")
+        return await call_ai("GET", "/ai/analytics", params={"start": start.isoformat(), "end": end.isoformat(), "area_id": area_id})
+
+    @app.get("/api/ai/ratings", tags=["AI"])
+    async def ai_ratings(start: datetime, end: datetime, user: User):
+        require_role(user, "master", "manager", "admin")
+        return await call_ai("GET", "/ai/ratings", params={"start": start.isoformat(), "end": end.isoformat()})
+
+    @app.get("/api/ai/reports/shift", tags=["AI"])
+    async def ai_shift_report(start: datetime, end: datetime, user: User):
+        require_role(user, "master", "manager", "admin")
+        return await call_ai("GET", "/ai/reports/shift", params={"start": start.isoformat(), "end": end.isoformat()})
+
+    @app.get("/api/ai/orders/{id_}/report", tags=["AI"])
+    async def ai_order_report(id_: int, db: DB, user: User):
+        get_order(db, id_, user)
+        audience = "worker" if user.role == "worker" else "master"
+        return await call_ai("GET", f"/ai/reports/orders/{id_}", params={"audience": audience})
+
+    @app.post("/api/ai/orders/{id_}/review", tags=["AI"])
+    async def ai_schedule_review(id_: int, db: DB, user: User):
+        require_role(user, "master", "admin")
+        order = get_order(db, id_, user)
+        if order.status not in {"completed", "closed", "rework"}:
+            raise HTTPException(409, "Наряд ещё не сдан")
+        return await call_ai("POST", f"/ai/reviews/{id_}")
+
+    @app.get("/api/ai/orders/{id_}/review", tags=["AI"])
+    async def ai_get_review(id_: int, db: DB, user: User):
+        require_role(user, "master", "admin")
+        get_order(db, id_, user)
+        return await call_ai("GET", f"/ai/reviews/{id_}")
+
+    @app.post("/api/ai/orders/{id_}/photo-review", tags=["AI"])
+    async def ai_schedule_photo_review(id_: int, db: DB, user: User):
+        require_role(user, "master", "admin")
+        order = get_order(db, id_, user)
+        if order.status not in {"completed", "closed", "rework"}:
+            raise HTTPException(409, "Наряд ещё не сдан")
+        return await call_ai("POST", f"/ai/photos/{id_}/review")
+
+    @app.get("/api/ai/orders/{id_}/photo-review", tags=["AI"])
+    async def ai_get_photo_review(id_: int, db: DB, user: User):
+        require_role(user, "master", "admin")
+        get_order(db, id_, user)
+        return await call_ai("GET", f"/ai/photos/{id_}/review")
 
     reference_models = {"areas": Area, "equipment": Equipment, "employees": Employee, "brigades": Brigade, "fault_codes": FaultCode, "materials": Material, "time_norms": TimeNorm}
 

@@ -1767,6 +1767,16 @@ export function OrderDialog({
   const [action, setAction] = useState("");
   const [reason, setReason] = useState("");
   const [score, setScore] = useState("");
+  const [aiReview, setAiReview] = useState<{
+    verdict: string;
+    suggested_score: number | null;
+    concerns: string[];
+    explanation_master: string;
+    llm_used: boolean;
+    needs_master_review: boolean;
+  } | null>(null);
+  const [aiReviewStatus, setAiReviewStatus] = useState("");
+  const [aiReviewBusy, setAiReviewBusy] = useState(false);
   const [completionValidationError, setCompletionValidationError] =
     useState("");
   const [formVersion, setFormVersion] = useState<number | null>(null);
@@ -1858,6 +1868,31 @@ export function OrderDialog({
   const worker = permissions?.responsible ?? false;
   const assistant = !!permissions?.participant && !worker;
   const canAct = manager || worker;
+  async function loadAiReview() {
+    try {
+      const result = await api<{ payload?: typeof aiReview; status?: string }>(`/ai/orders/${id}/review`);
+      if (result.payload && "verdict" in result.payload) {
+        setAiReview(result.payload);
+        setAiReviewStatus("");
+      } else {
+        setAiReviewStatus(result.status === "failed" ? "Проверка не удалась" : "Проверка выполняется");
+      }
+    } catch (failure) {
+      setAiReviewStatus((failure as Error).message);
+    }
+  }
+  async function startAiReview() {
+    setAiReviewBusy(true);
+    setAiReviewStatus("");
+    try {
+      await api(`/ai/orders/${id}/review`, { method: "POST" });
+      await loadAiReview();
+    } catch (failure) {
+      setAiReviewStatus((failure as Error).message);
+    } finally {
+      setAiReviewBusy(false);
+    }
+  }
   const terminal = order && ["closed", "cancelled"].includes(order.status);
   const canUpload =
     (manager || permissions?.canUpload) &&
@@ -2485,6 +2520,28 @@ export function OrderDialog({
                     </section>
                   )}
                 </div>
+                {manager && order.completion && (
+                  <section className="panel-note">
+                    <div>
+                      <strong>Проверка ИИ · рекомендация</strong>
+                      <p>Итоговое решение о приёмке принимает мастер.</p>
+                      {aiReview && (
+                        <>
+                          <p>Вердикт: {aiReview.verdict}; предложенная оценка: {aiReview.suggested_score ?? "неизвестно"}</p>
+                          <p>{aiReview.explanation_master}</p>
+                          {aiReview.concerns.map((concern) => <p key={concern}>• {concern}</p>)}
+                          <small>{aiReview.llm_used ? "С анализом модели" : "Без LLM, по правилам"}</small>
+                          {aiReview.needs_master_review && <p>Нужна проверка мастером.</p>}
+                        </>
+                      )}
+                      {aiReviewStatus && <p>{aiReviewStatus}</p>}
+                    </div>
+                    <button type="button" className="button secondary" disabled={aiReviewBusy}
+                      onClick={() => void (aiReviewStatus === "Проверка выполняется" ? loadAiReview() : startAiReview())}>
+                      {aiReviewStatus === "Проверка выполняется" ? "Обновить результат" : "Проверить ИИ"}
+                    </button>
+                  </section>
+                )}
                 <div className="detail-info-grid">
                   <div>
                     <small>

@@ -1,0 +1,434 @@
+[
+  {
+    "id": "P-001",
+    "source": "data_gen/photos/duplicates/source-00.png",
+    "candidate": "data_gen/photos/duplicates/exact-00.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-002",
+    "source": "data_gen/photos/duplicates/source-00.png",
+    "candidate": "data_gen/photos/duplicates/compressed-00.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-003",
+    "source": "data_gen/photos/duplicates/source-00.png",
+    "candidate": "data_gen/photos/duplicates/crop-00.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-004",
+    "source": "data_gen/photos/duplicates/source-00.png",
+    "candidate": "data_gen/photos/duplicates/other-00.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-005",
+    "source": "data_gen/photos/duplicates/source-01.png",
+    "candidate": "data_gen/photos/duplicates/exact-01.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-006",
+    "source": "data_gen/photos/duplicates/source-01.png",
+    "candidate": "data_gen/photos/duplicates/compressed-01.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-007",
+    "source": "data_gen/photos/duplicates/source-01.png",
+    "candidate": "data_gen/photos/duplicates/crop-01.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-008",
+    "source": "data_gen/photos/duplicates/source-01.png",
+    "candidate": "data_gen/photos/duplicates/other-01.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-009",
+    "source": "data_gen/photos/duplicates/source-02.png",
+    "candidate": "data_gen/photos/duplicates/exact-02.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-010",
+    "source": "data_gen/photos/duplicates/source-02.png",
+    "candidate": "data_gen/photos/duplicates/compressed-02.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-011",
+    "source": "data_gen/photos/duplicates/source-02.png",
+    "candidate": "data_gen/photos/duplicates/crop-02.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-012",
+    "source": "data_gen/photos/duplicates/source-02.png",
+    "candidate": "data_gen/photos/duplicates/other-02.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-013",
+    "source": "data_gen/photos/duplicates/source-03.png",
+    "candidate": "data_gen/photos/duplicates/exact-03.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-014",
+    "source": "data_gen/photos/duplicates/source-03.png",
+    "candidate": "data_gen/photos/duplicates/compressed-03.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-015",
+    "source": "data_gen/photos/duplicates/source-03.png",
+    "candidate": "data_gen/photos/duplicates/crop-03.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-016",
+    "source": "data_gen/photos/duplicates/source-03.png",
+    "candidate": "data_gen/photos/duplicates/other-03.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-017",
+    "source": "data_gen/photos/duplicates/source-04.png",
+    "candidate": "data_gen/photos/duplicates/exact-04.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-018",
+    "source": "data_gen/photos/duplicates/source-04.png",
+    "candidate": "data_gen/photos/duplicates/compressed-04.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-019",
+    "source": "data_gen/photos/duplicates/source-04.png",
+    "candidate": "data_gen/photos/duplicates/crop-04.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-020",
+    "source": "data_gen/photos/duplicates/source-04.png",
+    "candidate": "data_gen/photos/duplicates/other-04.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-021",
+    "source": "data_gen/photos/duplicates/source-05.png",
+    "candidate": "data_gen/photos/duplicates/exact-05.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-022",
+    "source": "data_gen/photos/duplicates/source-05.png",
+    "candidate": "data_gen/photos/duplicates/compressed-05.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-023",
+    "source": "data_gen/photos/duplicates/source-05.png",
+    "candidate": "data_gen/photos/duplicates/crop-05.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-024",
+    "source": "data_gen/photos/duplicates/source-05.png",
+    "candidate": "data_gen/photos/duplicates/other-05.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-025",
+    "source": "data_gen/photos/duplicates/source-06.png",
+    "candidate": "data_gen/photos/duplicates/exact-06.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-026",
+    "source": "data_gen/photos/duplicates/source-06.png",
+    "candidate": "data_gen/photos/duplicates/compressed-06.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-027",
+    "source": "data_gen/photos/duplicates/source-06.png",
+    "candidate": "data_gen/photos/duplicates/crop-06.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-028",
+    "source": "data_gen/photos/duplicates/source-06.png",
+    "candidate": "data_gen/photos/duplicates/other-06.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-029",
+    "source": "data_gen/photos/duplicates/source-07.png",
+    "candidate": "data_gen/photos/duplicates/exact-07.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-030",
+    "source": "data_gen/photos/duplicates/source-07.png",
+    "candidate": "data_gen/photos/duplicates/compressed-07.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-031",
+    "source": "data_gen/photos/duplicates/source-07.png",
+    "candidate": "data_gen/photos/duplicates/crop-07.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-032",
+    "source": "data_gen/photos/duplicates/source-07.png",
+    "candidate": "data_gen/photos/duplicates/other-07.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-033",
+    "source": "data_gen/photos/duplicates/source-08.png",
+    "candidate": "data_gen/photos/duplicates/exact-08.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-034",
+    "source": "data_gen/photos/duplicates/source-08.png",
+    "candidate": "data_gen/photos/duplicates/compressed-08.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-035",
+    "source": "data_gen/photos/duplicates/source-08.png",
+    "candidate": "data_gen/photos/duplicates/crop-08.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-036",
+    "source": "data_gen/photos/duplicates/source-08.png",
+    "candidate": "data_gen/photos/duplicates/other-08.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-037",
+    "source": "data_gen/photos/duplicates/source-09.png",
+    "candidate": "data_gen/photos/duplicates/exact-09.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-038",
+    "source": "data_gen/photos/duplicates/source-09.png",
+    "candidate": "data_gen/photos/duplicates/compressed-09.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-039",
+    "source": "data_gen/photos/duplicates/source-09.png",
+    "candidate": "data_gen/photos/duplicates/crop-09.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-040",
+    "source": "data_gen/photos/duplicates/source-09.png",
+    "candidate": "data_gen/photos/duplicates/other-09.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-041",
+    "source": "data_gen/photos/duplicates/source-10.png",
+    "candidate": "data_gen/photos/duplicates/exact-10.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-042",
+    "source": "data_gen/photos/duplicates/source-10.png",
+    "candidate": "data_gen/photos/duplicates/compressed-10.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-043",
+    "source": "data_gen/photos/duplicates/source-10.png",
+    "candidate": "data_gen/photos/duplicates/crop-10.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-044",
+    "source": "data_gen/photos/duplicates/source-10.png",
+    "candidate": "data_gen/photos/duplicates/other-10.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-045",
+    "source": "data_gen/photos/duplicates/source-11.png",
+    "candidate": "data_gen/photos/duplicates/exact-11.png",
+    "variant": "exact",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-046",
+    "source": "data_gen/photos/duplicates/source-11.png",
+    "candidate": "data_gen/photos/duplicates/compressed-11.jpg",
+    "variant": "recompressed",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-047",
+    "source": "data_gen/photos/duplicates/source-11.png",
+    "candidate": "data_gen/photos/duplicates/crop-11.jpg",
+    "variant": "cropped",
+    "expected_duplicate": true,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  },
+  {
+    "id": "P-048",
+    "source": "data_gen/photos/duplicates/source-11.png",
+    "candidate": "data_gen/photos/duplicates/other-11.png",
+    "variant": "different",
+    "expected_duplicate": false,
+    "label_source": "deterministic_transformation",
+    "synthetic_source": true
+  }
+]
