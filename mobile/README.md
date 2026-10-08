@@ -67,6 +67,36 @@ flutter test --concurrency=2 test/offline_recovery_test.dart test/offline_recove
 
 Последний файл использует настоящую временную SQLite через dev-зависимость `sqflite_common_ffi` и внедряемый `DatabaseFactory`: проверяет rollback после сбоя удаления, сравнение снимка, границу сессии и сохранность чужих файлов. Рабочая БД не открывается; production продолжает использовать Android `sqflite`. Основа процедуры — [официальная инструкция SQLite-тестов](https://github.com/tekartik/sqflite/blob/master/sqflite_common_ffi/doc/testing.md). Это проверка транзакций и UI на компьютере; остановка Android посреди HTTP, физические устройства и доставка FCM требуют отдельных испытаний.
 
+### Приёмка потери HTTP-ответа после серверного commit
+
+Этот desktop opt-in тест использует настоящий HTTP, локальный fault proxy и SQLite-FFI. API отвечает upstream после commit, proxy обрывает downstream до заголовков; сохранённая команда переживает GET и close/open, затем точный replay подтверждается независимо по серверной БД. Это не Android process-death, защищённое восстановление сессии или физическая сеть. Фото «После» загружено и подтверждено до сдачи.
+
+Из корня репозитория с установленными backend-зависимостями подготовьте **новый marker** и свободный loopback-порт. Фикстура располагается в отдельной соседней папке вне Git; CLI отказывается менять существующую БД. PowerShell, терминал 1:
+
+```powershell
+$httpRunMarker = 'run-20261008-unique01'
+$httpFixtureParent = Split-Path -Parent (Get-Location).Path
+$httpFixtureFolder = Join-Path $httpFixtureParent "http-uncertainty-$httpRunMarker"
+$httpFixtureDb = 'sqlite:///' + (Join-Path $httpFixtureFolder 'fixture.sqlite').Replace('\', '/')
+python backend/tests/live_http_uncertainty_fixture.py prepare --database-url $httpFixtureDb --run-marker $httpRunMarker --api-url http://127.0.0.1:8021/api
+python backend/tests/live_http_uncertainty_fixture.py serve --database-url $httpFixtureDb --run-marker $httpRunMarker
+```
+
+Serve читает адрес из manifest, отключает демозасев, push и monitor; используется queued_stub без внешнего ИИ. После появления сообщения о запуске сервера откройте терминал 2 из корня репозитория и укажите **абсолютный путь fixture.json**, напечатанный prepare:
+
+```powershell
+cd mobile
+flutter test --no-pub test/live_http_uncertainty_test.dart '--dart-define=LIVE_HTTP_FIXTURE_FILE=C:/absolute/http-uncertainty-run-20261008-unique01/fixture.json'
+```
+
+После успешного теста остановите serve через Ctrl+C в терминале 1 и выполните:
+
+```powershell
+python backend/tests/live_http_uncertainty_fixture.py verify --database-url $httpFixtureDb --run-marker $httpRunMarker
+```
+
+Verify требует финальный подтверждённый replay, два complete POST и пустую локальную очередь, сравнивает request/response хеши и открывает SQLite только для чтения. Результат — ровно одна попытка, MaterialWriteoff quantity=2, complete event, AI job и receipt с исходными связями; складской остаток текущая схема не моделирует. Прерванный/неудачный прогон оставляет свидетельства для разбора, новый запуск требует новую фикстуру. Без LIVE_HTTP_FIXTURE_FILE обычный flutter test намеренно пропускает этот сценарий; он не вызывает рабочий API. Сведения о настоящем прогоне — в verification.
+
 ### Связанный тест Android Emulator и веб-клиента API
 
 Физический телефон не нужен. Заранее запустите Android Emulator `emulator-5556`, API на `8000` и Vite на `5174` с прокси к этому API. Используйте отдельную демобазу с исходными справочниками: у `worker2` не должно быть текущей работы (`in_progress` или `paused`). Тест создаёт синтетические данные и не исправляет чужие назначения.
