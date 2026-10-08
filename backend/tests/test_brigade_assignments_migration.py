@@ -32,7 +32,10 @@ def check_upgrade(engine):
     before = dump(engine)
     upgrade_database(engine)
     after = dump(engine)
-    assert {name: rows for name, rows in after.items() if name != TABLE} == before
+    assert all(row["ai_input"] is None for row in after["submission_attempts"])
+    assert {name: [{key: value for key, value in row.items()
+        if not (name == "submission_attempts" and key == "ai_input")} for row in rows]
+        for name, rows in after.items() if name != TABLE} == before
     assignments = {row["id"]: row for row in before["order_assignments"]}
     names = {row["id"]: row["name"] for row in before["employees"]}
     assert len(after[TABLE]) == len(assignments) == 6
@@ -43,7 +46,7 @@ def check_upgrade(engine):
         assert participant["source"] == "legacy_snapshot"
     with engine.connect() as connection:
         validate_schema(connection)
-        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0007_assignment_participants"
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0008_ai_attempt_input"
     upgrade_database(engine)
     with engine.begin() as connection:
         seed_legacy_history(connection)

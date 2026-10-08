@@ -31,6 +31,12 @@ const {
   canRetryAiReview,
   requestAiReviewRetry,
   applyAiReviewJob,
+  aiReviewScoreLabel,
+  aiReviewTitle,
+  aiReviewVerdict,
+  aiReviewSource,
+  aiReviewNote,
+  AiPhotoCheck,
 } = loaded.exports;
 const job = (status, overrides = {}) => ({
   id: 8,
@@ -65,6 +71,94 @@ const order = {
 };
 const render = (props) =>
   renderToStaticMarkup(React.createElement(AiJobStatus, props));
+const photoCheck = (status = "checked", overrides = {}) => ({
+  status, method: "local_cv", scope: "submission_selected_pair",
+  before_id: 21, after_id: 22, duplicate_before: false,
+  exact_duplicate_groups: [], equipment_status: "unknown",
+  model_available: false, capture_time_status: "unknown",
+  repair_status: "unknown", history_status: "not_checked",
+  ...overrides,
+});
+const renderPhotos = (check) => renderToStaticMarkup(React.createElement(AiPhotoCheck, { check }));
+
+test("local photo evidence identifies the selected pair and keeps repair, equipment and capture unknown", () => {
+  const check = photoCheck();
+  const html = renderPhotos(check);
+  assert.match(html, /Локальная проверка изображений выполнена/);
+  assert.match(html, /до №21; после №22/);
+  assert.match(html, /В выбранной паре признаков повтора не найдено/);
+  assert.match(html, /Совпадение оборудования не подтверждено/);
+  assert.match(html, /Модель сравнения оборудования недоступна/);
+  assert.match(html, /Качество ремонта и время съёмки не подтверждены/);
+  assert.match(html, /Фото других нарядов и сдач не проверялись/);
+  const review = { score: null, llm_used: false, source_verdict: "needs_master_review", photo_check: check };
+  assert.match(aiReviewSource(review), /локальная проверка фото/);
+  assert.match(aiReviewNote(review), /технические признаки/);
+  assert.doesNotMatch(aiReviewNote(review), /Содержимое снимков не анализируется/);
+  assert.equal(aiReviewScoreLabel(review.score), "Оценка не определена");
+});
+
+test("possible duplicate and equipment mismatch are bounded warnings, not a repair verdict", () => {
+  const html = renderPhotos(photoCheck("checked", {
+    duplicate_before: true, equipment_status: "different", model_available: true,
+    exact_duplicate_groups: [Array.from({ length: 40 }, (_, index) => 100001 + index), [200001, 200002]],
+  }));
+  assert.match(html, /признаки повтора фото до ремонта/);
+  assert.match(html, /Возможно, на выбранных снимках разное оборудование/);
+  assert.match(html, /группы полностью одинаковых файлов: 2/);
+  assert.doesNotMatch(html, /100001|200001|Совпадение оборудования подтверждено|Предварительная оценка/);
+  assert.match(html, /Качество ремонта и время съёмки не подтверждены/);
+});
+
+test("unavailable and absent-after results never pretend that image comparison completed", () => {
+  for (const status of ["unavailable", "no_after"]) {
+    const check = photoCheck(status, { duplicate_before: null, after_id: status === "no_after" ? null : 22 });
+    const html = renderPhotos(check);
+    assert.match(html, status === "unavailable" ? /проверка изображений недоступна/ : /нет фото после выполнения/);
+    assert.doesNotMatch(html, /проверка изображений выполнена|признаков повтора не найдено|Полностью одинаковые файлы.*не найдены/);
+    assert.match(html, /время съёмки не подтверждены/);
+    assert.match(aiReviewNote({ photo_check: check }), /Окончательное решение принимает мастер/);
+  }
+  assert.equal(renderPhotos(undefined), "");
+  assert.match(aiReviewNote({ is_stub: true }), /содержимое снимков не анализируется/);
+});
+
+test("a service job is a saved report awaiting a recommendation, not the local formal stub", () => {
+  for (const status of ["pending", "running", "failed", "superseded"]) {
+    const html = render({ job: job(status, { provider: "ai_service" }) });
+    assert.match(html, /Сервис проверки/);
+    assert.match(html, /Окончательное решение принимает мастер/);
+    assert.doesNotMatch(html, /Формальная проверка · демо|PRIVATE_PROVIDER_DIAGNOSTIC/);
+    assert.doesNotMatch(html, /текст отчёта и правила|проверка изображений выполнена|Содержимое снимков не анализируется/);
+    assert.equal(showAiReview(job(status, { provider: "ai_service" })), false);
+  }
+});
+
+test("unknown scores never become zero or a blank scale, and valid scores retain the scale", () => {
+  for (const value of [null, undefined, 0, NaN, Infinity, -1, 6, "4"])
+    assert.equal(aiReviewScoreLabel(value), "Оценка не определена");
+  assert.equal(aiReviewScoreLabel(4.5), "Предварительная оценка: 4,5 / 5");
+  assert.equal(aiReviewScoreLabel(5), "Предварительная оценка: 5 / 5");
+});
+
+test("source metadata distinguishes rules from text models without making a final decision", () => {
+  const review = {
+    verdict: "needs_attention", score: null, is_stub: true,
+    source_verdict: "needs_master_review", llm_used: false,
+    is_recommendation: true, explanation: "Проверьте отчёт",
+  };
+  assert.equal(aiReviewTitle(review, job("succeeded", { provider: "ai_service" })), "Сервис проверки");
+  assert.equal(aiReviewVerdict(review), "Нужна проверка мастером");
+  assert.match(aiReviewSource(review), /языковая модель не использовалась/);
+  assert.match(aiReviewSource({ ...review, llm_used: true }), /текстовая модель и правила/);
+  assert.match(aiReviewNote(review), /Содержимое снимков не анализируется/);
+  assert.match(aiReviewNote(review), /Окончательное решение принимает мастер/);
+  assert.equal(aiReviewSource({ verdict: "passed", score: 4.5, is_stub: true }), null);
+  assert.equal(aiReviewTitle({ verdict: "passed", score: 4.5, is_stub: true }), "Формальная проверка · демо");
+  assert.equal(aiReviewVerdict({ ...review, source_verdict: "accepted" }), "Рекомендовано принять");
+  assert.equal(aiReviewVerdict({ ...review, source_verdict: "accepted_with_remarks" }), "Рекомендовано принять с замечаниями");
+  assert.equal(aiReviewVerdict({ ...review, source_verdict: "needs_rework" }), "Рекомендована доработка");
+});
 
 test("pending and running preserve report confirmation without showing an old result", () => {
   for (const status of ["pending", "running"]) {

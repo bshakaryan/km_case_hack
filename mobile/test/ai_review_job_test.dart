@@ -32,6 +32,21 @@ Json review(String explanation) => {
   'is_stub': true,
   'explanation': explanation,
 };
+Json photoCheck(String status, {Json overrides = const {}}) => {
+  'status': status,
+  'method': 'local_cv',
+  'scope': 'submission_selected_pair',
+  'before_id': 21,
+  'after_id': status == 'no_after' ? null : 22,
+  'duplicate_before': status == 'checked' ? false : null,
+  'exact_duplicate_groups': <List<int>>[],
+  'equipment_status': 'unknown',
+  'model_available': false,
+  'capture_time_status': 'unknown',
+  'repair_status': 'unknown',
+  'history_status': 'not_checked',
+  ...overrides,
+};
 Json detail(String status, {String orderStatus = 'completed'}) => {
   'id': 9,
   'version': 1,
@@ -120,6 +135,307 @@ Future<void> openDetail(WidgetTester tester, AppController controller) async {
 }
 
 void main() {
+  testWidgets(
+    'local photo evidence is bounded and leaves repair, capture and other submissions unknown',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final check = photoCheck(
+        'checked',
+        overrides: {
+          'duplicate_before': true,
+          'equipment_status': 'different',
+          'model_available': true,
+          'exact_duplicate_groups': [
+            List.generate(40, (index) => 100001 + index),
+            [200001, 200002],
+          ],
+        },
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(child: AiPhotoCheck(check: check)),
+          ),
+        ),
+      );
+      expect(find.text('Результат проверки фото'), findsOneWidget);
+      expect(find.textContaining('до №21; после №22'), findsOneWidget);
+      expect(
+        find.textContaining('признаки повтора фото до ремонта'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining(
+          'Возможно, на выбранных снимках разное оборудование',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('группы полностью одинаковых файлов: 2'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Качество ремонта и время съёмки не подтверждены'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Фото других нарядов и сдач не проверялись'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('100001'), findsNothing);
+      expect(find.textContaining('200001'), findsNothing);
+      expect(find.textContaining('Предварительная оценка:'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'unavailable and absent-after image checks do not pretend that comparison ran',
+    (tester) async {
+      for (final status in ['unavailable', 'no_after']) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: AiPhotoCheck(check: photoCheck(status)),
+              ),
+            ),
+          ),
+        );
+        expect(
+          find.textContaining(
+            status == 'unavailable'
+                ? 'проверка изображений недоступна'
+                : 'нет фото после выполнения',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Локальная проверка изображений выполнена.'),
+          findsNothing,
+        );
+        expect(
+          find.textContaining('признаков повтора не найдено'),
+          findsNothing,
+        );
+        expect(
+          find.textContaining(
+            'Качество ремонта и время съёмки не подтверждены',
+          ),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      }
+      final unknown = photoCheck('checked');
+      final labels = aiPhotoCheckLines(unknown);
+      expect(labels, contains('Совпадение оборудования не подтверждено.'));
+      expect(labels, contains('Модель сравнения оборудования недоступна.'));
+      expect(aiPhotoCheckLines(null), isEmpty);
+      expect(
+        aiReviewNote(review('V1_RESULT')),
+        contains('содержимое снимков не анализируется'),
+      );
+      expect(
+        aiReviewNote({'photo_check': unknown}),
+        isNot(contains('снимков не анализируется')),
+      );
+      expect(
+        aiReviewSource({'llm_used': false, 'photo_check': unknown}),
+        contains('локальная проверка фото'),
+      );
+    },
+  );
+
+  testWidgets(
+    'the current card shows photo findings as advice without closing or grading the job',
+    (tester) async {
+      final returned = {
+        ...detail('succeeded', orderStatus: 'ai_review'),
+        'ai_review_job': {...job('succeeded'), 'provider': 'ai_service'},
+        'ai_review': {
+          'verdict': 'needs_attention',
+          'score': null,
+          'is_stub': true,
+          'source_verdict': 'needs_master_review',
+          'llm_used': false,
+          'is_recommendation': true,
+          'bridge_version': 2,
+          'explanation': 'Технические признаки требуют осмотра',
+          'photo_check': photoCheck('checked'),
+        },
+      };
+      var writes = 0;
+      final controller = controllerFor(
+        MemoryLocalStore(),
+        MockClient((request) async {
+          if (request.method != 'GET') writes++;
+          return jsonResponse(returned);
+        }),
+        status: 'succeeded',
+        orderStatus: 'ai_review',
+      );
+      await openDetail(tester, controller);
+      await tester.scrollUntilVisible(
+        find.text('Результат проверки фото'),
+        300,
+      );
+      expect(
+        find.text('Локальная проверка изображений выполнена.'),
+        findsOneWidget,
+      );
+      expect(find.text('Оценка не определена'), findsOneWidget);
+      expect(
+        find.textContaining('Содержимое снимков не анализируется'),
+        findsNothing,
+      );
+      expect(
+        find.textContaining(
+          'локальная проверка фото; языковая модель не использовалась',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Принять работу'), findsOneWidget);
+      expect(controller.orders.single.status, 'ai_review');
+      expect(controller.orders.single.score, isNull);
+      expect(writes, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  test('nullable review scores never become zero or a blank scale', () {
+    for (final value in <Object?>[
+      null,
+      0,
+      double.nan,
+      double.infinity,
+      -1,
+      6,
+      '4',
+    ]) {
+      expect(aiReviewScoreLabel(value), 'Оценка не определена');
+    }
+    expect(aiReviewScoreLabel(4.5), 'Предварительная оценка: 4.5 / 5');
+    expect(aiReviewScoreLabel(5), 'Предварительная оценка: 5 / 5');
+    expect(
+      aiReviewTitle(review('OLD_FORMAL_RESULT')),
+      'Формальная проверка · демо',
+    );
+    expect(aiReviewSource(review('OLD_FORMAL_RESULT')), isNull);
+    expect(
+      aiReviewSource({...review('TEXT_RESULT'), 'llm_used': true}),
+      'Источник: текстовая модель и правила',
+    );
+    expect(
+      aiReviewVerdict({...review('TEXT_RESULT'), 'source_verdict': 'accepted'}),
+      'Рекомендовано принять',
+    );
+    expect(
+      aiReviewVerdict({
+        ...review('TEXT_RESULT'),
+        'source_verdict': 'accepted_with_remarks',
+      }),
+      'Рекомендовано принять с замечаниями',
+    );
+    expect(
+      aiReviewVerdict({
+        ...review('TEXT_RESULT'),
+        'source_verdict': 'needs_rework',
+      }),
+      'Рекомендована доработка',
+    );
+  });
+
+  testWidgets(
+    'service task provenance does not masquerade as the local formal stub',
+    (tester) async {
+      for (final status in ['pending', 'running', 'failed', 'superseded']) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: AiJobStatus(
+                job: {...job(status), 'provider': 'ai_service'},
+              ),
+            ),
+          ),
+        );
+        expect(find.textContaining('Сервис проверки'), findsOneWidget);
+        expect(
+          find.textContaining('Окончательное решение принимает мастер'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Формальная проверка'), findsNothing);
+        expect(find.textContaining('текст отчёта и правила'), findsNothing);
+        expect(
+          find.textContaining('Локальная проверка изображений выполнена'),
+          findsNothing,
+        );
+        expect(
+          find.textContaining('PRIVATE_PROVIDER_DIAGNOSTIC'),
+          findsNothing,
+        );
+        expect(
+          showAttemptAiReview({...job(status), 'provider': 'ai_service'}),
+          isFalse,
+        );
+        expect(tester.takeException(), isNull);
+      }
+    },
+  );
+
+  testWidgets(
+    'unknown service assessment leaves the master decision explicit and sends no action',
+    (tester) async {
+      final serviceReview = <String, dynamic>{
+        'verdict': 'needs_attention',
+        'score': null,
+        'is_stub': true,
+        'source_verdict': 'needs_master_review',
+        'llm_used': false,
+        'is_recommendation': true,
+        'explanation': 'Проверьте описанные работы вручную',
+      };
+      final returned = {
+        ...detail('succeeded', orderStatus: 'ai_review'),
+        'ai_review': serviceReview,
+        'ai_review_job': {...job('succeeded'), 'provider': 'ai_service'},
+      };
+      var writes = 0;
+      final controller = controllerFor(
+        MemoryLocalStore(),
+        MockClient((request) async {
+          if (request.method != 'GET') writes++;
+          return jsonResponse(returned);
+        }),
+        status: 'succeeded',
+        orderStatus: 'ai_review',
+      );
+      await openDetail(tester, controller);
+      await tester.scrollUntilVisible(find.text('Оценка не определена'), 300);
+      expect(find.text('Сервис проверки'), findsOneWidget);
+      expect(find.text('Нужна проверка мастером'), findsOneWidget);
+      expect(
+        find.textContaining('языковая модель не использовалась'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Содержимое снимков не анализируется'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Предварительная оценка:'), findsNothing);
+      expect(find.text('Принято с замечаниями'), findsNothing);
+      expect(find.text('Принять работу'), findsOneWidget);
+      expect(controller.orders.single.status, 'ai_review');
+      expect(controller.orders.single.score, isNull);
+      expect(writes, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   test('an unusable AI retry version leaves the outcome uncertain and the previous order intact', () async {
     for (final invalidVersion in <Object?>[null, 0, -1, '8', 8.5, 6]) {
       final store = MemoryLocalStore();

@@ -187,19 +187,14 @@ class OrderHistory extends StatelessWidget {
               ),
               if (review.isNotEmpty &&
                   showAttemptAiReview(attempt['ai_job'])) ...[
-                _heading(
-                  review['is_stub'] == true
-                      ? 'Формальная проверка · демо'
-                      : 'Проверка ИИ',
-                ),
-                _text(_verdict('${review['verdict']}')),
-                if (review['score'] != null)
-                  _text('Предварительная оценка: ${review['score']} / 5'),
+                _heading(aiReviewTitle(review, job: attempt['ai_job'])),
+                _text(aiReviewVerdict(review)),
+                _text(aiReviewScoreLabel(review['score'])),
+                if (aiReviewSource(review) != null)
+                  _text(aiReviewSource(review)!),
                 _text('${review['explanation'] ?? 'Объяснение не сохранено.'}'),
-                if (review['is_stub'] == true)
-                  _text(
-                    'Проверяется наличие фото; содержимое снимков не анализируется.',
-                  ),
+                AiPhotoCheck(check: review['photo_check']),
+                _text(aiReviewNote(review, job: attempt['ai_job'])),
               ],
               _heading('Решения мастера'),
               if (decisions.isEmpty)
@@ -259,13 +254,4 @@ class OrderHistory extends StatelessWidget {
     final date = DateTime.tryParse('$value');
     return date == null ? 'Не зафиксировано' : app_ui.dateLabel(date);
   }
-
-  static String _verdict(String value) =>
-      const {
-        'passed': 'Принято',
-        'needs_attention': 'Принято с замечаниями',
-        'rework': 'Требует доработки',
-        'needs_rework': 'Требует доработки',
-      }[value] ??
-      'Нужна проверка мастером';
 }

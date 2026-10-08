@@ -24,8 +24,12 @@ def dump(engine):
 
 def without_versions(state):
     """Compare older snapshots while separately testing new version columns."""
+    # Upgrading historical fixtures must leave the new frozen context unknown.
+    # Never project away a native context that was actually captured.
+    assert all(row.get("ai_input") is None for row in state.get("submission_attempts", []))
     return {name: [{key: value for key, value in row.items()
         if not (name == "orders" and key == "version")
+        and not (name == "submission_attempts" and key == "ai_input")
         and not (name == "client_commands" and key in {"order_id", "order_version"})} for row in rows]
         for name, rows in state.items() if name != "order_assignment_participants"}
 

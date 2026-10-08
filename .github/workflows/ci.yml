@@ -114,7 +114,7 @@ jobs:
         run: flutter test --no-pub --concurrency=2
 
   ai-policy:
-    name: AI / runtime policy and data sources
+    name: AI / policy and local photo review
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
@@ -134,8 +134,8 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: .github/requirements-ai-checks.txt
-      - name: Install only policy and data-source dependencies
+      - name: Install policy and local photo dependencies
         run: python -m pip install -r ../.github/requirements-ai-checks.txt
-      # No application runtime, CV/model packages, downloads or live providers.
+      # Procedural test images only; no model downloads or live external providers.
       - name: Test isolated AI boundaries
-        run: python -m pytest -q tests/test_runtime_policy.py tests/test_datasources.py tests/test_phase7.py
+        run: python -m pytest -q tests/test_runtime_policy.py tests/test_datasources.py tests/test_phase7.py tests/test_attempt_bridge.py tests/test_attempt_photos.py

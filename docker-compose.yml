@@ -28,6 +28,8 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-naryad}:${POSTGRES_PASSWORD:-demo-only-change-me}@db:5432/${POSTGRES_DB:-naryad_ai}
       SEED_DEMO: ${SEED_DEMO:-true}
       AI_REVIEW_MODE: ${AI_REVIEW_MODE:-queued_stub}
+      AI_SERVICE_URL: ${AI_SERVICE_URL:-}
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       # FCM push: without FIREBASE_CREDENTIALS(_JSON) the backend stays in stub mode.
       FIREBASE_CREDENTIALS: ${FIREBASE_CREDENTIALS:-}

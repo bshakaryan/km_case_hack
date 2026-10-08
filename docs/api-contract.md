@@ -100,7 +100,8 @@ OrderDetail = Order + {
   photos:[{id, kind, url, created_at, author_name}],
   completion:{work_done, fault_code_id, comment,
     materials:[{material_id, name, quantity, unit}]}|null,
-  ai_review:{verdict, score, explanation, is_stub, master_score:number|null}|null,
+  ai_review:{verdict, score:number|null, explanation, is_stub, master_score:number|null,
+    source_verdict?, llm_used?, is_recommendation?, bridge_version?, input_sha256?}|null,
   assignment_history:[Assignment], submission_attempts:[SubmissionAttempt],
   ai_review_job:AIReviewJob|null
 }
@@ -283,7 +284,7 @@ Flutter-хранилище v3 сохраняет основание. Стары�
 ```text
 AIReviewJob = {
   id, attempt_id, status:pending|running|succeeded|failed|superseded,
-  provider:"stub", attempts, max_attempts, next_attempt_at,
+  provider:"stub"|"ai_service", attempts, max_attempts, next_attempt_at,
   lease_expires_at:datetime|null, last_error_code:string|null,
   created_at, finished_at:datetime|null, retry_allowed:bool
 }
@@ -296,7 +297,9 @@ AIReviewJob = {
 
 Обработчик в процессе API делает паузу 1 с между проходами. Захват действует 30 с, максимум три попытки в одном цикле; задержка после ошибки — `min(2^attempts, 60)` с. Истёкший захват можно восстановить после перезапуска, но его прежний обработчик уже не может применить ответ. Данные адаптера берутся только из отчёта и фото-связей этой попытки. Во время вызова адаптера транзакция закрыта. При записи сервер повторно проверяет маркер/срок, последнюю попытку, назначение и `completed`; устаревшая задача становится `superseded` без новой оценки, смены статуса или уведомления о приёмке.
 
-Результат проверяет допустимый вердикт `passed|needs_attention|needs_rework`, конечную оценку 1–5, непустое объяснение до 2000 символов и корректный флаг текущей заглушки; модель не может задать оценку мастера. Ошибки сохраняются только фиксированными кодами (`invalid_result`, `provider_error`, `attempt_limit`), без исходного исключения/текста отчёта/ключей. Сбой не теряет сдачу; окончательный `failed` показывает мастеру возможность повтора. Принятие без результата не добавлено. Отдельного сетевого таймаута провайдера/heartbeat пока нет: текущий адаптер локальный, будущий провайдер требует ограниченного I/O и согласованного времени захвата.
+Результат проверяет допустимый вердикт `passed|needs_attention|needs_rework`, конечную оценку 1–5 либо неизвестную `null`, непустое объяснение до 2000 символов и фактическое происхождение; модель не может задать оценку мастера. Для `stub` сохраняется прежний обязательный численный балл и `is_stub=true`. Для `ai_service` согласованные `source_verdict`, `llm_used`, `is_recommendation=true`, `bridge_version=1|2` и `input_sha256` проверяются вместе с основной рекомендацией; `needs_master_review` даёт `needs_attention` и `score=null`. v2 требует ограниченный `photo_check` по связанным ID: выбранная пара, дубли внутри попытки, неизвестные время съёмки/ремонт и непроверенная общая история. Без vision v2 всегда требует мастера и не создаёт численную оценку. Неизвестное не становится нулём или оценкой мастера. Ошибки сохраняются только фиксированными кодами (`invalid_result`, `provider_error`, `attempt_limit`), без исходного исключения/текста отчёта/ключей. Сбой не теряет сдачу; окончательный `failed` показывает мастеру возможность повтора. Принятие без результата не добавлено.
+
+Опциональный `AI_REVIEW_MODE=queued_service` связывает новые задачи с отдельным endpoint существующего ИИ-модуля; `queued_stub`/`inline_stub` сохраняются. Миграция `0008_ai_attempt_input` допускает неизвестную оценку и добавляет внутренний nullable снимок контекста попытки, который не выдаётся в пользовательском API; старые данные остаются без выдуманного контекста. Фото-пакет не требует новой миграции. Адрес/токен настраиваются только на сервере, I/O ограничен общими 8 секундами при lease 30 секунд, без redirect/транспортных повторов. Контракт v2 передаёт связанные JPEG и включает ограниченное локальное CV; v1 остаётся текстовым. Весов нет — оборудование неизвестно; внешние LLM/vision не включаются, выбор Q01 сохраняется. Точный внутренний протокол, лимиты и границы — в [ai-attempt-bridge](ai-attempt-bridge.md).
 
 ## Реализовано: показатели и экспорт
 

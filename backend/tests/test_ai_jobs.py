@@ -121,8 +121,8 @@ def test_background_worker_lifecycle_completes_and_publishes_after_commit(job_cl
 def test_completion_job_failure_rolls_back_report_history_and_expenses(job_client, monkeypatch):
     id_ = new_order(job_client)
     start(job_client, id_)
-    def broken_enqueue(db, attempt):
-        jobs.enqueue_job(db, attempt)
+    def broken_enqueue(db, attempt, provider="stub"):
+        jobs.enqueue_job(db, attempt, provider)
         raise RuntimeError("synthetic transaction failure")
     monkeypatch.setattr(main_module, "enqueue_job", broken_enqueue)
     with pytest.raises(RuntimeError, match="synthetic transaction failure"):

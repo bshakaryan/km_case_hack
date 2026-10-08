@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 BACKEND = Path(__file__).resolve().parents[1]
-REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push", "0004_order_history", "0005_ai_review_jobs", "0006_order_versions", "0007_assignment_participants")
+REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push", "0004_order_history", "0005_ai_review_jobs", "0006_order_versions", "0007_assignment_participants", "0008_ai_attempt_input")
 
 
 class SchemaCompatibilityError(RuntimeError):
@@ -87,6 +87,9 @@ def expected_schema(revision):
     if revision in REVISIONS[7:]:
         participants = ScriptDirectory.from_config(alembic_config()).get_revision("0007_assignment_participants").module
         participants.schema(metadata)
+    if revision in REVISIONS[8:]:
+        ai_input = ScriptDirectory.from_config(alembic_config()).get_revision("0008_ai_attempt_input").module
+        ai_input.schema(metadata)
     return metadata
 
 

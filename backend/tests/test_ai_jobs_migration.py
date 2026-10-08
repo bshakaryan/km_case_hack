@@ -39,7 +39,7 @@ def check_job_migration(engine):
     assert without_versions({name: rows for name, rows in after.items() if name != "ai_review_jobs"}) == before
     assert after["ai_review_jobs"] == []
     with engine.connect() as connection:
-        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0007_assignment_participants"
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0008_ai_attempt_input"
     upgrade_database(engine)
     assert dump(engine) == after
     with engine.connect() as connection:

@@ -133,7 +133,7 @@ def test_audit_uses_actual_isolated_sqlite_rows_and_preserves_known_gaps(baselin
     assert actual_linked_writeoffs == report["material_photo"]["linked_writeoffs"] == 0
     assert actual_attempts == report["table_counts"]["submission_attempts"] == 541
     assert len(actual_foreign_keys) == report["foreign_key_check_count"] == 0
-    assert revision == report["schema_revision"] == "0007_assignment_participants"
+    assert revision == report["schema_revision"] == "0008_ai_attempt_input"
     assert oldest.replace(tzinfo=timezone.utc).isoformat() == report["calendar"]["min_created_utc"]
     assert report["calendar"]["rolling_three_calendar_months_oldest_gap_seconds"] > 0
     # Missing history remains visible in a baseline; successful tool execution

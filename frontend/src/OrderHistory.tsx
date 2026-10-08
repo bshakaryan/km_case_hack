@@ -2,7 +2,16 @@ import { useState } from "react";
 import { formatDate, number } from "./model";
 import type { OrderDetail, RefItem, SubmissionAttempt } from "./model";
 import { Photo } from "./ui";
-import { AiJobStatus, showAiReview } from "./AiReviewJob";
+import {
+  AiJobStatus,
+  AiPhotoCheck,
+  aiReviewNote,
+  aiReviewScoreLabel,
+  aiReviewSource,
+  aiReviewTitle,
+  aiReviewVerdict,
+  showAiReview,
+} from "./AiReviewJob";
 import { AssignmentParticipants } from "./AssignmentParticipants";
 
 function AttemptPhotos({ photos }: { photos: SubmissionAttempt["photos"] }) {
@@ -185,30 +194,22 @@ export function OrderHistory({
                   {attempt.ai_review && showAiReview(attempt.ai_job) && (
                     <section className="history-assessment">
                       <h5>
-                        {attempt.ai_review.is_stub
-                          ? "Формальная проверка · демо"
-                          : "Проверка ИИ"}
+                        {aiReviewTitle(attempt.ai_review, attempt.ai_job)}
                       </h5>
                       <p>
-                        {(
-                          {
-                            passed: "Принято",
-                            needs_attention: "Принято с замечаниями",
-                            rework: "Требует доработки",
-                            needs_rework: "Требует доработки",
-                          } as Record<string, string>
-                        )[attempt.ai_review.verdict] ||
-                          "Нужна проверка мастером"}{" "}
-                        · предварительная оценка{" "}
-                        {number(attempt.ai_review.score, 1)} / 5
+                        {aiReviewVerdict(attempt.ai_review)} ·{" "}
+                        {aiReviewScoreLabel(attempt.ai_review.score)}
                       </p>
-                      <p>{attempt.ai_review.explanation}</p>
-                      {attempt.ai_review.is_stub && (
+                      {aiReviewSource(attempt.ai_review) && (
                         <p className="muted">
-                          Проверяется наличие фото; содержимое снимков не
-                          анализируется.
+                          {aiReviewSource(attempt.ai_review)}
                         </p>
                       )}
+                      <p>{attempt.ai_review.explanation}</p>
+                      <AiPhotoCheck check={attempt.ai_review.photo_check} />
+                      <p className="muted">
+                        {aiReviewNote(attempt.ai_review, attempt.ai_job)}
+                      </p>
                     </section>
                   )}
                   <h5>Решения мастера</h5>

@@ -1,7 +1,14 @@
-# Imports used by runtime-policy, data-source and external-LLM boundary tests.
-# Keep these pins aligned with ai_service/requirements.txt; no CV/model runtime.
+# Imports used by runtime-policy, data-source and attempt-bridge boundary tests.
+# Compatible with ai_service/requirements.txt; local CV tests do not download weights.
 httpx==0.28.1
+fastapi==0.115.12
 pydantic==2.11.3
 python-dotenv==1.0.1
 pytest==8.3.5
 SQLAlchemy==2.0.40
+Pillow==11.2.1
+numpy==2.2.6
+scipy==1.15.3
+PyWavelets==1.8.0
+ImageHash==4.3.2
+opencv-python-headless==4.11.0.86

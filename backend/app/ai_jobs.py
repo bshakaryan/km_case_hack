@@ -1,6 +1,8 @@
-"""Durable, fenced review jobs. The only configured provider is a local stub."""
+"""Durable review jobs with attempt, assignment, provider and lease fences."""
 from copy import deepcopy
+from collections import defaultdict
 from datetime import timedelta, timezone
+import hashlib
 from typing import Literal
 from uuid import uuid4
 
@@ -27,13 +29,35 @@ def begin_sqlite_write(db):
             connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
+class PhotoCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    status: Literal["checked", "unavailable", "no_after"]
+    method: Literal["local_cv"]
+    scope: Literal["submission_selected_pair"]
+    before_id: int | None = Field(gt=0)
+    after_id: int | None = Field(gt=0)
+    duplicate_before: bool | None
+    exact_duplicate_groups: list[list[int]] = Field(max_length=5)
+    equipment_status: Literal["different", "unknown"]
+    model_available: bool
+    capture_time_status: Literal["unknown"]
+    repair_status: Literal["unknown"]
+    history_status: Literal["not_checked"]
+
+
 class ReviewResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
     verdict: Literal["passed", "needs_attention", "needs_rework"]
-    score: float = Field(ge=1, le=5, allow_inf_nan=False)
+    score: float | None = Field(ge=1, le=5, allow_inf_nan=False)
     explanation: str = Field(min_length=1, max_length=2000)
-    is_stub: Literal[True]
+    is_stub: bool
     master_score: None = None
+    source_verdict: Literal["accepted", "accepted_with_remarks", "needs_rework", "needs_master_review"] | None = None
+    llm_used: bool | None = None
+    is_recommendation: Literal[True] | None = None
+    input_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    bridge_version: Literal[1, 2] | None = None
+    photo_check: PhotoCheck | None = None
 
 
 class FormalStub:
@@ -52,8 +76,10 @@ def job_dict(job, retry_allowed=False):
         "created_at": iso(job.created_at), "finished_at": iso(job.finished_at), "retry_allowed": retry_allowed}
 
 
-def enqueue_job(db, attempt):
-    job = AIReviewJob(attempt_id=attempt.id, status="pending", provider="stub", attempts=0,
+def enqueue_job(db, attempt, provider="stub"):
+    if provider not in {"stub", "ai_service"}:
+        raise ValueError("unknown_review_provider")
+    job = AIReviewJob(attempt_id=attempt.id, status="pending", provider=provider, attempts=0,
         max_attempts=3, next_attempt_at=utcnow(), created_at=utcnow())
     db.add(job)
     db.flush()
@@ -63,20 +89,81 @@ def enqueue_job(db, attempt):
 def review_snapshot(db, attempt):
     # Names and quantities come from the frozen report, and photos exclusively
     # from its links. Current order reports/media never enter the provider.
-    return {"attempt_id": attempt.id, "report": deepcopy(attempt.payload),
+    return {"attempt_id": attempt.id, "order_id": attempt.order_id, "ai_input": deepcopy(attempt.ai_input), "report": deepcopy(attempt.payload),
         "photos": [{"id": photo.id, "kind": photo.kind, "data": bytes(photo.data)}
             for photo in db.scalars(select(Photo).join(SubmissionPhoto, SubmissionPhoto.photo_id == Photo.id).where(SubmissionPhoto.attempt_id == attempt.id).order_by(Photo.id))]}
 
 
-def validate_result(result):
-    if not isinstance(result, dict) or type(result.get("is_stub")) is not bool or result["is_stub"] is not True:
+def validate_result(result, provider="stub"):
+    if not isinstance(result, dict) or type(result.get("is_stub")) is not bool:
         raise ValueError("invalid_result")
-    return ReviewResult.model_validate(result).model_dump()
+    value = ReviewResult.model_validate(result).model_dump(exclude_unset=True)
+    if provider == "stub":
+        if value["is_stub"] is not True or value["score"] is None or set(value) - {"verdict", "score", "explanation", "is_stub", "master_score"}:
+            raise ValueError("invalid_result")
+    elif provider == "ai_service":
+        mapping = {"accepted": "passed", "accepted_with_remarks": "needs_attention", "needs_rework": "needs_rework", "needs_master_review": "needs_attention"}
+        if (value.get("source_verdict") not in mapping or value["verdict"] != mapping[value["source_verdict"]]
+                or type(value.get("llm_used")) is not bool or value["is_stub"] == value["llm_used"]
+                or type(result.get("is_recommendation")) is not bool
+                or value.get("is_recommendation") is not True or not value.get("input_sha256")
+                or type(result.get("bridge_version")) is not int or value.get("bridge_version") not in {1, 2}
+                or (value["source_verdict"] == "needs_master_review") != (value["score"] is None)):
+            raise ValueError("invalid_result")
+        if value["bridge_version"] == 1:
+            if "photo_check" in value:
+                raise ValueError("invalid_result")
+        elif (value["source_verdict"] != "needs_master_review" or value["score"] is not None
+                or value["llm_used"] is not False or value["is_stub"] is not True
+                or value.get("photo_check") is None):
+            raise ValueError("invalid_result")
+    else:
+        raise ValueError("invalid_result")
+    return value
+
+
+def validate_photo_check(check, snapshot):
+    """Bind local CV claims to this exact immutable linked-photo set."""
+    photos = snapshot["photos"]
+    selected = {kind: max((photo["id"] for photo in photos if photo["kind"] == kind), default=None)
+        for kind in ("before", "after")}
+    if check["before_id"] != selected["before"] or check["after_id"] != selected["after"]:
+        raise ValueError("invalid_result")
+    status = check["status"]
+    if status == "no_after" and selected["after"] is not None:
+        raise ValueError("invalid_result")
+    if status != "checked":
+        if (check["duplicate_before"] is not None or check["equipment_status"] != "unknown"
+                or check["model_available"] is not False or check["exact_duplicate_groups"] != []):
+            raise ValueError("invalid_result")
+        return
+    if selected["after"] is None:
+        raise ValueError("invalid_result")
+    if selected["before"] is None:
+        if (check["duplicate_before"] is not None or check["equipment_status"] != "unknown"
+                or check["model_available"] is not False):
+            raise ValueError("invalid_result")
+    elif type(check["duplicate_before"]) is not bool:
+        raise ValueError("invalid_result")
+    if check["equipment_status"] == "different" and check["model_available"] is not True:
+        raise ValueError("invalid_result")
+    chosen = {photo["id"]: photo["data"] for photo in photos}
+    if (selected["before"] is not None and chosen[selected["before"]] == chosen[selected["after"]]
+            and check["duplicate_before"] is not True):
+        raise ValueError("invalid_result")
+    hashes = defaultdict(list)
+    for photo in photos:
+        hashes[hashlib.sha256(photo["data"]).hexdigest()].append(photo["id"])
+    expected = sorted(sorted(ids) for ids in hashes.values() if len(ids) > 1)
+    groups = check["exact_duplicate_groups"]
+    if (any(len(group) < 2 or len(group) > 10 or any(type(id_) is not int or id_ <= 0 for id_ in group)
+            for group in groups) or groups != expected):
+        raise ValueError("invalid_result")
 
 
 def apply_success(db, order, attempt, job, result):
     from .services import audit, notify, participant_ids
-    assessment = AIAssessment(order_id=order.id, **result)
+    assessment = AIAssessment(order_id=order.id, **{key: result[key] for key in ("verdict", "score", "explanation", "is_stub", "master_score") if key in result})
     db.add(assessment)
     db.flush()
     attempt.ai_review = deepcopy(result)
@@ -84,10 +171,10 @@ def apply_success(db, order, attempt, job, result):
     order.ai_review = deepcopy(result)
     order.status = "ai_review"
     order.version += 1
-    audit(db, order, "ai_review", attempt.author_id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
+    audit(db, order, "ai_review", attempt.author_id, "completed", "Автоматическая рекомендация по сдаче. Ожидается решение мастера.")
     notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
     notify(db, participant_ids(db, order), "Статус наряда изменён", f"{order.number}: completed → ai_review", "status", order.id)
-    db.add(IntegrationLog(adapter="ai_stub", operation="review", payload={"order_id": order.id, "attempt_id": attempt.id, "is_stub": True}))
+    db.add(IntegrationLog(adapter="ai_stub" if job.provider == "stub" else "ai_service", operation="review", payload={"order_id": order.id, "attempt_id": attempt.id, "is_stub": result["is_stub"]}))
     job.status = "succeeded"
     job.finished_at = utcnow()
     job.last_error_code = None
@@ -162,7 +249,7 @@ def claim_job(sessions, job_id=None, retired=None):
             if changed is not None:
                 order.version += 1
                 attempt = db.get(SubmissionAttempt, changed)
-                claim = {"job_id": candidate, "token": token, "attempt_id": changed, "order_id": attempt.order_id,
+                claim = {"job_id": candidate, "token": token, "attempt_id": changed, "order_id": attempt.order_id, "provider": db.get(AIReviewJob, candidate).provider,
                     "snapshot": review_snapshot(db, attempt)}
                 db.commit()
                 return claim
@@ -173,7 +260,13 @@ def claim_job(sessions, job_id=None, retired=None):
 def finish_job(sessions, claim, result=None, error_code=None):
     if error_code is None:
         try:
-            result = validate_result(result)
+            result = validate_result(result, claim.get("provider", "stub"))
+            if claim.get("provider") == "ai_service":
+                from .ai_adapter import envelope
+                if result["input_sha256"] != envelope(claim["snapshot"], result["bridge_version"])["input_sha256"]:
+                    raise ValueError("invalid_result")
+                if result["bridge_version"] == 2:
+                    validate_photo_check(result["photo_check"], claim["snapshot"])
         except (ValidationError, ValueError, TypeError):
             error_code = "invalid_result"
     with sessions() as db:
@@ -181,7 +274,7 @@ def finish_job(sessions, claim, result=None, error_code=None):
         # All paths which mutate both order/job take the order lock first.
         order = db.scalar(select(Order).where(Order.id == claim["order_id"]).with_for_update())
         job = db.scalar(select(AIReviewJob).where(AIReviewJob.id == claim["job_id"]).with_for_update())
-        if job is None or job.status != "running" or job.lease_token != claim["token"] or not job.lease_expires_at or aware(job.lease_expires_at) <= utcnow():
+        if job is None or job.status != "running" or job.provider != claim.get("provider", "stub") or job.lease_token != claim["token"] or not job.lease_expires_at or aware(job.lease_expires_at) <= utcnow():
             return False
         attempt = db.get(SubmissionAttempt, job.attempt_id)
         if not applicable(db, order, attempt):
@@ -206,15 +299,18 @@ def finish_job(sessions, claim, result=None, error_code=None):
         return True
 
 
-def dispatch_ai_jobs(sessions, provider=None, limit=10, publish=None):
-    provider = provider if provider is not None else FormalStub()
+def dispatch_ai_jobs(sessions, provider=None, limit=10, publish=None, providers=None):
+    providers = providers if providers is not None else {"stub": FormalStub()}
     changed = []
     for _ in range(limit):
         claim = claim_job(sessions, retired=changed)
         if claim is None:
             break
         try:
-            result = validate_result(provider.review(claim["snapshot"]))
+            bound_provider = provider if provider is not None else providers.get(claim["provider"])
+            if bound_provider is None:
+                raise RuntimeError("provider_unavailable")
+            result = validate_result(bound_provider.review(claim["snapshot"]), claim["provider"])
         except (ValidationError, ValueError, TypeError):
             result, error = None, "invalid_result"
         except Exception:
