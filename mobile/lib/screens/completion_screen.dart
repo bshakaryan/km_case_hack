@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as imaging;
@@ -5,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../data/api.dart';
 import '../data/app_controller.dart';
+import '../data/form_draft.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
 import '../widgets/order_photo.dart';
@@ -22,7 +26,8 @@ class CompletionScreen extends StatefulWidget {
   State<CompletionScreen> createState() => _CompletionScreenState();
 }
 
-class _CompletionScreenState extends State<CompletionScreen> {
+class _CompletionScreenState extends State<CompletionScreen>
+    with WidgetsBindingObserver {
   final _form = GlobalKey<FormState>();
   final _work = TextEditingController();
   final _comment = TextEditingController();
@@ -31,6 +36,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
   List<Json> _serverPhotos = [];
   int? _faultId;
   bool _sending = false;
+  bool _leaving = false;
   bool _picking = false;
   bool _checking = false;
   bool _dirty = false;
@@ -39,10 +45,319 @@ class _CompletionScreenState extends State<CompletionScreen> {
   bool _done = false;
   String? _error;
   late OrderWriteBasis _basis;
+  FormDraftSession? _draftSession;
+  late final NaryadApi _draftApi;
+  late final int? _draftOwnerId;
+  bool _draftLoading = true;
+  bool _draftSaving = false;
+  bool _draftSaved = false;
+  bool _draftClosed = false;
+  bool _acknowledgedMutation = false;
+  bool _autosaveRunning = false;
+  bool _autosaveRequested = false;
+  bool _disposing = false;
+  int _draftRevision = 0;
+  String? _draftError;
+  String _draftState = FormDraftState.editing;
+  String? _operation;
+
+  Json _draftData() => {
+    'form_schema': 1,
+    'work': _work.text,
+    'comment': _comment.text,
+    'fault_id': _faultId,
+    'dirty': _dirty,
+    'uncertain': _uncertain,
+    'stale': _stale,
+    'done': _done,
+    'error': _error,
+    'operation': _operation,
+    'materials': _materials
+        .map(
+          (line) => {'material': line.material, 'quantity': line.quantity.text},
+        )
+        .toList(),
+    'photos': _photos
+        .map(
+          (photo) => {
+            'bytes': photo.encodedBytes,
+            'filename': photo.filename,
+            'uploading': photo.uploading,
+            'uploaded': photo.uploaded,
+            'queued': photo.queued,
+            'uncertain': photo.uncertain,
+            'error': photo.error,
+          },
+        )
+        .toList(),
+  };
+
+  void _ensureDraftContext() {
+    if (!identical(widget.controller.api, _draftApi) ||
+        widget.controller.user?.id != _draftOwnerId) {
+      throw const ApiException(
+        'Контекст формы изменился. Черновик принадлежит исходному аккаунту и серверу.',
+        401,
+      );
+    }
+  }
+
+  void _validateDraftData(Json data) {
+    final requiredKeys = {
+      'form_schema',
+      'work',
+      'comment',
+      'fault_id',
+      'dirty',
+      'uncertain',
+      'stale',
+      'done',
+      'error',
+      'operation',
+      'materials',
+      'photos',
+    };
+    if (!data.keys.toSet().containsAll(requiredKeys) ||
+        data['form_schema'] != 1 ||
+        data['work'] is! String ||
+        data['comment'] is! String ||
+        (data['fault_id'] != null && data['fault_id'] is! int) ||
+        [
+          'dirty',
+          'uncertain',
+          'stale',
+          'done',
+        ].any((key) => data[key] is! bool) ||
+        (data['error'] != null && data['error'] is! String) ||
+        !const {null, 'photo', 'complete'}.contains(data['operation']) ||
+        data['materials'] is! List ||
+        data['photos'] is! List ||
+        (data['photos'] as List).length > 5) {
+      throw const FormatException(
+        'Сохранённая форма повреждена. Исходный черновик оставлен без изменений.',
+      );
+    }
+    for (final row in data['materials'] as List) {
+      if (row is! Map ||
+          row['quantity'] is! String ||
+          row['material'] is! Map ||
+          row['material']['id'] is! int ||
+          row['material']['name'] is! String ||
+          row['material']['unit'] is! String) {
+        throw const FormatException('Строка материала в черновике повреждена.');
+      }
+    }
+    for (final row in data['photos'] as List) {
+      if (row is! Map ||
+          row['bytes'] is! String ||
+          row['filename'] is! String ||
+          [
+            'uploading',
+            'uploaded',
+            'queued',
+            'uncertain',
+          ].any((key) => row[key] is! bool) ||
+          !row.containsKey('error') ||
+          (row['error'] != null && row['error'] is! String)) {
+        throw const FormatException('Снимок в черновике повреждён.');
+      }
+    }
+  }
+
+  Future<void> _restoreDraft() async {
+    try {
+      final session = await widget.controller.openFormDraft(
+        FormDraftKind.completion,
+        orderId: widget.order.id,
+      );
+      final draft = await session.read();
+      _ensureDraftContext();
+      if (!mounted) return;
+      if (draft != null) {
+        final data = draft.data;
+        _validateDraftData(data);
+        final restoredPhotos = (data['photos'] as List).map((row) {
+          final bytes = base64Decode(row['bytes'] as String);
+          if (bytes.length > 10 * 1024 * 1024 ||
+              imaging.decodeImage(bytes) == null) {
+            throw const FormatException(
+              'Снимок в черновике невозможно прочитать.',
+            );
+          }
+          final photo = _PendingPhoto(bytes, row['filename'] as String);
+          photo.uploaded = row['uploaded'] as bool;
+          photo.queued = row['queued'] as bool;
+          photo.uncertain =
+              row['uncertain'] == true || row['uploading'] == true;
+          photo.error = row['error'] as String?;
+          return photo;
+        }).toList();
+        final restoredMaterials = (data['materials'] as List).map((row) {
+          final line = _MaterialLine(
+            Map<String, dynamic>.from(row['material'] as Map),
+          );
+          line.quantity.text = row['quantity'] as String;
+          return line;
+        }).toList();
+        _work.text = data['work'] as String? ?? '';
+        _comment.text = data['comment'] as String? ?? '';
+        _faultId = data['fault_id'] as int?;
+        _dirty = data['dirty'] == true;
+        _uncertain =
+            data['uncertain'] == true ||
+            draft.state != FormDraftState.editing ||
+            restoredPhotos.any((photo) => photo.uncertain);
+        _stale = data['stale'] == true;
+        _done = data['done'] == true;
+        _operation = data['operation'] as String?;
+        _error = data['error'] as String?;
+        _draftState = _uncertain ? FormDraftState.uncertain : draft.state;
+        // A restored draft never takes the newer order's basis.
+        _basis = draft.basis ?? const OrderWriteBasis();
+        if (_basis.previousCommandId == null &&
+            _basis.expectedVersion != widget.order.version) {
+          _stale = true;
+          _error = 'Наряд изменился после начала черновика. Ввод сохранён, но отправка заблокирована. Проверьте карточку и создайте новый отчёт после явного удаления старого черновика.';
+        }
+        for (final line in _materials) {
+          line.quantity.dispose();
+        }
+        _materials
+          ..clear()
+          ..addAll(restoredMaterials);
+        for (final line in _materials) {
+          line.quantity.addListener(_changed);
+        }
+        _photos
+          ..clear()
+          ..addAll(restoredPhotos);
+        if (_uncertain) _error = 'Предыдущая отправка прервалась. Отчёт или фото могли попасть на сервер либо в очередь. Черновик сохранён; проверьте карточку и очередь. Повторная отправка заблокирована.';
+        _draftSaved = true;
+      }
+      _draftSession = session;
+    } catch (error) {
+      if (mounted) _draftError = 'Не удалось открыть черновик: $error';
+    } finally {
+      if (mounted) setState(() => _draftLoading = false);
+    }
+  }
+
+  Future<bool> _saveDraft({
+    String? state,
+    bool acknowledgeSubmission = false,
+    bool updateUi = true,
+  }) async {
+    if (_draftClosed || _draftLoading) return false;
+    final session = _draftSession;
+    if (session == null) return false;
+    if (state != null) _draftState = state;
+    final revision = ++_draftRevision;
+    if (mounted && updateUi && !_disposing) {
+      setState(() {
+        _draftSaving = true;
+        _draftSaved = false;
+      });
+    }
+    try {
+      final draft = FormDraft(
+        kind: FormDraftKind.completion,
+        orderId: widget.order.id,
+        data: _draftData(),
+        basis:
+            _basis.expectedVersion == null && _basis.previousCommandId == null
+            ? null
+            : _basis,
+        state: _draftState,
+      );
+      if (acknowledgeSubmission) _acknowledgedMutation = true;
+      final acknowledged =
+          _acknowledgedMutation && _draftState == FormDraftState.editing;
+      await session.save(draft, acknowledgeSubmission: acknowledged);
+      if (acknowledged) _acknowledgedMutation = false;
+      if (mounted && updateUi && !_disposing && revision == _draftRevision) {
+        setState(() {
+          _draftSaving = false;
+          _draftSaved = !_autosaveRequested;
+          _draftError = null;
+        });
+      }
+      return true;
+    } catch (error) {
+      if (mounted && updateUi && !_disposing && revision == _draftRevision) {
+        setState(() {
+          _draftSaving = false;
+          _draftSaved = false;
+          _draftError = 'Черновик не сохранён: $error';
+        });
+      }
+      return false;
+    }
+  }
+
+  Future<void> _autosave() async {
+    _autosaveRunning = true;
+    try {
+      while (_autosaveRequested && mounted && !_disposing && !_draftClosed) {
+        _autosaveRequested = false;
+        await _saveDraft();
+      }
+    } finally {
+      _autosaveRunning = false;
+    }
+  }
+
+  void _edit(VoidCallback change) {
+    setState(change);
+    _changed();
+  }
+
+  Future<void> _deleteDraft() async {
+    if (_locked || _draftSession == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить черновик?'),
+        content: Text(
+          _uncertain ||
+                  _stale ||
+                  _photos.any((photo) => photo.uploaded || photo.uncertain)
+              ? 'Сначала проверьте карточку наряда и очередь отправки. Удаление черновика не отменяет отчёт, списание материалов, загруженные фотографии или команды в очереди. После удаления форма закроется.'
+              : 'Текст, материалы и неотправленные снимки будут удалены с устройства. Уже загруженные фотографии и команды в очереди сохранятся.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(
+              _uncertain || _stale
+                  ? 'Проверил, удалить черновик'
+                  : 'Удалить черновик',
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _draftSession!.delete();
+      _draftClosed = true;
+      await _exit();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _draftError = 'Не удалось удалить черновик: $error');
+      }
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _draftApi = widget.controller.api;
+    _draftOwnerId = widget.controller.user?.id;
     _basis = widget.controller.captureOrderBasis(widget.order);
     _serverPhotos = _maps(widget.order.data['photos'])
         .where((photo) => photo['kind'] == 'after')
@@ -56,17 +371,41 @@ class _CompletionScreenState extends State<CompletionScreen> {
     }
     _work.addListener(_changed);
     _comment.addListener(_changed);
+    unawaited(_restoreDraft());
   }
 
   void _changed() {
+    if (_draftLoading || _draftClosed || _disposing) return;
     if (!_dirty && mounted) {
       // System Back reads PopScope.canPop, so the first edit must rebuild it.
       setState(() => _dirty = true);
+    }
+    _autosaveRequested = true;
+    if (!_autosaveRunning) unawaited(_autosave());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      if (!_draftClosed && !_draftLoading && _draftSession != null) {
+        unawaited(_saveDraft());
+      }
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _disposing = true;
+    _autosaveRequested = false;
+    // Capture the latest edit while text controllers still exist. The frozen
+    // session prevents a late write from moving to another account or reviving
+    // a deleted draft. Navigation itself already awaits its final write.
+    if (!_draftClosed && !_draftLoading && _draftSession != null) {
+      unawaited(_saveDraft(updateUi: false));
+    }
     _work.dispose();
     _comment.dispose();
     for (final line in _materials) {
@@ -76,7 +415,14 @@ class _CompletionScreenState extends State<CompletionScreen> {
   }
 
   bool get _uploading => _photos.any((photo) => photo.uploading);
-  bool get _locked => _sending || _picking || _uploading || _checking;
+  bool get _locked =>
+      _draftLoading ||
+      _leaving ||
+      _draftSession == null ||
+      _sending ||
+      _picking ||
+      _uploading ||
+      _checking;
   bool get _hasAfter =>
       _serverPhotos.isNotEmpty ||
       _photos.any((photo) => photo.uploaded) ||
@@ -100,8 +446,10 @@ class _CompletionScreenState extends State<CompletionScreen> {
       ),
     );
     if (selected != null && mounted) {
-      setState(() {
-        _materials.add(_MaterialLine(selected));
+      _edit(() {
+        final line = _MaterialLine(selected);
+        line.quantity.addListener(_changed);
+        _materials.add(line);
         _dirty = true;
       });
     }
@@ -172,7 +520,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
           'after-${DateTime.now().microsecondsSinceEpoch}.jpg',
         );
         if (mounted) {
-          setState(() {
+          _edit(() {
             _photos.add(pending!);
             _dirty = true;
           });
@@ -189,7 +537,14 @@ class _CompletionScreenState extends State<CompletionScreen> {
   }
 
   Future<void> _upload(_PendingPhoto photo) async {
-    if (photo.uploading || photo.uploaded || photo.uncertain || _sending) {
+    if (photo.uploading ||
+        photo.uploaded ||
+        photo.uncertain ||
+        _sending ||
+        _uncertain ||
+        _stale ||
+        _draftLoading ||
+        _draftSession == null) {
       return;
     }
     setState(() {
@@ -197,6 +552,9 @@ class _CompletionScreenState extends State<CompletionScreen> {
       photo.error = null;
     });
     try {
+      _operation = 'photo';
+      if (!await _saveDraft(state: FormDraftState.submitting)) return;
+      _ensureDraftContext();
       final commandId = await widget.controller.uploadPhoto(
         widget.order.id,
         photo.bytes,
@@ -209,7 +567,15 @@ class _CompletionScreenState extends State<CompletionScreen> {
       setState(() {
         photo.uploaded = true;
         photo.queued = widget.controller.isOrderPending(widget.order.id);
+        photo.uploading = false;
       });
+      _operation = null;
+      if (!await _saveDraft(
+        state: FormDraftState.editing,
+        acknowledgeSubmission: true,
+      )) {
+        return;
+      }
       // A failed refresh must not turn an acknowledged upload into a retry.
       try {
         final fresh = await widget.controller.loadOrder(widget.order.id);
@@ -231,7 +597,16 @@ class _CompletionScreenState extends State<CompletionScreen> {
           photo.uncertain = error is ApiException
               ? error.requestMayHaveSucceeded
               : true;
+          _uncertain = photo.uncertain;
+          photo.uploading = false;
         });
+        _operation = photo.uncertain ? 'photo' : null;
+        await _saveDraft(
+          state: photo.uncertain
+              ? FormDraftState.uncertain
+              : FormDraftState.editing,
+          acknowledgeSubmission: !photo.uncertain,
+        );
       }
     } finally {
       if (mounted) setState(() => photo.uploading = false);
@@ -245,7 +620,9 @@ class _CompletionScreenState extends State<CompletionScreen> {
       _error = null;
     });
     try {
+      _ensureDraftContext();
       final fresh = await widget.controller.loadOrder(widget.order.id);
+      _ensureDraftContext();
       if (!mounted) return;
       setState(
         () =>
@@ -253,7 +630,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
                 .where((row) => row['kind'] == 'after')
                 .toList(),
       );
-      if (_uncertain) {
+      if (_uncertain && _operation == 'complete') {
         if ({
           'ai_review',
           'closed',
@@ -269,6 +646,10 @@ class _CompletionScreenState extends State<CompletionScreen> {
             () => _error = 'Сервер пока не подтвердил сдачу. Повторная отправка заблокирована, чтобы не списать материалы дважды. Проверьте состояние позже. Форма остаётся открытой.',
           );
         }
+      } else if (_uncertain) {
+        setState(
+          () => _error = 'Снимки на сервере обновлены. Проверьте карточку и очередь: повторная загрузка из этого черновика заблокирована.',
+        );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -310,6 +691,9 @@ class _CompletionScreenState extends State<CompletionScreen> {
       _error = null;
     });
     try {
+      _operation = 'complete';
+      if (!await _saveDraft(state: FormDraftState.submitting)) return;
+      _ensureDraftContext();
       final result = await widget.controller.complete(widget.order.id, {
         'work_done': _work.text.trim(),
         'fault_code_id': _faultId,
@@ -326,6 +710,28 @@ class _CompletionScreenState extends State<CompletionScreen> {
         'comment': _comment.text.trim(),
       }, basis: _basis);
       if (!mounted) return;
+      _operation = null;
+      _done = true;
+      // The controller durably owns the command before this form is removed.
+      if (!await _saveDraft(
+        state: FormDraftState.editing,
+        acknowledgeSubmission: true,
+      )) {
+        return;
+      }
+      try {
+        await _draftSession!.delete();
+        _draftClosed = true;
+      } catch (error) {
+        if (mounted) {
+          setState(
+            () => _draftError =
+                'Отчёт обработан, но не удалось удалить черновик: $error',
+          );
+        }
+        return;
+      }
+      if (!mounted) return;
       if (result.status != 'ai_review' && result.status != 'completed') {
         setState(() {
           _done = true;
@@ -337,7 +743,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
     } catch (error) {
       if (mounted) {
         setState(() {
-          _error = '$error\nЗаполненные поля остаются в этой форме.';
+          _error = '$error\nЗаполненные поля сохраняются в черновике.';
           _stale =
               error is ApiException &&
               const {
@@ -349,15 +755,63 @@ class _CompletionScreenState extends State<CompletionScreen> {
               ? error.requestMayHaveSucceeded
               : true;
         });
+        _operation = _uncertain ? 'complete' : null;
+        await _saveDraft(
+          state: _uncertain ? FormDraftState.uncertain : FormDraftState.editing,
+          acknowledgeSubmission: !_uncertain,
+        );
       }
     } finally {
       if (mounted) setState(() => _sending = false);
     }
   }
 
+  Future<void> _closeUnavailable() async {
+    final close = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Черновик недоступен'),
+        content: const Text(
+          'Сохранённый черновик не изменён. Можно закрыть форму и повторить открытие позже.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Остаться'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Закрыть форму'),
+          ),
+        ],
+      ),
+    );
+    if (close == true && mounted) {
+      setState(() => _draftClosed = true);
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) Navigator.pop(context);
+    }
+  }
+
   Future<void> _leave() async {
-    if (_locked) return;
+    if (_leaving ||
+        _draftLoading ||
+        _sending ||
+        _picking ||
+        _uploading ||
+        _checking) {
+      return;
+    }
+    if (_draftSession == null) {
+      await _closeUnavailable();
+      return;
+    }
     if (_done || (!_dirty && !_uncertain)) {
+      setState(() => _leaving = true);
+      if (!_draftClosed && !await _saveDraft()) {
+        if (mounted) setState(() => _leaving = false);
+        return;
+      }
       await _exit();
       return;
     }
@@ -367,8 +821,8 @@ class _CompletionScreenState extends State<CompletionScreen> {
         title: const Text('Закрыть отчёт?'),
         content: Text(
           _uncertain
-              ? 'Результат отправки ещё не подтверждён. Сначала проверьте карточку наряда перед новым отчётом, чтобы не списать материалы дважды. Текст этой формы после закрытия не сохранится.'
-              : 'Текст и материалы ещё не сохранены на устройстве и будут потеряны. Отправленные фотографии останутся у наряда, ожидающие отправки — в очереди на устройстве.',
+              ? 'Результат отправки ещё не подтверждён. Черновик останется на устройстве. Проверьте карточку наряда и очередь перед новым отчётом, чтобы не списать материалы дважды.'
+              : 'Черновик с текстом, материалами и снимками останется на устройстве. Загруженные фотографии сохранятся у наряда, ожидающие отправки — в очереди.',
         ),
         actions: [
           TextButton(
@@ -382,11 +836,21 @@ class _CompletionScreenState extends State<CompletionScreen> {
         ],
       ),
     );
-    if (leave == true && mounted) await _exit();
+    if (leave == true && mounted) {
+      setState(() => _leaving = true);
+      if (await _saveDraft()) {
+        await _exit();
+      } else if (mounted) {
+        setState(() => _leaving = false);
+      }
+    }
   }
 
   Future<void> _exit([bool? submitted]) async {
-    setState(() => _done = true);
+    setState(() {
+      _done = true;
+      _draftClosed = true;
+    });
     // PopScope must rebuild before a programmatic pop of a dirty form.
     await WidgetsBinding.instance.endOfFrame;
     if (mounted) Navigator.of(context).pop(submitted);
@@ -397,7 +861,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
     final faults = _maps(widget.controller.reference['fault_codes']);
     final hasPrevious = widget.order.data['completion'] is Map;
     return PopScope(
-      canPop: _done || (!_dirty && !_uncertain && !_locked),
+      canPop: _draftClosed,
       onPopInvokedWithResult: (didPop, result) {
         if (!didPop) _leave();
       },
@@ -407,185 +871,233 @@ class _CompletionScreenState extends State<CompletionScreen> {
           title: const Text('Отчёт о выполнении'),
           leading: IconButton(
             tooltip: 'Назад',
-            onPressed: _locked ? null : _leave,
+            onPressed:
+                _leaving ||
+                    _draftLoading ||
+                    _sending ||
+                    _picking ||
+                    _uploading ||
+                    _checking
+                ? null
+                : _leave,
             icon: const Icon(Icons.arrow_back),
           ),
         ),
-        body: Form(
-          key: _form,
-          child: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              Text(
-                widget.order.number,
-                style: const TextStyle(color: Color(0xFF64748B)),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                widget.order.title,
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(widget.order.equipmentName),
-              const SizedBox(height: 16),
-              _notice(
-                'После отправки отчёт поступит мастеру на приёмку. Фото загружаются сразу; текст и материалы — при отправке отчёта.',
-              ),
-              if (_error != null) ...[
-                const SizedBox(height: 12),
-                _notice(_error!, error: true),
-              ],
-              const SizedBox(height: 24),
-              _title('Выполненные работы'),
-              TextFormField(
-                controller: _work,
-                enabled: !_sending && !_done && !_uncertain,
-                minLines: 4,
-                maxLines: 9,
-                maxLength: 5000,
-                decoration: const InputDecoration(
-                  labelText: 'Что сделано',
-                  hintText: 'Какие работы выполнены и как проверен результат',
-                ),
-                validator: (value) => (value?.trim().length ?? 0) < 10
-                    ? 'Опишите результат: не менее 10 символов'
-                    : null,
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<int>(
-                initialValue: faults.any((row) => row['id'] == _faultId)
-                    ? _faultId
-                    : null,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: 'Шифр неисправности',
-                ),
-                items: faults
-                    .map(
-                      (row) => DropdownMenuItem<int>(
-                        value: (row['id'] as num).toInt(),
+        body: _draftLoading
+            ? const Center(child: CircularProgressIndicator())
+            : Form(
+                key: _form,
+                child: ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    Text(
+                      widget.order.number,
+                      style: const TextStyle(color: Color(0xFF64748B)),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      widget.order.title,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(widget.order.equipmentName),
+                    const SizedBox(height: 16),
+                    _notice(
+                      'После отправки отчёт поступит мастеру на приёмку. Фото загружаются сразу; текст и материалы — при отправке отчёта.',
+                    ),
+                    if (_error != null) ...[
+                      const SizedBox(height: 12),
+                      _notice(_error!, error: true),
+                    ],
+                    const SizedBox(height: 12),
+                    Text(
+                      _draftSaving
+                          ? 'Сохранение черновика…'
+                          : _draftSaved
+                          ? 'Черновик сохранён на устройстве'
+                          : 'Черновик ещё не сохранён',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                    if (_draftError != null) ...[
+                      const SizedBox(height: 8),
+                      _notice(_draftError!, error: true),
+                      TextButton(
+                        onPressed: () => _draftSession == null
+                            ? _restoreDraft()
+                            : _saveDraft(),
+                        child: const Text('Повторить сохранение черновика'),
+                      ),
+                    ],
+                    const SizedBox(height: 24),
+                    _title('Выполненные работы'),
+                    TextFormField(
+                      controller: _work,
+                      enabled: !_locked && !_done && !_uncertain,
+                      minLines: 4,
+                      maxLines: 9,
+                      maxLength: 5000,
+                      decoration: const InputDecoration(
+                        labelText: 'Что сделано',
+                        hintText:
+                            'Какие работы выполнены и как проверен результат',
+                      ),
+                      validator: (value) => (value?.trim().length ?? 0) < 10
+                          ? 'Опишите результат: не менее 10 символов'
+                          : null,
+                    ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<int>(
+                      initialValue: faults.any((row) => row['id'] == _faultId)
+                          ? _faultId
+                          : null,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Шифр неисправности',
+                      ),
+                      items: faults
+                          .map(
+                            (row) => DropdownMenuItem<int>(
+                              value: (row['id'] as num).toInt(),
+                              child: Text(
+                                '${row['code']} · ${row['name']}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: _locked || _done || _uncertain
+                          ? null
+                          : (value) => _edit(() {
+                              _faultId = value;
+                              _dirty = true;
+                            }),
+                      validator: (value) =>
+                          value == null ? 'Выберите шифр неисправности' : null,
+                    ),
+                    if (faults.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
                         child: Text(
-                          '${row['code']} · ${row['name']}',
-                          overflow: TextOverflow.ellipsis,
+                          'Справочник не загружен. Вернитесь в карточку и обновите данные.',
+                          style: TextStyle(color: Color(0xFFB4232D)),
                         ),
                       ),
-                    )
-                    .toList(),
-                onChanged: _sending || _done || _uncertain
-                    ? null
-                    : (value) => setState(() {
-                        _faultId = value;
-                        _dirty = true;
-                      }),
-                validator: (value) =>
-                    value == null ? 'Выберите шифр неисправности' : null,
-              ),
-              if (faults.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    'Справочник не загружен. Вернитесь в карточку и обновите данные.',
-                    style: TextStyle(color: Color(0xFFB4232D)),
-                  ),
-                ),
-              const SizedBox(height: 24),
-              _title('Материалы и запчасти'),
-              if (hasPrevious) ...[
-                _notice(
-                  'Укажите только дополнительный расход при доработке. Материалы предыдущей сдачи уже списаны.',
-                ),
-                const SizedBox(height: 12),
-              ],
-              if (_materials.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(bottom: 12),
-                  child: Text(
-                    'Материалы не добавлены. Можно отправить отчёт без расхода.',
-                    style: TextStyle(color: Color(0xFF64748B)),
-                  ),
-                ),
-              ..._materials.map(_materialRow),
-              OutlinedButton.icon(
-                onPressed: _locked || _done || _uncertain ? null : _addMaterial,
-                icon: const Icon(Icons.add),
-                label: const Text('Найти и добавить материал'),
-              ),
-              const SizedBox(height: 24),
-              _title(
-                widget.order.workType == 'unplanned'
-                    ? 'Фото после ремонта · обязательно'
-                    : 'Фото после ремонта',
-              ),
-              if (_serverPhotos.isNotEmpty) ...[
-                const Text(
-                  'Уже на сервере',
-                  style: TextStyle(fontSize: 14, color: Color(0xFF64748B)),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: _serverPhotos
-                      .map(
-                        (photo) => SizedBox(
-                          width: 145,
-                          child: OrderPhoto(
-                            key: ValueKey(photo['id']),
-                            controller: widget.controller,
-                            photo: photo,
-                            height: 135,
-                          ),
+                    const SizedBox(height: 24),
+                    _title('Материалы и запчасти'),
+                    if (hasPrevious) ...[
+                      _notice(
+                        'Укажите только дополнительный расход при доработке. Материалы предыдущей сдачи уже списаны.',
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    if (_materials.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 12),
+                        child: Text(
+                          'Материалы не добавлены. Можно отправить отчёт без расхода.',
+                          style: TextStyle(color: Color(0xFF64748B)),
                         ),
-                      )
-                      .toList(),
+                      ),
+                    ..._materials.map(_materialRow),
+                    OutlinedButton.icon(
+                      onPressed: _locked || _done || _uncertain
+                          ? null
+                          : _addMaterial,
+                      icon: const Icon(Icons.add),
+                      label: const Text('Найти и добавить материал'),
+                    ),
+                    const SizedBox(height: 24),
+                    _title(
+                      widget.order.workType == 'unplanned'
+                          ? 'Фото после ремонта · обязательно'
+                          : 'Фото после ремонта',
+                    ),
+                    if (_serverPhotos.isNotEmpty) ...[
+                      const Text(
+                        'Уже на сервере',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: _serverPhotos
+                            .map(
+                              (photo) => SizedBox(
+                                width: 145,
+                                child: OrderPhoto(
+                                  key: ValueKey(photo['id']),
+                                  controller: widget.controller,
+                                  photo: photo,
+                                  height: 135,
+                                ),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    ..._photos.map(_photoRow),
+                    OutlinedButton.icon(
+                      onPressed: _locked || _done || _uncertain
+                          ? null
+                          : _pickPhoto,
+                      icon: const Icon(Icons.add_a_photo_outlined),
+                      label: Text(
+                        _picking ? 'Подготовка снимка…' : 'Добавить фото',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'До 5 снимков «после» на наряд. Фото сжимаются перед отправкой.',
+                      style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+                    ),
+                    if (_photos.any((photo) => photo.uncertain))
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: OutlinedButton.icon(
+                          onPressed: _locked ? null : _checkServer,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Проверить фотографии на сервере'),
+                        ),
+                      ),
+                    const SizedBox(height: 24),
+                    _title('Комментарий'),
+                    TextFormField(
+                      controller: _comment,
+                      enabled: !_locked && !_done && !_uncertain,
+                      minLines: 2,
+                      maxLines: 5,
+                      maxLength: 3000,
+                      decoration: const InputDecoration(
+                        labelText: 'Дополнительные сведения',
+                        hintText:
+                            'Например, что проверить при следующем осмотре',
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Черновик с текстом, материалами и снимками сохраняется на устройстве. Отправленный без связи отчёт хранится отдельно в очереди и ожидает синхронизации.',
+                      style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton(
+                      onPressed: _locked ? null : _deleteDraft,
+                      child: const Text('Удалить черновик'),
+                    ),
+                    const SizedBox(height: 20),
+                  ],
                 ),
-                const SizedBox(height: 12),
-              ],
-              ..._photos.map(_photoRow),
-              OutlinedButton.icon(
-                onPressed: _locked || _done || _uncertain ? null : _pickPhoto,
-                icon: const Icon(Icons.add_a_photo_outlined),
-                label: Text(_picking ? 'Подготовка снимка…' : 'Добавить фото'),
               ),
-              const SizedBox(height: 8),
-              const Text(
-                'До 5 снимков «после» на наряд. Фото сжимаются перед отправкой.',
-                style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
-              ),
-              if (_photos.any((photo) => photo.uncertain))
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: OutlinedButton.icon(
-                    onPressed: _locked ? null : _checkServer,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Проверить фотографии на сервере'),
-                  ),
-                ),
-              const SizedBox(height: 24),
-              _title('Комментарий'),
-              TextFormField(
-                controller: _comment,
-                enabled: !_sending && !_done && !_uncertain,
-                minLines: 2,
-                maxLines: 5,
-                maxLength: 3000,
-                decoration: const InputDecoration(
-                  labelText: 'Дополнительные сведения',
-                  hintText: 'Например, что проверить при следующем осмотре',
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'До отправки текст хранится только на этом экране. Отправленный без связи отчёт сохраняется на устройстве и ожидает синхронизации.',
-                style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
-              ),
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
         bottomNavigationBar: SafeArea(
           child: Container(
             padding: const EdgeInsets.all(16),
@@ -683,7 +1195,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
               tooltip: 'Убрать материал',
               onPressed: _locked || _done || _uncertain
                   ? null
-                  : () => setState(() {
+                  : () => _edit(() {
                       _materials.remove(line);
                       _dirty = true;
                     }),
@@ -694,13 +1206,13 @@ class _CompletionScreenState extends State<CompletionScreen> {
         const SizedBox(height: 8),
         TextFormField(
           controller: line.quantity,
-          enabled: !_sending && !_done && !_uncertain,
+          enabled: !_locked && !_done && !_uncertain,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           decoration: InputDecoration(
             labelText: 'Количество',
             suffixText: line.material['unit'].toString(),
           ),
-          onChanged: (_) => _dirty = true,
+
           validator: (value) {
             final quantity = double.tryParse(
               (value ?? '').trim().replaceAll(',', '.'),
@@ -803,7 +1315,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
               TextButton(
                 onPressed: _locked
                     ? null
-                    : () => setState(() => _photos.remove(photo)),
+                    : () => _edit(() => _photos.remove(photo)),
                 child: Text(
                   photo.uncertain ? 'Убрать из очереди' : 'Убрать снимок',
                 ),
@@ -822,8 +1334,9 @@ class _MaterialLine {
 }
 
 class _PendingPhoto {
-  _PendingPhoto(this.bytes, this.filename);
+  _PendingPhoto(this.bytes, this.filename) : encodedBytes = base64Encode(bytes);
   final Uint8List bytes;
+  final String encodedBytes;
   final String filename;
   bool uploading = false;
   bool uploaded = false;

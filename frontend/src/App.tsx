@@ -997,9 +997,7 @@ export default function App() {
                           <span>
                             {employee.current_order || "Нет текущей работы"}
                           </span>
-                          <small>
-                            Ожидают начала: {employee.queue_count}
-                          </small>
+                          <small>Ожидают начала: {employee.queue_count}</small>
                         </div>
                         <div className="team-actions">
                           <button
@@ -1077,6 +1075,8 @@ export default function App() {
       </div>
       {create && (
         <CreateOrder
+          key={String(user.id)}
+          user={user}
           reference={reference}
           employees={employees}
           initialAssigneeId={createContext.assigneeId}
@@ -1092,6 +1092,7 @@ export default function App() {
       )}
       {selected !== null && (
         <OrderDialog
+          key={`${user.id}:${selected}`}
           id={selected}
           reference={reference}
           user={user}

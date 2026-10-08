@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { OrderHistory } from "./OrderHistory";
+import { draftFieldSetter, FormDraftNotice, useFormDraft } from "./FormDraft";
+import {
+  recoverPhase,
+  recoverPhotos,
+  validateSavedDraft,
+} from "./draft-storage";
+import type { SavedPhoto } from "./draft-storage";
 import {
   advancePhotoFormVersion,
   isStaleOrderForm,
@@ -72,6 +79,7 @@ import {
   orderWrite,
   priorityNames,
   statusNames,
+  token,
 } from "./model";
 import type {
   Employee,
@@ -742,12 +750,104 @@ function OrderCard({
 const defaultDeadline = () =>
   new Date(Date.now() + 5 * 3600000 + 2 * 3600000).toISOString().slice(0, 16);
 
-type DraftPhoto = {
-  id: number;
-  file: File;
-  state: "queued" | "uploading" | "uploaded" | "failed" | "uncertain";
-  error?: string;
+type DraftPhoto = SavedPhoto;
+type CreateFormFields = {
+  title: string;
+  description: string;
+  work_type: string;
+  area_id: string;
+  equipment_id: string;
+  assignee_id: string;
+  brigade_id: string;
+  priority: string;
+  deadline: string;
+  normal_hours: string;
+  comment: string;
 };
+type CreateFormDraft = {
+  form: CreateFormFields;
+  step: number;
+  assignment: string;
+  created: OrderDetail | null;
+  phase: "editing" | "submitting" | "unknown" | "confirmed";
+  photos: DraftPhoto[];
+  creationPhotoConflict: boolean;
+};
+type CompletionFormDraft = {
+  complete: { work_done: string; fault_code_id: string; comment: string };
+  materials: { material_id: string; quantity: string }[];
+  baseline: number | null;
+  phase: "editing" | "submitting" | "unknown" | "confirmed";
+  photos: DraftPhoto[];
+};
+export function recoverCreateDraft(stored: CreateFormDraft) {
+  validateSavedDraft(stored);
+  const fields = [
+    "title",
+    "description",
+    "work_type",
+    "area_id",
+    "equipment_id",
+    "assignee_id",
+    "brigade_id",
+    "priority",
+    "deadline",
+    "normal_hours",
+    "comment",
+  ];
+  if (
+    !stored.form ||
+    fields.some(
+      (key) =>
+        typeof (stored.form as Record<string, unknown>)[key] !== "string",
+    ) ||
+    ![1, 2].includes(stored.step) ||
+    !["employee", "brigade"].includes(stored.assignment) ||
+    typeof stored.creationPhotoConflict !== "boolean" ||
+    (stored.created !== null &&
+      (!stored.created ||
+        !Number.isSafeInteger(stored.created.version) ||
+        stored.created.version < 1 ||
+        !stored.created.id ||
+        typeof stored.created.number !== "string")) ||
+    (stored.phase === "confirmed" && !stored.created)
+  )
+    throw new Error(
+      "Поля сохранённого черновика выдачи повреждены. Сохранённые данные не перезаписаны.",
+    );
+  return {
+    ...stored,
+    phase: recoverPhase(stored.phase),
+    photos: recoverPhotos(stored.photos),
+  };
+}
+export function recoverCompletionDraft(stored: CompletionFormDraft) {
+  validateSavedDraft(stored);
+  if (
+    !stored.complete ||
+    ["work_done", "fault_code_id", "comment"].some(
+      (key) =>
+        typeof (stored.complete as Record<string, unknown>)[key] !== "string",
+    ) ||
+    !Array.isArray(stored.materials) ||
+    stored.materials.some(
+      (item) =>
+        !item ||
+        typeof item.material_id !== "string" ||
+        typeof item.quantity !== "string",
+    ) ||
+    (stored.baseline !== null &&
+      (!Number.isSafeInteger(stored.baseline) || stored.baseline < 1))
+  )
+    throw new Error(
+      "Поля сохранённого отчёта повреждены. Сохранённые данные не перезаписаны.",
+    );
+  return {
+    ...stored,
+    phase: recoverPhase(stored.phase),
+    photos: recoverPhotos(stored.photos),
+  };
+}
 const uploadLabels: Record<DraftPhoto["state"], string> = {
   queued: "Ожидает отправки",
   uploading: "Сжатие и отправка…",
@@ -799,6 +899,7 @@ export function CreateOrder({
   onCreated,
   initialAssigneeId,
   initialEquipmentId,
+  user,
 }: {
   reference: Reference;
   employees: Employee[];
@@ -806,18 +907,15 @@ export function CreateOrder({
   onCreated: (order: OrderDetail) => void;
   initialAssigneeId?: Id;
   initialEquipmentId?: Id;
+  user: User;
 }) {
-  const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [unknownCreate, setUnknownCreate] = useState(false);
-  const [creationPhotoConflict, setCreationPhotoConflict] = useState(false);
-  const [created, setCreated] = useState<OrderDetail | null>(null);
-  const [photos, setPhotos] = useState<DraftPhoto[]>([]);
   const nextPhotoId = useRef(0);
   const requestLock = useRef(false);
-  const [assignment, setAssignment] = useState("employee");
-  const [form, setForm] = useState(() => {
+  const sessionToken = useRef(token());
+  const sessionValid = () => token() === sessionToken.current;
+  const [initialForm] = useState(() => {
     const equipment = r.equipment.find(
       (item) => String(item.id) === String(initialEquipmentId),
     );
@@ -836,6 +934,33 @@ export function CreateOrder({
       comment: "",
     };
   });
+  const draft = useFormDraft<CreateFormDraft>(
+    {
+      api: new URL("/api/", location.href).href,
+      owner: String(user.id),
+      form: "create",
+      order: "new",
+    },
+    {
+      form: initialForm,
+      step: 1,
+      assignment: "employee",
+      created: null,
+      phase: "editing",
+      photos: [],
+      creationPhotoConflict: false,
+    },
+    recoverCreateDraft,
+  );
+  const { step, form, assignment, created, photos, creationPhotoConflict } =
+    draft.data;
+  const unknownCreate =
+    draft.data.phase === "unknown" || draft.data.phase === "submitting";
+  const setStep = draftFieldSetter(draft.change, "step");
+  const setForm = draftFieldSetter(draft.change, "form");
+  const setAssignment = draftFieldSetter(draft.change, "assignment");
+  const setPhotos = draftFieldSetter(draft.change, "photos");
+  const draftBlocked = !draft.ready || !!draft.error;
   const selectedEmployee = employees.find(
     (person) => String(person.id) === form.assignee_id,
   );
@@ -846,23 +971,22 @@ export function CreateOrder({
       ...(key === "area_id" ? { equipment_id: "" } : {}),
     }));
   const close = () => {
-    if (requestLock.current) return;
+    if (requestLock.current || busy) return;
     if (created) {
       onCreated(created);
       return;
     }
     if (
-      !unknownCreate &&
-      (form.title || form.description || photos.length) &&
+      (draft.pending || draft.error) &&
       !window.confirm(
-        "Закрыть форму? Несохранённый текст и выбранные фото будут потеряны.",
+        "Черновик ещё не сохранён. Закрытие сейчас может потерять последние изменения. Закрыть форму?",
       )
     )
       return;
     onClose();
   };
-  function addPhotos(files: FileList | null) {
-    if (!files || busy || created) return;
+  async function addPhotos(files: FileList | null) {
+    if (!files || busy || created || draftBlocked) return;
     const incoming = Array.from(files);
     if (photos.length + incoming.length > 5) {
       setError("Можно выбрать не более пяти фотографий до начала работ.");
@@ -878,32 +1002,47 @@ export function CreateOrder({
       setError("Допустимы JPEG, PNG или WebP, каждый файл не более 10 МБ.");
       return;
     }
-    const additions = incoming.map((file) => ({
-      id: ++nextPhotoId.current,
-      file,
-      state: "queued" as const,
-    }));
-    setPhotos((current) => [...current, ...additions]);
-    setError("");
+    setBusy(true);
+    try {
+      const additions = await Promise.all(
+        incoming.map(async (file) => ({
+          id: Math.max(++nextPhotoId.current, Date.now() + nextPhotoId.current),
+          file: await compressedPhoto(file),
+          kind: "before" as const,
+          state: "queued" as const,
+        })),
+      );
+      if (!sessionValid()) return;
+      await draft.write((current) => ({
+        ...current,
+        photos: [...current.photos, ...additions],
+      }));
+      setError("");
+    } catch (failure) {
+      if (sessionValid()) setError((failure as Error).message);
+    } finally {
+      if (sessionValid()) setBusy(false);
+    }
   }
   async function sendPhotos(initialOrder: OrderDetail) {
     let order = initialOrder;
     for (const photo of photos.filter(
       (item) => item.state === "queued" || item.state === "failed",
     )) {
-      const updatePhoto = (changes: Partial<DraftPhoto>) =>
-        setPhotos((current) =>
-          current.map((item) =>
-            item.id === photo.id ? { ...item, ...changes } : item,
-          ),
-        );
-      updatePhoto({ state: "uploading", error: undefined });
       let requestSent = false;
       try {
-        const file = await compressedPhoto(photo.file);
         const data = new FormData();
-        data.append("file", file);
+        data.append("file", photo.file);
         data.append("kind", "before");
+        await draft.write((current) => ({
+          ...current,
+          photos: current.photos.map((item) =>
+            item.id === photo.id
+              ? { ...item, state: "uploading", error: undefined }
+              : item,
+          ),
+        }));
+        if (!sessionValid()) return null;
         requestSent = true;
         const receipt = await orderWrite<{ order_version: number }>(
           `/orders/${order.id}/photos`,
@@ -914,17 +1053,36 @@ export function CreateOrder({
           ...order,
           version: confirmedOrderVersion(receipt.order_version, order.version),
         };
-        setCreated(order);
-        updatePhoto({ state: "uploaded" });
+        if (!sessionValid()) return null;
+        const confirmed = order;
+        await draft.write((current) => ({
+          ...current,
+          created: confirmed,
+          photos: current.photos.map((item) =>
+            item.id === photo.id ? { ...item, state: "uploaded" } : item,
+          ),
+        }));
       } catch (failure) {
-        if (isOrderVersionConflict(failure)) setCreationPhotoConflict(true);
+        if (!sessionValid()) return null;
         const unknown =
           requestSent &&
           (!(failure instanceof ApiError) || failure.requestMayHaveSucceeded);
-        updatePhoto({
-          state: unknown ? "uncertain" : "failed",
-          error: (failure as Error).message,
-        });
+        await draft
+          .write((current) => ({
+            ...current,
+            creationPhotoConflict:
+              current.creationPhotoConflict || isOrderVersionConflict(failure),
+            photos: current.photos.map((item) =>
+              item.id === photo.id
+                ? {
+                    ...item,
+                    state: unknown ? "uncertain" : "failed",
+                    error: (failure as Error).message,
+                  }
+                : item,
+            ),
+          }))
+          .catch(() => {});
         setError(
           isOrderVersionConflict(failure)
             ? "Наряд изменился после выдачи. Откройте актуальную карточку перед отправкой оставшихся фото."
@@ -941,6 +1099,7 @@ export function CreateOrder({
     event.preventDefault();
     if (
       requestLock.current ||
+      draftBlocked ||
       unknownCreate ||
       creationPhotoConflict ||
       photos.some((photo) => photo.state === "uncertain")
@@ -987,6 +1146,8 @@ export function CreateOrder({
               "Выбранный исполнитель недоступен на смене. Выберите другого сотрудника.",
             );
         } else if (!form.brigade_id) throw new Error("Выберите бригаду.");
+        await draft.write((current) => ({ ...current, phase: "submitting" }));
+        if (!sessionValid()) return;
         creating = true;
         order = await post<OrderDetail>("/orders", {
           ...form,
@@ -1001,21 +1162,60 @@ export function CreateOrder({
           normal_hours: Number(form.normal_hours),
           deadline: deadline.toISOString(),
         });
+        confirmedOrderVersion(order.version, 1);
+        if (!order.id || typeof order.number !== "string")
+          throw new ApiError(
+            "Наряд мог быть создан, но его подтверждение неполное. Проверьте журнал перед новой выдачей.",
+            undefined,
+            true,
+          );
+        if (!sessionValid()) return;
         creating = false;
-        setCreated(order);
+        const confirmed = order;
+        await draft.write((current) => ({
+          ...current,
+          phase: "confirmed",
+          created: confirmed,
+        }));
       }
       const withPhotos = await sendPhotos(order);
-      if (withPhotos) onCreated(withPhotos);
+      if (withPhotos && sessionValid()) {
+        await draft.remove();
+        if (sessionValid()) onCreated(withPhotos);
+      }
     } catch (failure) {
-      if (
-        creating &&
-        (!(failure instanceof ApiError) || failure.requestMayHaveSucceeded)
-      )
-        setUnknownCreate(true);
+      if (!sessionValid()) return;
+      if (creating)
+        await draft
+          .write((current) => ({
+            ...current,
+            phase:
+              !(failure instanceof ApiError) || failure.requestMayHaveSucceeded
+                ? "unknown"
+                : "editing",
+          }))
+          .catch(() => {});
       setError((failure as Error).message);
     } finally {
       requestLock.current = false;
-      setBusy(false);
+      if (sessionValid()) setBusy(false);
+    }
+  }
+  async function deleteCreateDraft() {
+    if (
+      busy ||
+      !window.confirm(
+        created || unknownCreate
+          ? "Удалить локальный черновик? Уже созданный наряд и фото останутся на сервере. При неизвестном результате сначала проверьте журнал; новая выдача может стать дубликатом."
+          : "Удалить сохранённые текст и фото черновика?",
+      )
+    )
+      return;
+    try {
+      await draft.remove();
+      if (sessionValid()) onClose();
+    } catch (failure) {
+      if (sessionValid()) setError((failure as Error).message);
     }
   }
   return (
@@ -1027,6 +1227,11 @@ export function CreateOrder({
     >
       <form onSubmit={submit}>
         <div className="modal-body">
+          <FormDraftNotice
+            {...draft}
+            busy={busy}
+            onDelete={() => void deleteCreateDraft()}
+          />
           <nav className="create-steps" aria-label="Этапы выдачи">
             {[1, 2].map((value) => (
               <button
@@ -1061,7 +1266,9 @@ export function CreateOrder({
               </p>
             </div>
           )}
-          <fieldset disabled={busy || !!created || unknownCreate}>
+          <fieldset
+            disabled={busy || draftBlocked || !!created || unknownCreate}
+          >
             {step === 1 ? (
               <>
                 <div className="form-grid">
@@ -1377,8 +1584,8 @@ export function CreateOrder({
             </ul>
           )}
           <p className="field-hint">
-            Номер и время выдачи формирует сервер. Текст и выбранные файлы
-            хранятся только в открытой форме.
+            Номер и время выдачи формирует сервер. Черновик и сжатые фото
+            сохраняются на этом устройстве для вашего аккаунта и API.
           </p>
         </div>
         <footer className="modal-footer">
@@ -1411,7 +1618,10 @@ export function CreateOrder({
           {!unknownCreate &&
             !creationPhotoConflict &&
             !photos.some((photo) => photo.state === "uncertain") && (
-              <button className="button primary" disabled={busy}>
+              <button
+                className="button primary"
+                disabled={busy || draftBlocked}
+              >
                 {busy ? (
                   <LoaderCircle size={18} className="spin" />
                 ) : created ? (
@@ -1471,28 +1681,65 @@ export function OrderDialog({
   const [action, setAction] = useState("");
   const [reason, setReason] = useState("");
   const [score, setScore] = useState("");
-  const [completionUncertain, setCompletionUncertain] = useState(false);
   const [completionValidationError, setCompletionValidationError] =
     useState("");
-  const [photoUncertain, setPhotoUncertain] = useState(false);
   const [aiRetryUncertain, setAiRetryUncertain] = useState(false);
   const [formVersion, setFormVersion] = useState<number | null>(null);
-  const [completionVersion, setCompletionVersion] = useState<number | null>(
-    null,
-  );
   const [versionConflict, setVersionConflict] = useState(false);
   const [writeUncertain, setWriteUncertain] = useState(false);
   const [materialSearch, setMaterialSearch] = useState("");
   const mutationLock = useRef(false);
   const revision = useRef(0);
-  const [complete, setComplete] = useState({
-    work_done: "",
-    fault_code_id: "",
-    comment: "",
-  });
-  const [materials, setMaterials] = useState<
-    { material_id: string; quantity: string }[]
-  >([]);
+  const sessionToken = useRef(token());
+  const sessionValid = () => token() === sessionToken.current;
+  const emptyCompletion: CompletionFormDraft = {
+    complete: { work_done: "", fault_code_id: "", comment: "" },
+    materials: [],
+    baseline: null,
+    phase: "editing",
+    photos: [],
+  };
+  const draft = useFormDraft<CompletionFormDraft>(
+    {
+      api: new URL("/api/", location.href).href,
+      owner: String(user.id),
+      form: "complete",
+      order: String(id),
+    },
+    emptyCompletion,
+    recoverCompletionDraft,
+  );
+  const { complete, materials, baseline: completionVersion } = draft.data;
+  const setComplete = draftFieldSetter(draft.change, "complete");
+  const setMaterials = draftFieldSetter(draft.change, "materials");
+  const setCompletionVersion = draftFieldSetter(draft.change, "baseline");
+  const completionUncertain = ["submitting", "unknown"].includes(
+    draft.data.phase,
+  );
+  const photoUncertain = draft.data.photos.some((photo) =>
+    ["uploading", "uncertain"].includes(photo.state),
+  );
+  const draftBlocked = !draft.ready || !!draft.error;
+  const completionConfirmed = draft.data.phase === "confirmed";
+  const restoredApplied = useRef(false);
+  useEffect(() => {
+    if (
+      !draft.ready ||
+      !draft.restored ||
+      restoredApplied.current ||
+      !sessionValid()
+    )
+      return;
+    restoredApplied.current = true;
+    setFormVersion(draft.data.baseline);
+    if (
+      draft.data.baseline !== null ||
+      draft.data.complete.work_done ||
+      draft.data.materials.length ||
+      draft.data.phase !== "editing"
+    )
+      setMode("complete");
+  }, [draft.ready, draft.restored]);
   const [edit, setEdit] = useState({
     assignee_id: "",
     priority: "",
@@ -1539,26 +1786,28 @@ export function OrderDialog({
     ].includes(order.status);
   const staleForm =
     mode !== "none" && !!order && isStaleOrderForm(formVersion, order.version);
-  const writeBlocked = staleForm || versionConflict || writeUncertain;
+  const writeBlocked =
+    staleForm ||
+    versionConflict ||
+    writeUncertain ||
+    draftBlocked ||
+    photoUncertain ||
+    completionUncertain;
   function beginForm(nextMode: "complete" | "edit" | "action") {
-    if (!order || mutationLock.current || writeBlocked) return;
     if (
-      nextMode === "complete" &&
-      isStaleOrderForm(completionVersion, order.version)
-    ) {
-      if (
-        (complete.work_done || complete.comment || materials.length) &&
-        !window.confirm(
-          "Прежний отчёт относится к другой версии наряда. Очистить текст и материалы и открыть новую форму?",
-        )
-      )
-        return;
-      setComplete({ work_done: "", fault_code_id: "", comment: "" });
-      setMaterials([]);
-      setCompletionValidationError("");
-    }
-    if (nextMode === "complete") setCompletionVersion(order.version);
-    setFormVersion(order.version);
+      !order ||
+      mutationLock.current ||
+      writeBlocked ||
+      (nextMode === "complete" && completionConfirmed)
+    )
+      return;
+    if (nextMode === "complete" && completionVersion === null)
+      setCompletionVersion(order.version);
+    setFormVersion(
+      nextMode === "complete"
+        ? (completionVersion ?? order.version)
+        : order.version,
+    );
     setMode(nextMode);
   }
   function handleVersionFailure(failure: unknown) {
@@ -1571,6 +1820,7 @@ export function OrderDialog({
     if (mutationLock.current) return;
     if (
       mode !== "none" &&
+      mode !== "complete" &&
       !window.confirm(
         "Закрыть прежнюю форму и загрузить текущий наряд? Введённые текст, причины и материалы будут потеряны.",
       )
@@ -1589,11 +1839,6 @@ export function OrderDialog({
       setAiRetryUncertain(false);
       setReason("");
       setScore("");
-      if (!completionUncertain) {
-        setComplete({ work_done: "", fault_code_id: "", comment: "" });
-        setMaterials([]);
-        setCompletionVersion(null);
-      }
       setError("");
     } catch (failure) {
       setError((failure as Error).message);
@@ -1610,10 +1855,9 @@ export function OrderDialog({
         complete.comment ||
         materials.length ||
         completionUncertain) &&
+      (draft.pending || draft.error) &&
       !window.confirm(
-        completionUncertain
-          ? "Результат отправки неизвестен. Проверьте карточку перед повторной сдачей, чтобы не списать материалы дважды. Закрыть форму?"
-          : "Закрыть форму отчёта? Несохранённые текст и материалы будут потеряны.",
+        "Последние изменения черновика ещё не сохранены. Закрытие может потерять их. Закрыть форму?",
       )
     )
       return;
@@ -1626,23 +1870,11 @@ export function OrderDialog({
       const latest = await api<OrderDetail>(`/orders/${id}`);
       setOrder(latest);
       setAiRetryUncertain(false);
-      if (
-        completionUncertain &&
-        ["ai_review", "completed", "closed", "rework"].includes(latest.status)
-      ) {
-        setMode("none");
-        setCompletionUncertain(false);
-        setComplete({ work_done: "", fault_code_id: "", comment: "" });
-        setMaterials([]);
-        setCompletionVersion(null);
-        setError("");
-        notify("На сервере есть сданный отчёт. Проверьте его содержимое.");
-      } else
-        setError(
-          completionUncertain
-            ? "Сдача пока не подтверждена. Повторная отправка заблокирована; проверьте состояние позже."
-            : "",
-        );
+      setError(
+        completionUncertain || photoUncertain
+          ? "Карточка обновлена. Сравните отчёт, материалы и фото с черновиком. Неизвестная отправка остаётся заблокированной; удалить черновик можно только явным действием."
+          : "",
+      );
     } catch (failure) {
       setError((failure as Error).message);
     } finally {
@@ -1744,18 +1976,48 @@ export function OrderDialog({
       beginForm("action");
     } else void execute(name);
   }
-  async function upload(file: File, kind: string) {
+  async function upload(file: File, kind: string, existing?: DraftPhoto) {
     if (mutationLock.current || photoUncertain || writeBlocked || !order)
       return;
-    const requestedVersion = order.version;
+    const requestedVersion =
+      existing?.expectedVersion ??
+      (mode === "complete"
+        ? (completionVersion ?? order.version)
+        : order.version);
     mutationLock.current = true;
     revision.current++;
     setBusy(true);
     setError("");
     let sent = false;
+    let photo: DraftPhoto | undefined = existing;
     try {
+      if (!photo) {
+        photo = {
+          id: Date.now(),
+          file: await compressedPhoto(file),
+          kind: kind as "before" | "after",
+          state: "queued",
+          expectedVersion: requestedVersion,
+        };
+        if (!sessionValid()) return;
+        const prepared = photo;
+        await draft.write((current) => ({
+          ...current,
+          photos: [...current.photos, prepared],
+        }));
+      }
+      const photoId = photo.id;
+      await draft.write((current) => ({
+        ...current,
+        photos: current.photos.map((item) =>
+          item.id === photoId
+            ? { ...item, state: "uploading", error: undefined }
+            : item,
+        ),
+      }));
+      if (!sessionValid()) return;
       const data = new FormData();
-      data.append("file", await compressedPhoto(file));
+      data.append("file", photo.file);
       data.append("kind", kind);
       sent = true;
       const receipt = await orderWrite<{ order_version: number }>(
@@ -1767,10 +2029,19 @@ export function OrderDialog({
         receipt.order_version,
         requestedVersion,
       );
+      if (!sessionValid()) return;
+      await draft.write((current) => ({
+        ...current,
+        baseline: advancePhotoFormVersion(
+          current.baseline,
+          requestedVersion,
+          receivedVersion,
+        ),
+        photos: current.photos.map((item) =>
+          item.id === photoId ? { ...item, state: "uploaded" } : item,
+        ),
+      }));
       setFormVersion((base) =>
-        advancePhotoFormVersion(base, requestedVersion, receivedVersion),
-      );
-      setCompletionVersion((base) =>
         advancePhotoFormVersion(base, requestedVersion, receivedVersion),
       );
       setOrder((current) =>
@@ -1788,10 +2059,27 @@ export function OrderDialog({
         );
       }
     } catch (e) {
+      if (!sessionValid()) return;
       handleVersionFailure(e);
       const unknown =
         sent && (!(e instanceof ApiError) || e.requestMayHaveSucceeded);
-      setPhotoUncertain(unknown);
+      if (photo) {
+        const photoId = photo.id;
+        await draft
+          .write((current) => ({
+            ...current,
+            photos: current.photos.map((item) =>
+              item.id === photoId
+                ? {
+                    ...item,
+                    state: unknown ? "uncertain" : "failed",
+                    error: (e as Error).message,
+                  }
+                : item,
+            ),
+          }))
+          .catch(() => {});
+      }
       setError(
         unknown
           ? "Результат загрузки фото неизвестен. Обновите карточку и проверьте снимки; повторная загрузка в этой форме заблокирована."
@@ -1799,12 +2087,19 @@ export function OrderDialog({
       );
     } finally {
       mutationLock.current = false;
-      setBusy(false);
+      if (sessionValid()) setBusy(false);
     }
   }
   async function submitComplete(e: FormEvent) {
     e.preventDefault();
-    if (mutationLock.current || completionUncertain || writeBlocked || !order)
+    if (
+      mutationLock.current ||
+      completionUncertain ||
+      completionConfirmed ||
+      writeBlocked ||
+      !order ||
+      draft.data.photos.some((photo) => photo.state !== "uploaded")
+    )
       return;
     setError("");
     const issues = completionValidationIssues({
@@ -1830,7 +2125,12 @@ export function OrderDialog({
     revision.current++;
     setBusy(true);
     setError("");
+    let sent = false;
+    let acknowledged = false;
     try {
+      await draft.write((current) => ({ ...current, phase: "submitting" }));
+      if (!sessionValid()) return;
+      sent = true;
       const o = await postOrder<OrderDetail>(
         `/orders/${id}/complete`,
         formVersion!,
@@ -1844,21 +2144,56 @@ export function OrderDialog({
           })),
         },
       );
+      confirmedOrderVersion(o.version, formVersion!);
+      if (!sessionValid()) return;
+      acknowledged = true;
+      await draft.write((current) => ({ ...current, phase: "confirmed" }));
+      await draft.remove(emptyCompletion);
       setOrder(o);
       setMode("none");
-      setComplete({ work_done: "", fault_code_id: "", comment: "" });
-      setMaterials([]);
-      setCompletionVersion(null);
+      setFormVersion(null);
       onChange();
       notify("Отчёт сохранён и передан мастеру на приёмку");
     } catch (e) {
+      if (!sessionValid()) return;
       handleVersionFailure(e);
-      if (!(e instanceof ApiError) || e.requestMayHaveSucceeded)
-        setCompletionUncertain(true);
+      if (sent && !acknowledged)
+        await draft
+          .write((current) => ({
+            ...current,
+            phase:
+              !(e instanceof ApiError) || e.requestMayHaveSucceeded
+                ? "unknown"
+                : "editing",
+          }))
+          .catch(() => {});
       setError((e as Error).message);
     } finally {
       mutationLock.current = false;
-      setBusy(false);
+      if (sessionValid()) setBusy(false);
+    }
+  }
+  async function deleteCompletionDraft() {
+    if (
+      busy ||
+      !window.confirm(
+        completionUncertain || photoUncertain
+          ? "Сначала сравните отчёт, материалы и фото в карточке и истории. Удалить локальный черновик с неизвестной отправкой? Это не отменит действие на сервере; новая сдача может повторить расход."
+          : "Удалить сохранённые поля отчёта и локальные фото? Уже загруженные фото и отчёт останутся на сервере.",
+      )
+    )
+      return;
+    try {
+      await draft.remove(emptyCompletion);
+      if (!sessionValid()) return;
+      setMode("none");
+      setFormVersion(null);
+      setVersionConflict(false);
+      setCompletionValidationError("");
+      setError("");
+      await reloadDetail();
+    } catch (failure) {
+      if (sessionValid()) setError((failure as Error).message);
     }
   }
   async function submitEdit(e: FormEvent) {
@@ -1954,7 +2289,18 @@ export function OrderDialog({
       wide
     >
       <div className="modal-body order-detail-body">
+        {(mode === "complete" ||
+          draft.restored ||
+          draft.error ||
+          draft.data.photos.length > 0) && (
+          <FormDraftNotice
+            {...draft}
+            busy={busy}
+            onDelete={() => void deleteCompletionDraft()}
+          />
+        )}
         <OrderVersionNotice
+          persistentDraft={mode === "complete"}
           stale={staleForm}
           conflict={versionConflict}
           uncertain={writeUncertain}
@@ -2307,6 +2653,44 @@ export function OrderDialog({
                       перед новой отправкой; повтор в этой форме заблокирован.
                     </p>
                   )}
+                  {draft.data.photos.length > 0 && (
+                    <ul
+                      className="upload-list"
+                      aria-label="Локальные фото черновика"
+                    >
+                      {draft.data.photos.map((photo) => (
+                        <li
+                          key={photo.id}
+                          className={`upload-item ${photo.state}`}
+                        >
+                          <div className="upload-item-main">
+                            <Camera size={18} />
+                            <div>
+                              <strong>
+                                {photo.file.name || "Фото черновика"}
+                              </strong>
+                              <span className="upload-state">
+                                {uploadLabels[photo.state]}
+                              </span>
+                              {photo.error && <small>{photo.error}</small>}
+                            </div>
+                          </div>
+                          {["queued", "failed"].includes(photo.state) && (
+                            <button
+                              type="button"
+                              className="button secondary"
+                              disabled={busy || writeBlocked || !canUpload}
+                              onClick={() =>
+                                void upload(photo.file, photo.kind, photo)
+                              }
+                            >
+                              Отправить фото
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
                 <AiJobStatus
                   job={order.ai_review_job}
@@ -2366,7 +2750,14 @@ export function OrderDialog({
                     noValidate
                     onSubmit={submitComplete}
                   >
-                    <fieldset disabled={busy || completionUncertain}>
+                    <fieldset
+                      disabled={
+                        busy ||
+                        draftBlocked ||
+                        completionUncertain ||
+                        completionConfirmed
+                      }
+                    >
                       <h3>
                         <FileCheck2 size={18} />
                         Завершение работы
@@ -2539,7 +2930,17 @@ export function OrderDialog({
                         <p>
                           Результат отправки неизвестен. Повтор заблокирован,
                           чтобы не списать материалы дважды. Поля остаются в
-                          открытой форме.
+                          локальном черновике после закрытия вкладки.
+                        </p>
+                      </div>
+                    )}
+                    {completionConfirmed && (
+                      <div className="info-banner" role="status">
+                        <p>
+                          Отчёт подтверждён сервером. Черновик оставлен из-за
+                          сбоя локального удаления; повторная сдача
+                          заблокирована. Проверьте историю и удалите черновик
+                          явно.
                         </p>
                       </div>
                     )}
@@ -2564,7 +2965,14 @@ export function OrderDialog({
                       ) : (
                         <button
                           className="button primary"
-                          disabled={busy || writeBlocked}
+                          disabled={
+                            busy ||
+                            writeBlocked ||
+                            completionConfirmed ||
+                            draft.data.photos.some(
+                              (photo) => photo.state !== "uploaded",
+                            )
+                          }
                         >
                           <Send size={16} />
                           Отправить на приёмку
@@ -2749,7 +3157,12 @@ export function OrderDialog({
               {worker && order.status === "in_progress" && (
                 <button
                   className="button primary"
-                  disabled={busy || writeBlocked || completionUncertain}
+                  disabled={
+                    busy ||
+                    writeBlocked ||
+                    completionUncertain ||
+                    completionConfirmed
+                  }
                   onClick={() => beginForm("complete")}
                 >
                   <CheckCheck size={16} />

@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'form_draft.dart';
 import 'local_store.dart';
 import 'local_store_open.dart';
 import 'models.dart';
@@ -59,6 +60,8 @@ class AppController extends ChangeNotifier {
   Future<void> _storageTail = Future.value();
   Future<LocalStore>? _localFuture;
   Future<void> _cacheTail = Future.value();
+  Future<void> _draftTail = Future.value();
+  final Map<String, Object> _draftHandles = {};
   Future<void>? _syncFuture;
   DateTime? _lastSnapshotWrite;
   int _session = 0;
@@ -117,6 +120,106 @@ class AppController extends ChangeNotifier {
 
   String _scope(String key, {NaryadApi? source, int? ownerId}) =>
       localScopeKey((source ?? api).baseUrl, ownerId ?? user!.id, key);
+
+  Future<T> _draftOperation<T>(Future<T> Function() action) {
+    final next = _draftTail.then((_) => action());
+    _draftTail = next.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return next;
+  }
+
+  Future<FormDraftSession> openFormDraft(String kind, {int? orderId}) async {
+    if (user == null) throw const ApiException('Войдите в приложение.', 401);
+    // Validate context before opening a handle or touching a stored draft.
+    FormDraft(kind: kind, orderId: orderId, data: const {});
+    final session = _session;
+    final source = api;
+    final ownerId = user!.id;
+    final key = _scope('draft:$kind:${orderId ?? 'new'}');
+    final handle = Object();
+    _draftHandles[key] = handle;
+
+    void ensureCurrent() {
+      if (!_current(session) ||
+          !identical(api, source) ||
+          user?.id != ownerId ||
+          !identical(_draftHandles[key], handle)) {
+        throw const ApiException(
+          'Контекст формы изменился. Черновик сохранён для исходного аккаунта и сервера.',
+          401,
+        );
+      }
+    }
+
+    Future<LocalStore> storeForHandle() async {
+      ensureCurrent();
+      final store = await _local();
+      ensureCurrent();
+      return store;
+    }
+
+    FormDraft? decode(Json? raw) {
+      if (raw == null) return null;
+      final draft = FormDraft.fromJson(raw);
+      if (draft.kind != kind || draft.orderId != orderId) {
+        throw const FormatException(
+          'Сохранённый черновик имеет другой контекст.',
+        );
+      }
+      return draft;
+    }
+
+    return FormDraftSession(
+      () => _draftOperation(() async {
+        final store = await storeForHandle();
+        final draft = decode(await store.getFormDraft(key));
+        ensureCurrent();
+        // A killed process may have stopped before or after the server effect.
+        // Reads cannot clear this fence or turn it into another submit.
+        return draft?.state == FormDraftState.submitting
+            ? draft!.copyWith(state: FormDraftState.uncertain)
+            : draft;
+      }),
+      (draft, acknowledgeSubmission) => _draftOperation(() async {
+        final store = await storeForHandle();
+        if (draft.kind != kind || draft.orderId != orderId) {
+          throw const ApiException(
+            'Нельзя перенести черновик в другую форму.',
+            422,
+          );
+        }
+        final previous = decode(await store.getFormDraft(key));
+        ensureCurrent();
+        if (previous?.submissionUncertain == true &&
+            draft.state == FormDraftState.editing &&
+            !acknowledgeSubmission) {
+          throw const ApiException(
+            'Результат отправки неизвестен. Сначала проверьте очередь и сервер.',
+            409,
+          );
+        }
+        final oldBasis = previous?.basis;
+        final nextBasis = draft.basis;
+        if (oldBasis != null &&
+            (nextBasis == null ||
+                (nextBasis.expectedVersion != oldBasis.expectedVersion &&
+                    nextBasis.previousCommandId == null) ||
+                (nextBasis.expectedVersion != null &&
+                    oldBasis.expectedVersion == null))) {
+          throw const ApiException(
+            'Нельзя заменить исходную версию черновика новой карточкой наряда.',
+            409,
+          );
+        }
+        await store.putFormDraft(key, draft.toJson());
+        ensureCurrent();
+      }),
+      () => _draftOperation(() async {
+        final store = await storeForHandle();
+        await store.removeFormDraft(key);
+        ensureCurrent();
+      }),
+    );
+  }
 
   bool _owns(OutboxCommand command, NaryadApi source, int ownerId) =>
       command.serverUrl == source.baseUrl && command.ownerId == ownerId;

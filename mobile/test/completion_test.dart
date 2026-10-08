@@ -1,7 +1,12 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as imaging;
 import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/app_controller.dart';
+import 'package:naryad_ai/data/form_draft.dart';
 import 'package:naryad_ai/data/local_store.dart';
 import 'package:naryad_ai/data/models.dart';
 import 'package:naryad_ai/screens/completion_screen.dart';
@@ -48,13 +53,36 @@ WorkOrder _order({
     },
 });
 
+Json _savedDraftData(Json data) => {
+  'form_schema': 1,
+  'work': '',
+  'comment': '',
+  'fault_id': null,
+  'dirty': false,
+  'uncertain': false,
+  'stale': false,
+  'done': false,
+  'error': null,
+  'operation': null,
+  'materials': [],
+  'photos': [],
+  ...data,
+};
+
+class _FailingDraftStore extends MemoryLocalStore {
+  @override
+  Future<void> putFormDraft(String key, Json value) async =>
+      throw StateError('Диск недоступен');
+}
+
 class _Controller extends AppController {
   _Controller(
     this.order, {
     this.uncertain = false,
     String role = 'worker',
     int userId = 6,
-  }) : super(localStore: MemoryLocalStore()) {
+    MemoryLocalStore? store,
+  }) : super(localStore: store ?? MemoryLocalStore()) {
     user = User(id: userId, name: 'Алексей Ким', role: role);
     reference = {
       'fault_codes': [
@@ -70,6 +98,7 @@ class _Controller extends AppController {
   int submissions = 0;
   int reads = 0;
   Json? payload;
+  OrderWriteBasis? submittedBasis;
 
   @override
   Future<WorkOrder> complete(
@@ -78,6 +107,7 @@ class _Controller extends AppController {
     OrderWriteBasis? basis,
   }) async {
     submissions++;
+    submittedBasis = basis;
     payload = data;
     if (uncertain) {
       throw const ApiException(
@@ -245,6 +275,252 @@ void main() {
     expect(controller.submissions, 0);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'Completion draft restores raw quantity, text and local photo bytes',
+    (tester) async {
+      final store = MemoryLocalStore();
+      final order = _order(previous: false);
+      final seed = _Controller(order, store: store);
+      final bytes = Uint8List.fromList(
+        imaging.encodeJpg(imaging.Image(width: 24, height: 20)),
+      );
+      final session = await seed.openFormDraft(
+        FormDraftKind.completion,
+        orderId: 1,
+      );
+      await session.save(
+        FormDraft(
+          kind: FormDraftKind.completion,
+          orderId: 1,
+          basis: const OrderWriteBasis(expectedVersion: 1),
+          data: _savedDraftData({
+            'work': 'Подшипник заменён, выполняется проверка.',
+            'comment': 'Проверка с нагрузкой',
+            'fault_id': 1,
+            'dirty': true,
+            'materials': [
+              {
+                'material': {'id': 1, 'name': 'Подшипник 6205', 'unit': 'шт'},
+                'quantity': '2,',
+              },
+            ],
+            'photos': [
+              {
+                'bytes': base64Encode(bytes),
+                'filename': 'after-local.jpg',
+                'uploading': false,
+                'uploaded': false,
+                'queued': false,
+                'uncertain': false,
+                'error': null,
+              },
+            ],
+          }),
+        ),
+      );
+      seed.dispose();
+      final controller = _Controller(order, store: store);
+      await _open(tester, controller);
+      expect(
+        find.text('Подшипник заменён, выполняется проверка.'),
+        findsOneWidget,
+      );
+      final quantity = find.widgetWithText(TextFormField, 'Количество');
+      await tester.scrollUntilVisible(
+        quantity,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(quantity);
+      expect(tester.widget<TextFormField>(quantity).controller!.text, '2,');
+      final image = find.byType(Image);
+      await tester.scrollUntilVisible(
+        image,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(image);
+      expect(
+        (tester.widget<Image>(image).image as MemoryImage).bytes,
+        orderedEquals(bytes),
+      );
+      expect(controller.submissions, 0);
+      await tester.tap(find.byTooltip('Назад').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Закрыть форму'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Открыть отчёт'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Подшипник заменён, выполняется проверка.'),
+        findsOneWidget,
+      );
+      await tester.scrollUntilVisible(
+        quantity,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(quantity);
+      expect(tester.widget<TextFormField>(quantity).controller!.text, '2,');
+      expect(controller.submissions, 0);
+    },
+  );
+
+  testWidgets('Restored draft never rebases after the order version changes', (
+    tester,
+  ) async {
+    final store = MemoryLocalStore();
+    final old = _order();
+    final seed = _Controller(old, store: store);
+    final session = await seed.openFormDraft(
+      FormDraftKind.completion,
+      orderId: 1,
+    );
+    await session.save(
+      FormDraft(
+        kind: FormDraftKind.completion,
+        orderId: 1,
+        basis: const OrderWriteBasis(expectedVersion: 1),
+        data: _savedDraftData({
+          'work': 'Подшипник заменён, выполнен контрольный запуск.',
+          'fault_id': 1,
+          'dirty': true,
+          'materials': [],
+          'photos': [],
+        }),
+      ),
+    );
+    seed.dispose();
+    final controller = _Controller(
+      WorkOrder.fromJson({...old.data, 'version': 2}),
+      store: store,
+    );
+    await _open(tester, controller);
+    expect(
+      find.textContaining('Наряд изменился после начала черновика'),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Отправить на приёмку'),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(controller.submissions, 0);
+    final check = await controller.openFormDraft(
+      FormDraftKind.completion,
+      orderId: 1,
+    );
+    expect((await check.read())!.basis!.expectedVersion, 1);
+  });
+
+  testWidgets(
+    'Interrupted completion marker does not repeat report or materials',
+    (tester) async {
+      final store = MemoryLocalStore();
+      final order = _order();
+      final seed = _Controller(order, store: store);
+      final session = await seed.openFormDraft(
+        FormDraftKind.completion,
+        orderId: 1,
+      );
+      await session.save(
+        FormDraft(
+          kind: FormDraftKind.completion,
+          orderId: 1,
+          basis: const OrderWriteBasis(expectedVersion: 1),
+          state: FormDraftState.submitting,
+          data: _savedDraftData({
+            'work': 'Подшипник заменён, выполнен контрольный запуск.',
+            'fault_id': 1,
+            'operation': 'complete',
+            'dirty': true,
+            'materials': [],
+            'photos': [],
+          }),
+        ),
+      );
+      seed.dispose();
+      final controller = _Controller(order, store: store);
+      await _open(tester, controller);
+      expect(
+        find.textContaining('Предыдущая отправка прервалась'),
+        findsOneWidget,
+      );
+      expect(find.text('Отправить на приёмку'), findsNothing);
+      await tester.tap(find.text('Проверить отправку'));
+      await tester.pumpAndSettle();
+      expect(controller.submissions, 0);
+      expect(controller.reads, 1);
+      expect(find.text('Проверить отправку'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'A disk failure while persisting the submit marker blocks completion',
+    (tester) async {
+      final controller = _Controller(_order(), store: _FailingDraftStore());
+      await _open(tester, controller);
+      await tester.tap(find.text('Отправить на приёмку'));
+      await tester.pumpAndSettle();
+      expect(controller.submissions, 0);
+      expect(find.textContaining('Черновик не сохранён'), findsOneWidget);
+      expect(find.text('Черновик сохранён на устройстве'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'An uncertain photo restores locked even if the global marker is editing',
+    (tester) async {
+      final store = MemoryLocalStore();
+      final order = _order(status: 'rework');
+      final seed = _Controller(order, store: store);
+      final bytes = base64Encode(
+        imaging.encodeJpg(imaging.Image(width: 24, height: 20)),
+      );
+      final session = await seed.openFormDraft(
+        FormDraftKind.completion,
+        orderId: 1,
+      );
+      await session.save(
+        FormDraft(
+          kind: FormDraftKind.completion,
+          orderId: 1,
+          basis: const OrderWriteBasis(expectedVersion: 1),
+          data: _savedDraftData({
+            'work': 'Подшипник заменён, выполнен контрольный запуск.',
+            'fault_id': 1,
+            'dirty': true,
+            'photos': [
+              {
+                'bytes': bytes,
+                'filename': 'unknown-after.jpg',
+                'uploading': false,
+                'uploaded': false,
+                'queued': false,
+                'uncertain': true,
+                'error': 'Ответ не получен',
+              },
+            ],
+          }),
+        ),
+      );
+      seed.dispose();
+      final controller = _Controller(order, store: store);
+      await _open(tester, controller);
+      expect(find.text('Отправить на приёмку'), findsNothing);
+      expect(find.text('Проверить отправку'), findsOneWidget);
+      await tester.tap(find.text('Проверить отправку'));
+      await tester.pumpAndSettle();
+      expect(controller.submissions, 0);
+      expect(find.text('Проверить отправку'), findsOneWidget);
+      expect(find.text('Открыть карточку наряда'), findsNothing);
+    },
+  );
 
   testWidgets('Only the master sees acceptance actions', (tester) async {
     for (final role in ['worker', 'master']) {

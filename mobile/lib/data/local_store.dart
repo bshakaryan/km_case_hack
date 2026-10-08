@@ -213,6 +213,10 @@ abstract class LocalStore {
   Future<SnapshotEntry?> getSnapshot(String key);
   Future<void> clearSnapshots({String? prefix});
 
+  Future<void> putFormDraft(String key, Json data);
+  Future<Json?> getFormDraft(String key);
+  Future<void> removeFormDraft(String key);
+
   Future<OutboxCommand> enqueue(OutboxCommand command, {Uint8List? photoBytes});
   Future<List<OutboxCommand>> outbox();
   Future<void> updateOutbox(OutboxCommand command);
@@ -235,6 +239,23 @@ class MemoryLocalStore implements LocalStore {
   final Map<String, Json> _outbox = {};
   final Map<String, int> _serverIds = {};
   final Map<String, Uint8List> _photos = {};
+  final Map<String, String> _drafts = {};
+
+  @override
+  Future<void> putFormDraft(String key, Json data) async {
+    _drafts[key] = jsonEncode(data);
+  }
+
+  @override
+  Future<Json?> getFormDraft(String key) async {
+    final value = _drafts[key];
+    return value == null ? null : jsonDecode(value) as Json;
+  }
+
+  @override
+  Future<void> removeFormDraft(String key) async {
+    _drafts.remove(key);
+  }
 
   @override
   Future<void> open() async {

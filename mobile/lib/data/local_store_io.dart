@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'local_store.dart';
+import 'models.dart';
 
 class SqfliteLocalStore implements LocalStore {
   SqfliteLocalStore({this.directoryPath});
@@ -14,7 +15,7 @@ class SqfliteLocalStore implements LocalStore {
   Database? _db;
   Directory? _root;
 
-  static const _schemaVersion = 3;
+  static const _schemaVersion = 4;
 
   @override
   Future<void> open() async {
@@ -61,6 +62,9 @@ class SqfliteLocalStore implements LocalStore {
             whereArgs: [OutboxKind.createOrder, OutboxKind.markRead],
           );
         }
+        if (oldVersion < 4) {
+          await _createDraftSchema(db);
+        }
       },
     );
     _db = db;
@@ -68,6 +72,7 @@ class SqfliteLocalStore implements LocalStore {
   }
 
   Future<void> _createSchema(Database db) async {
+    await _createDraftSchema(db);
     await db.execute(
       'CREATE TABLE snapshot (key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)',
     );
@@ -83,6 +88,37 @@ class SqfliteLocalStore implements LocalStore {
     await db.execute(
       'CREATE TABLE photo_cache (url TEXT PRIMARY KEY, path TEXT NOT NULL, size INTEGER NOT NULL, last_used_at INTEGER NOT NULL)',
     );
+  }
+
+  Future<void> _createDraftSchema(Database db) => db.execute(
+    'CREATE TABLE form_drafts (key TEXT PRIMARY KEY, payload TEXT NOT NULL)',
+  );
+
+  @override
+  Future<void> putFormDraft(String key, Json data) async {
+    await _database.insert('form_drafts', {
+      'key': key,
+      'payload': jsonEncode(data),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  @override
+  Future<Json?> getFormDraft(String key) async {
+    final rows = await _database.query(
+      'form_drafts',
+      columns: ['payload'],
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    return rows.isEmpty
+        ? null
+        : jsonDecode(rows.first['payload'] as String) as Json;
+  }
+
+  @override
+  Future<void> removeFormDraft(String key) async {
+    await _database.delete('form_drafts', where: 'key = ?', whereArgs: [key]);
   }
 
   Database get _database {

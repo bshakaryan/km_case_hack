@@ -197,5 +197,9 @@ test("conflict notice keeps the old input separate from an explicit fresh action
     /Результат действия неизвестен/,
   );
   assert.match(render({ uncertain: true, busy: true }), /disabled=""/);
+  const persisted = render({ stale: true, persistentDraft: true });
+  assert.match(persisted, /Черновик сохраняет прежнее основание/);
+  assert.match(persisted, /Удалить черновик/);
+  assert.doesNotMatch(persisted, /откройте её заново/);
   assert.equal(render({}), "");
 });

@@ -18,12 +18,14 @@ export function OrderVersionNotice({
   conflict = false,
   uncertain = false,
   busy = false,
+  persistentDraft = false,
   onReset,
 }: {
   stale?: boolean;
   conflict?: boolean;
   uncertain?: boolean;
   busy?: boolean;
+  persistentDraft?: boolean;
   onReset: () => void;
 }) {
   if (!stale && !conflict && !uncertain) return null;
@@ -36,8 +38,9 @@ export function OrderVersionNotice({
             : "Наряд изменился. Введённые данные сохранены в открытой форме, но отправка прежнего действия заблокирована."}
         </p>
         <p>
-          Проверьте актуальные назначение, статус и отчёт. Чтобы выполнить новое
-          действие, закройте прежнюю форму и откройте её заново.
+          {persistentDraft
+            ? 'Проверьте актуальные назначение, статус и отчёт. Черновик сохраняет прежнее основание. Для нового отчёта после проверки удалите прежний черновик кнопкой «Удалить черновик».'
+            : 'Проверьте актуальные назначение, статус и отчёт. Чтобы выполнить новое действие, закройте прежнюю форму и откройте её заново.'}
         </p>
         <button
           type="button"
@@ -45,7 +48,7 @@ export function OrderVersionNotice({
           disabled={busy}
           onClick={onReset}
         >
-          Закрыть форму и обновить наряд
+          {persistentDraft ? 'Обновить наряд и сохранить черновик' : 'Закрыть форму и обновить наряд'}
         </button>
       </div>
     </div>
