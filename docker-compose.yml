@@ -42,6 +42,7 @@ services:
       # to remain inside the `environment:` block.
       # FIREBASE_CREDENTIALS: /run/secrets/km-case-hack-firebase-adminsdk-fbsvc-43f1ce1b97.json
       TZ: Asia/Almaty
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     # volumes:
     #   - ./backend/secrets:/run/secrets:ro
     ports:

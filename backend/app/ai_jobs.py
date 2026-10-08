@@ -32,7 +32,7 @@ class ReviewResult(BaseModel):
     verdict: Literal["passed", "needs_attention", "needs_rework"]
     score: float = Field(ge=1, le=5, allow_inf_nan=False)
     explanation: str = Field(min_length=1, max_length=2000)
-    is_stub: Literal[True]
+    is_stub: bool
     master_score: None = None
 
 
@@ -41,6 +41,73 @@ class FormalStub:
         paired = {photo["kind"] for photo in snapshot["photos"]} == {"before", "after"}
         return {"verdict": "passed" if paired else "needs_attention", "score": 4.5 if paired else 4.0,
             "explanation": "Заглушка ИИ: проверена только полнота отчёта и наличие фотографий. Содержимое изображений не анализируется. Решение о приёмке принимает мастер.", "is_stub": True, "master_score": None}
+
+
+class OpenAIProvider:
+    def review(self, snapshot):
+        import os
+        import httpx
+        import json
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return FormalStub().review(snapshot)
+
+        report = snapshot.get("report", {})
+        work_done = report.get("work_done", "")
+        comment = report.get("comment", "")
+        materials = report.get("materials", [])
+
+        mat_text = ", ".join([f"{m.get('name', '???')} ({m.get('quantity', 0)} {m.get('unit', '')})" for m in materials])
+        prompt = (
+            "ИИ- проверка закрытого наряда и отчёт с оценкой исполнителю и мастеру.\n"
+            f"Выполненные работы: {work_done}\n"
+            f"Комментарий: {comment}\n"
+            f"Материалы: {mat_text}\n"
+            "Пожалуйста, проанализируйте эти данные. Если предоставлены фото (до и после), вкратце сравни их. "
+            "Верните ответ строго в JSON формате:\n"
+            '{"verdict": "passed" или "needs_attention" или "needs_rework", '
+            '"score": оценка от 1 до 5 (число), '
+            '"explanation": "отчёт с оценкой исполнителю и мастеру, включая краткое сравнение фото (строка до 2000 символов)", '
+            '"is_stub": false, "master_score": null}'
+        )
+
+        import base64
+        user_content = [{"type": "text", "text": prompt}]
+        for photo in snapshot.get("photos", []):
+            kind = photo.get("kind", "unknown")
+            b64_data = base64.b64encode(photo["data"]).decode("utf-8")
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{b64_data}",
+                    "detail": "low"
+                }
+            })
+            user_content[0]["text"] += f"\n[Приложено фото: {kind}]"
+
+        try:
+            resp = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant that reviews work orders and outputs only valid JSON."},
+                        {"role": "user", "content": user_content}
+                    ],
+                    "response_format": {"type": "json_object"}
+                },
+                timeout=20.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            result = json.loads(content)
+            result["is_stub"] = False
+            result["master_score"] = None
+            return result
+        except Exception as e:
+            return FormalStub().review(snapshot)
 
 
 def job_dict(job, retry_allowed=False):
@@ -53,7 +120,9 @@ def job_dict(job, retry_allowed=False):
 
 
 def enqueue_job(db, attempt):
-    job = AIReviewJob(attempt_id=attempt.id, status="pending", provider="stub", attempts=0,
+    import os
+    provider_name = "openai" if os.getenv("OPENAI_API_KEY") else "stub"
+    job = AIReviewJob(attempt_id=attempt.id, status="pending", provider=provider_name, attempts=0,
         max_attempts=3, next_attempt_at=utcnow(), created_at=utcnow())
     db.add(job)
     db.flush()
@@ -69,7 +138,7 @@ def review_snapshot(db, attempt):
 
 
 def validate_result(result):
-    if not isinstance(result, dict) or type(result.get("is_stub")) is not bool or result["is_stub"] is not True:
+    if not isinstance(result, dict) or type(result.get("is_stub")) is not bool:
         raise ValueError("invalid_result")
     return ReviewResult.model_validate(result).model_dump()
 
@@ -97,8 +166,10 @@ def apply_success(db, order, attempt, job, result):
 
 def run_inline(db, order, attempt, job):
     """Explicit compatibility mode: formal stub inside the original command."""
+    import os
+    provider = OpenAIProvider() if os.getenv("OPENAI_API_KEY") else FormalStub()
     job.attempts = 1
-    apply_success(db, order, attempt, job, validate_result(FormalStub().review(review_snapshot(db, attempt))))
+    apply_success(db, order, attempt, job, validate_result(provider.review(review_snapshot(db, attempt))))
 
 
 def applicable(db, order, attempt):
@@ -207,7 +278,9 @@ def finish_job(sessions, claim, result=None, error_code=None):
 
 
 def dispatch_ai_jobs(sessions, provider=None, limit=10, publish=None):
-    provider = provider if provider is not None else FormalStub()
+    import os
+    if provider is None:
+        provider = OpenAIProvider() if os.getenv("OPENAI_API_KEY") else FormalStub()
     changed = []
     for _ in range(limit):
         claim = claim_job(sessions, retired=changed)
