@@ -15,6 +15,7 @@ import 'order_journal.dart';
 import 'push_service.dart';
 import 'recovery_models.dart';
 import '../domain/reference_edit.dart';
+import '../domain/navigation_scope.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -45,6 +46,7 @@ class AppController extends ChangeNotifier {
   User? user;
   // Order id from a tapped push that could not be opened yet (no session).
   int? pendingPushOrderId;
+  NavigationScope? _pendingPushScope;
   Json reference = {};
   List<Json> employees = [];
   List<WorkOrder> orders = [];
@@ -78,6 +80,7 @@ class AppController extends ChangeNotifier {
   int _referenceReadId = 0;
   final Map<ReferenceEditScope, _ReferenceEditContext> _referenceScopes = {};
   final Map<String, ReferenceEditTicket> _referenceTickets = {};
+  final Map<int, NavigationScope> _orderAccessDenials = {};
 
   bool get canManageReferences =>
       !_disposed &&
@@ -91,6 +94,29 @@ class AppController extends ChangeNotifier {
       _syncFuture != null ||
       _recoveringQueue ||
       outbox.any((command) => command.state == OutboxState.running);
+
+  /// Fences UI callbacks and reads to the authority that initiated them.
+  /// Authentication/visibility still belongs to the API; this grants no rights.
+  NavigationScope captureNavigationScope() {
+    final session = _session;
+    final source = api;
+    final epoch = source.sessionEpoch;
+    final owner = user?.id;
+    final role = user?.role;
+    return NavigationScope(
+      () =>
+          owner != null &&
+          _current(session) &&
+          identical(api, source) &&
+          !source.isClosed &&
+          source.sessionEpoch == epoch &&
+          user?.id == owner &&
+          user?.role == role,
+    );
+  }
+
+  bool canUseCachedOrder(int id) => _orderAccessDenials[id]?.isCurrent != true;
+
   List<ReferenceEditTicket> get referenceEdits => List.unmodifiable(
     _referenceTickets.values.where((ticket) => ticket.isCurrent),
   );
@@ -422,6 +448,13 @@ class AppController extends ChangeNotifier {
   }
 
   void _resetData() {
+    _orderAccessDenials.clear();
+    // Preserve only an unscoped cold-start ID. A tapped authenticated route
+    // cannot move to a different login, even if the next token is identical.
+    if (_pendingPushScope != null) {
+      pendingPushOrderId = null;
+      _pendingPushScope = null;
+    }
     _referenceScopes.clear();
     _referenceTickets.clear();
     user = null;
@@ -806,14 +839,19 @@ class AppController extends ChangeNotifier {
   void openOrderFromPush(int orderId) {
     if (orderId <= 0) return;
     pendingPushOrderId = orderId;
+    // A cold-start ID has no recipient/server identity; only defer routing.
+    _pendingPushScope = user == null ? null : captureNavigationScope();
     if (user != null) _notify();
   }
 
   /// Returns the stored push target once and clears it.
   int? consumePendingPushOrder() {
+    if (user == null) return null;
     final orderId = pendingPushOrderId;
     pendingPushOrderId = null;
-    return orderId;
+    final scope = _pendingPushScope;
+    _pendingPushScope = null;
+    return scope == null || scope.isCurrent ? orderId : null;
   }
 
   Future<void> login(String baseUrl, String login, String pin) async {
@@ -1100,6 +1138,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _refresh(int session, NaryadApi source, bool silent) async {
+    final authority = captureNavigationScope();
     final revision = _dataRevision;
     if (!silent) {
       loading = true;
@@ -1115,7 +1154,7 @@ class AppController extends ChangeNotifier {
         source.notifications(),
         source.analytics(),
       ]);
-      if (!_current(session) || revision != _dataRevision) return;
+      if (!authority.isCurrent || revision != _dataRevision) return;
       reference = results[0] as Json;
       employees = results[1] as List<Json>;
       final cachedOrders = {for (final order in orders) order.id: order};
@@ -1130,14 +1169,14 @@ class AppController extends ChangeNotifier {
       offline = false;
       error = null;
       await _reloadOutbox();
-      if (!_current(session)) return;
+      if (!authority.isCurrent) return;
       unawaited(_persistSnapshot(session));
       unawaited(syncOutbox());
     } catch (failure) {
       // A refresh belongs to its captured session. A cancelled old read is
       // discarded just like its old successful response after another login.
-      if (!_current(session)) return;
-      if (_current(session)) {
+      if (!authority.isCurrent) return;
+      if (authority.isCurrent) {
         if (failure is ApiException && failure.statusCode == 401) {
           _expireSession();
         } else if (failure is ApiException && failure.statusCode == 0) {
@@ -1210,12 +1249,14 @@ class AppController extends ChangeNotifier {
   }
 
   Future<WorkOrder> loadOrder(int id) async {
+    final authority = captureNavigationScope();
+    _orderAccessDenials.removeWhere((_, scope) => !scope.isCurrent);
     if (id < 0) {
       if (user != null) {
         final session = _session;
         final mappingKey = _scope('$id');
         final mapped = await (await _local()).serverId(mappingKey);
-        if (!_current(session)) {
+        if (!_current(session) || !authority.isCurrent) {
           throw const ApiException('Сессия изменилась.', 401);
         }
         if (mapped != null) return loadOrder(mapped);
@@ -1229,30 +1270,45 @@ class AppController extends ChangeNotifier {
     final session = _session;
     try {
       final result = await api.order(id);
-      if (!_current(session)) {
+      if (!_current(session) || !authority.isCurrent) {
         throw const ApiException('Сессия изменилась.', 401);
       }
+      // Only this authorized HTTP result clears a denial. An offline snapshot
+      // may not restore denied access when the user reopens the same route.
+      _orderAccessDenials.remove(id);
       _upsert(result);
       await _reloadOutbox();
-      if (!_current(session)) {
+      if (!_current(session) || !authority.isCurrent) {
         throw const ApiException('Сессия изменилась.', 401);
       }
       await _persistSnapshot(session, force: true);
-      if (!_current(session)) {
+      if (!_current(session) || !authority.isCurrent) {
         throw const ApiException('Сессия изменилась.', 401);
       }
       return orders.firstWhere((order) => order.id == id);
     } catch (failure) {
-      if (_current(session) &&
+      if (authority.isCurrent &&
+          failure is ApiException &&
+          {403, 404}.contains(failure.statusCode)) {
+        _orderAccessDenials[id] = authority;
+        _notify();
+      }
+      if (authority.isCurrent &&
           failure is ApiException &&
           failure.statusCode == 0) {
+        if (_orderAccessDenials[id]?.isCurrent == true) {
+          throw const ApiException(
+            'Доступ к наряду ранее был отклонён. Подключитесь к серверу для проверки; сохранённые данные и команды не удалены.',
+            403,
+          );
+        }
         final cached = orders.where((item) => item.id == id);
         if (cached.isNotEmpty) {
           offline = true;
           return cached.first;
         }
       }
-      if (_current(session) &&
+      if (authority.isCurrent &&
           failure is ApiException &&
           failure.statusCode == 401) {
         _expireSession();
@@ -1813,9 +1869,10 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _syncOutbox(int session, NaryadApi source, int ownerId) async {
+    final authority = captureNavigationScope();
     try {
       final store = await _local();
-      if (!_current(session)) return;
+      if (!_current(session) || !authority.isCurrent) return;
       final commands = await store.outbox();
       final relevant = commands
           .where((command) => _owns(command, source, ownerId))
@@ -1824,7 +1881,7 @@ class AppController extends ChangeNotifier {
       var sent = false;
       final blocked = <String>{};
       for (final command in relevant) {
-        if (!_current(session)) break;
+        if (!_current(session) || !authority.isCurrent) break;
         final lane = await _lane(store, command);
         if (blocked.contains(lane)) continue;
         if (command.state == OutboxState.conflict ||
@@ -1855,6 +1912,7 @@ class AppController extends ChangeNotifier {
           session,
           command,
           orderId ?? 0,
+          authority,
         );
         if (handled) {
           sent = true;
@@ -1862,13 +1920,13 @@ class AppController extends ChangeNotifier {
           blocked.add(lane);
         }
       }
-      if (sent && _current(session)) {
+      if (sent && _current(session) && authority.isCurrent) {
         // Drain the read started before the queued write, then fetch a new
         // snapshot instead of coalescing with a stale in-flight refresh.
         try {
           await _refreshFuture;
         } catch (_) {}
-        if (!_current(session)) return;
+        if (!_current(session) || !authority.isCurrent) return;
         try {
           await refresh(silent: true);
         } catch (_) {
@@ -1886,26 +1944,41 @@ class AppController extends ChangeNotifier {
     int session,
     OutboxCommand command,
     int orderId,
+    NavigationScope authority,
   ) async {
-    if (!_current(session)) return false;
+    if (!_current(session) || !authority.isCurrent) return false;
     await store.updateOutbox(command.copyWith(state: OutboxState.running));
-    if (!_current(session)) {
+    if (!_current(session) || !authority.isCurrent) {
       await store.updateOutbox(command.copyWith(state: OutboxState.pending));
       return false;
     }
     try {
-      final result = await _executeCommand(store, source, command, orderId);
-      if (!_current(session)) {
+      final result = await _executeCommand(
+        store,
+        source,
+        command,
+        orderId,
+        ensureCurrent: () {
+          if (!_current(session) || !authority.isCurrent) {
+            throw const ApiException('Сессия или права изменились.', 401);
+          }
+        },
+      );
+      if (!_current(session) || !authority.isCurrent) {
         await store.updateOutbox(command.copyWith(state: OutboxState.pending));
         return false;
       }
       await store.removeOutbox(command.commandId);
-      if (!_current(session)) return true;
+      if (!_current(session) || !authority.isCurrent) return true;
       ++_dataRevision;
       if (result is WorkOrder) _upsert(result);
       await _reloadOutbox();
       return true;
     } on ApiException catch (failure) {
+      if (!_current(session) || !authority.isCurrent) {
+        await store.updateOutbox(command.copyWith(state: OutboxState.pending));
+        return false;
+      }
       if (failure.statusCode == 401) {
         await store.updateOutbox(
           command.copyWith(
@@ -1914,7 +1987,7 @@ class AppController extends ChangeNotifier {
             lastError: failure.message,
           ),
         );
-        if (_current(session)) _expireSession();
+        if (_current(session) && authority.isCurrent) _expireSession();
         return false;
       }
       final retryable =
@@ -1941,6 +2014,10 @@ class AppController extends ChangeNotifier {
       await _reloadOutbox();
       return false;
     } catch (failure) {
+      if (!_current(session) || !authority.isCurrent) {
+        await store.updateOutbox(command.copyWith(state: OutboxState.pending));
+        return false;
+      }
       await store.updateOutbox(
         command.copyWith(
           state: OutboxState.pending,
@@ -2045,10 +2122,12 @@ class AppController extends ChangeNotifier {
     final ownerId = user!.id;
     final token = source.token;
     final role = user!.role;
+    final authority = captureNavigationScope();
     final commandId = _newCommandId();
     final lease = Completer<void>();
     _writeLease = lease;
     bool currentWrite() =>
+        authority.isCurrent &&
         _current(session) &&
         identical(api, source) &&
         source.token == token &&
@@ -2551,9 +2630,11 @@ class AppController extends ChangeNotifier {
     final token = source.token;
     final ownerId = user!.id;
     final role = user!.role;
+    final authority = captureNavigationScope();
     final lease = Completer<void>();
     _writeLease = lease;
     bool currentWrite() =>
+        authority.isCurrent &&
         _current(session) &&
         identical(api, source) &&
         source.token == token &&

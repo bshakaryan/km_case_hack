@@ -6,6 +6,7 @@ import '../data/app_controller.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
 import '../data/recovery_models.dart';
+import '../domain/navigation_scope.dart';
 import '../ui.dart';
 import 'command_inspector_screen.dart';
 import 'create_order_screen.dart';
@@ -14,6 +15,13 @@ import 'overview_screen.dart';
 import 'orders_screen.dart';
 import 'reports_screen.dart';
 import 'reference_catalog_screen.dart';
+
+class _NoticeTarget {
+  const _NoticeTarget(this.id, this.orderId, this.scope);
+  final int id;
+  final int? orderId;
+  final NavigationScope scope;
+}
 
 class WorkspaceScreen extends StatefulWidget {
   const WorkspaceScreen({required this.controller, super.key});
@@ -27,15 +35,20 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
   int page = 0;
   String? orderFilter;
   int? assigneeFilter;
+  final Set<int> _openingNotices = {};
+  _NoticeTarget? _pendingNotice;
+  Object? _noticeCallback;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.controller.addListener(_resumeNotice);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.controller.removeListener(_resumeNotice);
     super.dispose();
   }
 
@@ -55,17 +68,111 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
     }
   }
 
-  Future<void> openOrder(int id) async {
+  Future<void> openOrder(int id, {bool notificationEntry = false}) async {
+    final scope = widget.controller.captureNavigationScope();
+    if (!scope.isCurrent) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            OrderDetailScreen(controller: widget.controller, orderId: id),
+        settings: RouteSettings(name: 'order:$id'),
+        builder: (_) => OrderDetailScreen(
+          controller: widget.controller,
+          orderId: id,
+          notificationEntry: notificationEntry,
+        ),
       ),
     );
-    if (mounted) _refresh(silent: true);
+    if (mounted && scope.isCurrent) {
+      _refresh(silent: true);
+      _resumeNotice();
+    }
+  }
+
+  void _openNotice(Json notice) {
+    final id = notice['id'];
+    final orderId = notice['order_id'];
+    if (id is! int || id <= 0 || _openingNotices.contains(id)) return;
+    final scope = widget.controller.captureNavigationScope();
+    if (!scope.isCurrent) return;
+    _pendingNotice = _NoticeTarget(
+      id,
+      orderId is int && orderId > 0 ? orderId : null,
+      scope,
+    );
+    if (widget.controller.referenceWriteBusy) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Уведомление откроется после текущей отправки.'),
+        ),
+      );
+    }
+    _resumeNotice();
+  }
+
+  bool _emergencyNotice(Json notice) => widget.controller.orders.any(
+    (order) => order.id == notice['order_id'] && order.priority == 'emergency',
+  );
+
+  void _resumeNotice() {
+    final target = _pendingNotice;
+    if (!mounted || target == null) return;
+    if (!target.scope.isCurrent) {
+      _pendingNotice = null;
+      _noticeCallback = null;
+      return;
+    }
+    if (_noticeCallback != null || widget.controller.referenceWriteBusy) return;
+    final ticket = Object();
+    _noticeCallback = ticket;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !identical(_noticeCallback, ticket)) return;
+      _noticeCallback = null;
+      if (!identical(_pendingNotice, target) || !target.scope.isCurrent) {
+        _resumeNotice();
+        return;
+      }
+      if (widget.controller.referenceWriteBusy ||
+          !(ModalRoute.of(context)?.isCurrent ?? false)) {
+        return;
+      }
+      _pendingNotice = null;
+      unawaited(_launchNotice(target));
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _launchNotice(_NoticeTarget target) async {
+    if (!target.scope.isCurrent || !_openingNotices.add(target.id)) return;
+    // Reading is independent of viewing/answering. Never accept on a tap.
+    final read = _markNoticeRead(target);
+    try {
+      if (target.orderId != null && mounted && target.scope.isCurrent) {
+        await openOrder(target.orderId!, notificationEntry: true);
+      } else {
+        await read;
+      }
+    } finally {
+      _openingNotices.remove(target.id);
+    }
+  }
+
+  Future<void> _markNoticeRead(_NoticeTarget target) async {
+    try {
+      await widget.controller.markRead(target.id);
+    } catch (failure) {
+      if (mounted && target.scope.isCurrent) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Не удалось отметить уведомление прочитанным: $failure',
+            ),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> createOrder({int? assigneeId}) async {
+    final scope = widget.controller.captureNavigationScope();
     final order = await Navigator.of(context).push<WorkOrder>(
       MaterialPageRoute(
         builder: (_) => CreateOrderScreen(
@@ -74,7 +181,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
         ),
       ),
     );
-    if (mounted && order != null) openOrder(order.id);
+    if (mounted && scope.isCurrent && order != null) openOrder(order.id);
   }
 
   String commandLabel(OutboxCommand command) => switch (command.kind) {
@@ -388,7 +495,11 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                                     n['read'] == true
                                         ? Icons.notifications_none
                                         : Icons.notifications_active_outlined,
-                                    color: n['read'] == true ? muted : navy,
+                                    color: _emergencyNotice(n)
+                                        ? danger
+                                        : n['read'] == true
+                                        ? muted
+                                        : navy,
                                   ),
                                   title: Text(
                                     '${n['title'] ?? 'Событие наряда'}',
@@ -405,22 +516,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                                   trailing: n['order_id'] != null
                                       ? const Icon(Icons.chevron_right)
                                       : null,
-                                  onTap: () async {
-                                    try {
-                                      await c.markRead(n['id'] as int);
-                                      if (mounted && n['order_id'] != null) {
-                                        openOrder(n['order_id'] as int);
-                                      }
-                                    } catch (e) {
-                                      if (context.mounted) {
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          SnackBar(content: Text(e.toString())),
-                                        );
-                                      }
-                                    }
-                                  },
+                                  onTap: () => _openNotice(n),
                                 ),
                               ),
                             ),
