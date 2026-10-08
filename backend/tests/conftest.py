@@ -6,7 +6,7 @@ from app.main import create_app
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
     database = tmp_path_factory.mktemp("api") / "test.db"
-    app = create_app(f"sqlite:///{database}", monitor=False)
+    app = create_app(f"sqlite:///{database}", monitor=False, ai_provider=False)
     with TestClient(app) as test_client:
         yield test_client
 

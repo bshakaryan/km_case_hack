@@ -43,3 +43,25 @@ def test_log_notifier_never_claims_delivery():
 
     assert asyncio.run(LogNotifier().send("E-07", "Срок", "Проверьте наряд", "deadline:7")) is False
 
+
+def test_service_evaluation_requires_current_submission_and_token(tmp_path):
+    payload = snapshot_payload()
+    order = payload["orders"][0]
+    order["status"] = "ai_review"
+    order["started_at"] = order["created_at"]
+    order["completed_at"] = order["created_at"]
+    order["completion"] = {"work_done": "Проверили насос и устранили течь", "fault_code_id": 1, "materials": []}
+    order["events"] = [{"id": 8, "action": "complete", "to_status": "completed", "created_at": order["created_at"]}]
+    path = tmp_path / "snapshot.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    settings = Settings(ai_service_token="local-secret", ai_database_url="sqlite:///:memory:")
+    app = create_app(settings, SyntheticDataSource(path))
+    with TestClient(app) as client:
+        endpoint = "/ai/reviews/7/evaluate"
+        assert client.post(endpoint, json={"source_version": "event:8"}).status_code == 401
+        headers = {"Authorization": "Bearer local-secret"}
+        assert client.post(endpoint, json={"source_version": "event:7"}, headers=headers).status_code == 422
+        result = client.post(endpoint, json={"source_version": "event:8"}, headers=headers)
+        assert result.status_code == 200, result.text
+        assert result.json()["review"]["verdict"] == "needs_rework"
+        assert result.json()["photo_review"]["needs_master_review"] is True

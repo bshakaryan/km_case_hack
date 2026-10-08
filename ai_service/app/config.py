@@ -26,6 +26,7 @@ class Settings(BaseModel):
     synthetic_data_path: Path = BASE_DIR / "data" / "snapshot.json"
     backend_url: str = "http://127.0.0.1:8000"
     backend_token: SecretStr = SecretStr("")
+    backend_service_token: SecretStr = SecretStr("")
     ai_service_token: SecretStr = SecretStr("")
     ai_database_url: str = str(URL.create("sqlite", database=str(BASE_DIR / "state" / "ai.db")))
     ai_db_confirmed_separate: bool = False
@@ -73,6 +74,7 @@ class Settings(BaseModel):
             synthetic_data_path=path,
             backend_url=os.getenv("BACKEND_URL", "http://127.0.0.1:8000"),
             backend_token=os.getenv("BACKEND_TOKEN", ""),
+            backend_service_token=os.getenv("BACKEND_SERVICE_TOKEN", ""),
             ai_service_token=os.getenv("AI_SERVICE_TOKEN", ""),
             ai_database_url=os.getenv("AI_DATABASE_URL") or cls.model_fields["ai_database_url"].default,
             ai_db_confirmed_separate=os.getenv("AI_DB_CONFIRMED_SEPARATE", "false").lower() == "true",

@@ -12,7 +12,7 @@ from .storage import AIStore
 def source_version(order: OrderRecord):
     completions = [event for event in order.events if event.action == "complete"]
     if completions:
-        return f"event:{max(completions, key=lambda event: utc(event.created_at)).id}"
+        return f"event:{max(completions, key=lambda event: (utc(event.created_at), event.id)).id}"
     return f"completed:{utc(order.completed_at).isoformat()}" if order.completed_at else "no-completion"
 
 

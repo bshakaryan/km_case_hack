@@ -1018,6 +1018,7 @@ export default function App() {
               reference={reference}
               notify={notify}
               version={version}
+              canUseAI={user.role !== "worker"}
               onInspectOrders={(filters) =>
                 inspectOrders({ focus: "all", ...filters })
               }

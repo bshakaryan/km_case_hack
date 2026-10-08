@@ -73,6 +73,10 @@ class ReportService:
         photo_review = saved_photo["payload"] if saved_photo else None
         override = saved["master_override"] if saved else None
         final_verdict = override.get("verdict") if override else review.get("verdict") if review else "unknown"
+        if not override and order.status == "closed":
+            final_verdict = "accepted_by_master"
+        elif not override and order.status == "rework":
+            final_verdict = "needs_rework_by_master"
         final_score = override.get("score") if override else order.score
         if final_score is None and order.ai_review:
             final_score = order.ai_review.get("score")
@@ -94,7 +98,7 @@ class ReportService:
                 "photo_review_status": photo_review.get("status") if photo_review else "unknown",
                 "photo_score_recommendation": photo_review.get("score") if photo_review else None,
                 "photo_needs_master_review": photo_review.get("needs_master_review") if photo_review else None,
-                "final_decision_by_master": order.status == "closed" or bool(override)}
+                "final_decision_by_master": order.status in {"closed", "rework"} or bool(override)}
         if audience == "worker":
             base.update({"good": ["Работы описаны"] if order.completion and order.completion.work_done else [],
                          "improve": review.get("concerns", []) if review else [],

@@ -27,6 +27,14 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-naryad}:${POSTGRES_PASSWORD:-demo-only-change-me}@db:5432/${POSTGRES_DB:-naryad_ai}
       SEED_DEMO: ${SEED_DEMO:-true}
+      AI_PROVIDER: ${AI_PROVIDER:-stub}
+      AI_MODEL: ${AI_MODEL:-gpt-4.1-mini}
+      OPEN_AI_API_KEY: ${OPEN_AI_API_KEY:-}
+      DUE_SOON_MINUTES: ${DUE_SOON_MINUTES:-30}
+      ACCEPT_MINUTES: ${ACCEPT_MINUTES:-10}
+      EMERGENCY_ACCEPT_MINUTES: ${EMERGENCY_ACCEPT_MINUTES:-3}
+      REMINDER_REPEAT_MINUTES: ${REMINDER_REPEAT_MINUTES:-30}
+      MANAGER_ESCALATION_MINUTES: ${MANAGER_ESCALATION_MINUTES:-60}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       TZ: Asia/Almaty
     ports:

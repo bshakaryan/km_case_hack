@@ -33,6 +33,10 @@ class TickRequest(BaseModel):
     now: datetime | None = None
 
 
+class EvaluateRequest(BaseModel):
+    source_version: str = Field(min_length=1)
+
+
 class MasterOverrideRequest(BaseModel):
     source_version: str
     master_id: int
@@ -56,7 +60,8 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
     store = store or AIStore(settings.ai_database_url, settings.ai_db_confirmed_separate)
     if source is None:
         if settings.data_source == "backend":
-            source = BackendDataSource(settings.backend_url, settings.backend_token.get_secret_value())
+            source = BackendDataSource(settings.backend_url, settings.backend_token.get_secret_value(),
+                                       service_token=settings.backend_service_token.get_secret_value())
         else:
             source = SyntheticDataSource(settings.synthetic_data_path)
     notifier = (TelegramNotifier(settings.telegram_bot_token.get_secret_value(), settings.telegram_chats)
@@ -241,6 +246,12 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
                 return JSONResponse(status_code=202, content={"order_id": order_id, **job["payload"]})
             raise HTTPException(404, "Проверка ещё не запущена")
         return result
+
+    @app.post("/ai/reviews/{order_id}/evaluate", dependencies=[Depends(require_token)])
+    async def evaluate_review(order_id: int, request: EvaluateRequest):
+        review = await verifier.verify(order_id, expected_version=request.source_version)
+        photo_review = await photo_service.review(order_id, expected_version=request.source_version)
+        return {"review": review, "photo_review": photo_review}
 
     @app.post("/ai/reviews/{order_id}/master-override", dependencies=[Depends(require_token)])
     async def master_override(order_id: int, request: MasterOverrideRequest):

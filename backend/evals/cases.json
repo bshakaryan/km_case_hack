@@ -1,0 +1,72 @@
+[
+  {
+    "id": "repair_visible",
+    "description": "Протечка устранена, отчёт конкретный, фото после показывает сухой фланец.",
+    "work_done": "Заменена прокладка фланца, болты затянуты; после пуска соединение визуально сухое.",
+    "before": "pump_before_leak.png",
+    "after": "pump_after_dry.png",
+    "materials": [{"material_id": 18, "quantity": 1}],
+    "expected_verdict": "passed",
+    "rationale": "Снимки показывают тот же узел; видимая течь исчезла, а отчёт описывает замену и проверку. Это только рекомендация, не доказательство герметичности под нагрузкой."
+  },
+  {
+    "id": "leak_remains",
+    "description": "Отчёт заявляет об устранении течи, но на фото после она видна.",
+    "work_done": "Заменена прокладка фланца, болты затянуты; течь полностью устранена.",
+    "before": "pump_before_leak.png",
+    "after": "pump_after_leaking.png",
+    "materials": [{"material_id": 18, "quantity": 1}],
+    "expected_verdict": "needs_rework",
+    "rationale": "На фото после сохраняется видимая течь из того же соединения; заявление об устранении противоречит фото."
+  },
+  {
+    "id": "vague_report",
+    "description": "Фото после сухое, но отчёт не описывает действия и проверку.",
+    "work_done": "Работы по наряду выполнены в полном объёме.",
+    "before": "pump_before_leak.png",
+    "after": "pump_after_dry.png",
+    "materials": [],
+    "expected_verdict": "needs_attention",
+    "rationale": "По одному сухому снимку нельзя установить, что именно сделано и проверялся ли узел после пуска."
+  },
+  {
+    "id": "wrong_equipment",
+    "description": "Вместо насоса после ремонта приложено фото электрического шкафа.",
+    "work_done": "Заменена прокладка фланца насоса, болты затянуты; соединение проверено после пуска.",
+    "before": "pump_before_leak.png",
+    "after": "electrical_cabinet.png",
+    "materials": [{"material_id": 18, "quantity": 1}],
+    "expected_verdict": "needs_attention",
+    "rationale": "Фото после не относится к заявленному насосу; по нему нельзя подтвердить результат ремонта."
+  },
+  {
+    "id": "exact_duplicate",
+    "description": "Один и тот же файл приложен как фото до и после.",
+    "work_done": "Заменена прокладка фланца насоса, болты затянуты; соединение проверено после пуска.",
+    "before": "pump_before_leak.png",
+    "after": "pump_before_leak.png",
+    "materials": [{"material_id": 18, "quantity": 1}],
+    "expected_verdict": "needs_attention",
+    "rationale": "Побайтовый дубликат не доказывает состояние после ремонта; сервис должен добавить замечание о совпадении файлов."
+  },
+  {
+    "id": "blurred_after",
+    "description": "Фото после размыто, состояние фланца нельзя разобрать.",
+    "work_done": "Заменена прокладка фланца насоса, болты затянуты; соединение проверено после пуска.",
+    "before": "pump_before_leak.png",
+    "after": "pump_after_blurred.png",
+    "materials": [{"material_id": 18, "quantity": 1}],
+    "expected_verdict": "needs_attention",
+    "rationale": "На фото после нельзя достоверно оценить наличие или отсутствие течи; нужен новый чёткий снимок."
+  },
+  {
+    "id": "worker_reports_failure",
+    "description": "Исполнитель прямо сообщает, что течь сохранилась; фото это подтверждает.",
+    "work_done": "После подтяжки болтов течь сохранилась; нужна замена прокладки и повторная проверка.",
+    "before": "pump_before_leak.png",
+    "after": "pump_after_leaking.png",
+    "materials": [],
+    "expected_verdict": "needs_rework",
+    "rationale": "Дефект не устранён по отчёту исполнителя и снимку после; требуется доработка."
+  }
+]

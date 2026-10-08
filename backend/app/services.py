@@ -52,7 +52,9 @@ def photo_dict(db, photo):
 
 
 def audit(db, order, action, actor_id, old_status=None, comment=""):
-    db.add(OrderEvent(order_id=order.id, action=action, from_status=old_status, to_status=order.status, actor_id=actor_id, comment=comment))
+    event = OrderEvent(order_id=order.id, action=action, from_status=old_status, to_status=order.status, actor_id=actor_id, comment=comment)
+    db.add(event)
+    return event
 
 
 class NativePushStub:
@@ -74,25 +76,64 @@ def notify(db, employee_ids, title, message, kind, order_id, dedupe_prefix=None)
     return added
 
 
+def deadline_setting(name, default):
+    try:
+        value = int(os.getenv(name, str(default)))
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
+def assignment_event(db, order):
+    events = db.scalars(select(OrderEvent).where(OrderEvent.order_id == order.id, OrderEvent.action.in_(["issue", "edit"])).order_by(OrderEvent.created_at.desc(), OrderEvent.id.desc()))
+    for event in events:
+        if event.action == "issue" or "assignee_id=" in event.comment or "brigade_id=" in event.comment:
+            return event
+    return None
+
+
+def replacement_worker(db, order, worker):
+    if not worker.specialty:
+        return None
+    active_ids = set(db.scalars(select(Order.assignee_id).where(Order.status.notin_(EXECUTION_FINISHED | {"rejected"}))))
+    return db.scalar(select(Employee).where(Employee.role == "worker", Employee.on_shift.is_(True), Employee.specialty == worker.specialty, Employee.id != worker.id, Employee.id.notin_(active_ids)).order_by(Employee.id).limit(1))
+
+
 def monitor_deadlines(db, now=None):
     now = aware(now or utcnow())
     added = 0
-    due_soon_minutes = int(os.getenv("DUE_SOON_MINUTES", "30"))
+    due_soon_minutes = deadline_setting("DUE_SOON_MINUTES", 30)
+    repeat_minutes = deadline_setting("REMINDER_REPEAT_MINUTES", 30)
+    manager_minutes = deadline_setting("MANAGER_ESCALATION_MINUTES", 60)
     for order in db.scalars(select(Order).where(Order.status.notin_(EXECUTION_FINISHED))):
         minutes = (aware(order.deadline) - now).total_seconds() / 60
         key = f"{order.id}:{iso(order.deadline)}"
         equipment = db.get(Equipment, order.equipment_id)
         area = db.get(Area, order.area_id)
         worker = db.get(Employee, order.assignee_id)
-        latest = db.scalar(select(OrderEvent).where(OrderEvent.order_id == order.id, OrderEvent.comment != "").order_by(OrderEvent.created_at.desc(), OrderEvent.id.desc()).limit(1))
-        detail = f"{order.number}: {order.title}. {equipment.name}; {area.name}; исполнитель: {worker.name}. Срок: {aware(order.deadline).astimezone(ZoneInfo('Asia/Almaty')).strftime('%d.%m %H:%M')}. Просрочка: {max(0, round(-minutes))} мин. Комментарий: {latest.comment if latest else order.comment or 'нет'}."
+        latest = db.scalar(select(OrderEvent).where(OrderEvent.order_id == order.id, OrderEvent.comment != "", OrderEvent.action != "edit").order_by(OrderEvent.created_at.desc(), OrderEvent.id.desc()).limit(1))
+        status_event = db.scalar(select(OrderEvent).where(OrderEvent.order_id == order.id, OrderEvent.to_status == order.status).order_by(OrderEvent.created_at.desc(), OrderEvent.id.desc()).limit(1))
+        status_time = status_event.created_at if status_event else order.started_at or order.created_at
+        status = {"issued": "выдан", "accepted": "принят", "queued": "в очереди", "rejected": "отклонён", "in_progress": "в работе", "paused": "приостановлен", "rework": "на доработке"}.get(order.status, order.status)
+        detail = f"Наряд {order.number}: {order.title}. Оборудование: {equipment.name}; участок: {area.name}; исполнитель: {worker.name}. Статус: {status} с {aware(status_time).astimezone(ZoneInfo('Asia/Almaty')).strftime('%d.%m %H:%M')}. Срок: {aware(order.deadline).astimezone(ZoneInfo('Asia/Almaty')).strftime('%d.%m %H:%M')}. Просрочка: {max(0, int(-minutes))} мин. Последний комментарий: {latest.comment if latest else order.comment or 'нет'}."
         if minutes < 0:
-            added += notify(db, [order.assignee_id, order.master_id], "Срок наряда истёк", detail, "overdue", order.id, f"overdue:{key}")
+            repeat = int(-minutes // repeat_minutes)
+            added += notify(db, [order.assignee_id, order.master_id], "Срок наряда истёк", detail, "overdue", order.id, f"overdue:{key}:{repeat}")
+            if -minutes >= manager_minutes:
+                managers = db.scalars(select(Employee.id).where(Employee.role == "manager"))
+                added += notify(db, managers, "Длительная просрочка наряда", detail, "overdue_escalated", order.id, f"overdue_escalated:{key}")
         elif minutes <= due_soon_minutes:
-            added += notify(db, [order.assignee_id, order.master_id], f"До срока менее {due_soon_minutes} минут", detail, "due_soon", order.id, f"due_soon:{key}")
-        acceptance_minutes = int(os.getenv("EMERGENCY_ACCEPT_MINUTES", "3")) if order.priority == "emergency" else int(os.getenv("ACCEPT_MINUTES", "10"))
-        if order.status == "issued" and (now - aware(order.created_at)).total_seconds() >= acceptance_minutes * 60:
-            added += notify(db, [order.assignee_id, order.master_id], f"Наряд не принят {acceptance_minutes} минут", detail, "unaccepted", order.id, f"unaccepted:{order.id}:{order.assignee_id}:{iso(order.created_at)}")
+            added += notify(db, [order.assignee_id], f"До срока менее {due_soon_minutes} минут", detail, "due_soon", order.id, f"due_soon:{key}")
+        acceptance_minutes = deadline_setting("EMERGENCY_ACCEPT_MINUTES", 3) if order.priority == "emergency" else deadline_setting("ACCEPT_MINUTES", 10)
+        assignment = assignment_event(db, order) if order.status == "issued" else None
+        assigned_at = aware(assignment.created_at) if assignment else aware(order.created_at)
+        elapsed = (now - assigned_at).total_seconds() / 60
+        if order.status == "issued" and elapsed >= acceptance_minutes:
+            candidate = replacement_worker(db, order, worker)
+            suggestion = f"Предложение замены: {candidate.name} ({candidate.specialty}), свободен на смене." if candidate else "Свободный исполнитель той же специальности не найден; выбор остаётся за мастером."
+            repeat = int((elapsed - acceptance_minutes) // repeat_minutes)
+            assignment_key = assignment.id if assignment else iso(order.created_at)
+            added += notify(db, [order.master_id], f"Наряд не принят {acceptance_minutes} минут", f"{detail} {suggestion}", "unaccepted", order.id, f"unaccepted:{order.id}:{assignment_key}:{repeat}")
     db.commit()
     return added
 

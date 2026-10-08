@@ -354,6 +354,12 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   ]),
                   _photos(order),
                   if (order.data['completion'] is Map) _report(order),
+                  if (order.status == 'completed' && order.data['ai_review'] == null)
+                    _section('ИИ проверяет отчёт', [
+                      const Text(
+                        'Сдача сохранена. Результат появится после фоновой проверки; приёмку выполнит мастер.',
+                      ),
+                    ]),
                   if (order.data['ai_review'] is Map) _review(order),
                   _history(order),
                   if (_updatedAt != null)
@@ -637,13 +643,18 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   Widget _review(WorkOrder order) {
     final review = Map<String, dynamic>.from(order.data['ai_review'] as Map);
     final stub = review['is_stub'] == true;
+    final unavailable = review['source'] == 'unavailable';
     final verdict = switch (review['verdict']) {
       'passed' => 'Принято',
       'needs_attention' => 'Принято с замечаниями',
       'rework' || 'needs_rework' => 'Требует доработки',
       _ => 'Нужна проверка мастером',
     };
-    return _section(stub ? 'Формальная проверка · демо' : 'Проверка ИИ', [
+    return _section(unavailable
+        ? 'Ручная проверка · ИИ недоступен'
+        : stub
+            ? 'Формальная проверка · демо'
+            : 'Проверка ИИ', [
       Text(
         verdict,
         style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
@@ -658,7 +669,16 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             .toString(),
         style: const TextStyle(height: 1.4),
       ),
-      if (stub) ...[
+      if (review['photo_summary'] is String &&
+          (review['photo_summary'] as String).isNotEmpty)
+        Text(review['photo_summary'].toString()),
+      if (review['issues'] is List)
+        ...List<String>.from(review['issues'] as List).map(Text.new),
+      if (review['confidence'] is num)
+        Text(
+          'Уверенность модели: ${((review['confidence'] as num) * 100).round()}%',
+        ),
+      if (stub && !unavailable) ...[
         const Divider(height: 24),
         const Text(
           'Проверяется наличие фото. Содержимое снимков не анализируется; настоящий ИИ пока не подключён.',

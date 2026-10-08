@@ -51,6 +51,7 @@ import {
   post,
   priorityNames,
   statusNames,
+  token,
 } from "./model";
 import type {
   Employee,
@@ -779,6 +780,13 @@ export function CreateOrder({
   const [error, setError] = useState("");
   const [unknownCreate, setUnknownCreate] = useState(false);
   const [created, setCreated] = useState<OrderDetail | null>(null);
+  const [hintBusy, setHintBusy] = useState(false);
+  const [hint, setHint] = useState<{
+    description: string;
+    fault_code_id: number | null;
+    time_norm_id: number | null;
+    explanation: string;
+  } | null>(null);
   const [photos, setPhotos] = useState<DraftPhoto[]>([]);
   const nextPhotoId = useRef(0);
   const requestLock = useRef(false);
@@ -811,6 +819,37 @@ export function CreateOrder({
       [key]: value,
       ...(key === "area_id" ? { equipment_id: "" } : {}),
     }));
+  async function requestHint() {
+    const description = form.description.trim();
+    if (description.length < 10 || hintBusy) return;
+    setHintBusy(true);
+    setError("");
+    try {
+      const result = await api<{
+        fault_code_id: number | null;
+        time_norm_id: number | null;
+        explanation: string;
+      }>("/ai/order-hints", {
+        method: "POST",
+        body: JSON.stringify({ description }),
+      });
+      const norm = r.time_norms.find(
+        (item) => Number(item.id) === result.time_norm_id,
+      );
+      if (norm) {
+        setForm((current) =>
+          current.description.trim() === description
+            ? { ...current, normal_hours: String(norm.hours) }
+            : current,
+        );
+      }
+      setHint({ ...result, description });
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setHintBusy(false);
+    }
+  }
   const close = () => {
     if (requestLock.current) return;
     if (created) {
@@ -1094,6 +1133,41 @@ export function CreateOrder({
                     placeholder="Что неисправно, что требуется сделать и как проверить результат"
                   />
                 </label>
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={requestHint}
+                  disabled={hintBusy || form.description.trim().length < 10}
+                >
+                  {hintBusy ? "Подбираем подсказку…" : "Подсказать шифр и норматив"}
+                </button>
+                {hint && hint.description === form.description.trim() && (
+                  <div className="info-banner" role="status">
+                    <Sparkles size={18} />
+                    <div>
+                      <p>
+                        {hint.fault_code_id
+                          ? `Шифр: ${r.fault_codes.find((item) => Number(item.id) === hint.fault_code_id)?.code || "—"}. `
+                          : "Шифр не определён. "}
+                        {hint.time_norm_id
+                          ? `Норматив: ${r.time_norms.find((item) => Number(item.id) === hint.time_norm_id)?.hours || "—"} ч.`
+                          : "Норматив не определён."}
+                      </p>
+                      <p>{hint.explanation}</p>
+                      {hint.time_norm_id && (
+                        <p>
+                          Норматив подставлен в поле на шаге «Назначение и
+                          срок». Перед выдачей проверьте его; значение можно
+                          изменить вручную.
+                        </p>
+                      )}
+                      <p>
+                        Шифр пока только подсказка: исполнитель выбирает его
+                        при сдаче наряда.
+                      </p>
+                    </div>
+                  </div>
+                )}
                 <label className="upload-area">
                   <Camera size={24} />
                   <strong>Фото до начала работ · необязательно</strong>
@@ -1516,10 +1590,21 @@ export function OrderDialog({
       setBusy(false);
     }
   }
-  async function execute(actionName: string) {
+  async function execute(actionName: string, agreedScore?: number) {
     if (mutationLock.current) return;
-    if (actionName === "close" && !score) {
+    const finalScore = agreedScore ?? (score ? Number(score) : null);
+    if (actionName === "close" && finalScore === null) {
       setError("Выберите итоговую оценку качества.");
+      return;
+    }
+    if (
+      actionName === "close" &&
+      finalScore !== null &&
+      (order?.ai_review?.score == null ||
+        Math.abs(finalScore - order.ai_review.score) > 0.001) &&
+      !reason.trim()
+    ) {
+      setError("Укажите причину изменения оценки ИИ.");
       return;
     }
     if (
@@ -1538,7 +1623,7 @@ export function OrderDialog({
         action: actionName,
         reason: reason || undefined,
         comment: reason || undefined,
-        score: actionName === "close" ? Number(score) : undefined,
+        score: actionName === "close" ? finalScore : undefined,
       });
       setOrder(o);
       setMode("none");
@@ -1560,9 +1645,31 @@ export function OrderDialog({
     if (["pause", "reject", "rework", "cancel", "close"].includes(name)) {
       setAction(name);
       setReason("");
-      if (name === "close") setScore("");
+      if (name === "close") setScore(order?.ai_review?.score == null ? "" : String(order.ai_review.score));
       setMode("action");
     } else void execute(name);
+  }
+  async function downloadAIReport(format: "pdf" | "xlsx") {
+    if (!order?.ai_review?.service_verdict) return;
+    const sessionToken = token();
+    try {
+      const response = await fetch(`/api/ai/reports/orders/${id}?format=${format}`, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      if (sessionToken !== token()) return;
+      if (response.status === 401) window.dispatchEvent(new Event("naryad:unauthorized"));
+      if (!response.ok) throw new Error("Не удалось сформировать отчёт ИИ");
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `Наряд-${order.number}-ИИ.${format}`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (failure) {
+      if (sessionToken === token()) setError((failure as Error).message);
+    }
   }
   async function upload(file: File, kind: string) {
     if (mutationLock.current || photoUncertain) return;
@@ -1778,7 +1885,7 @@ export function OrderDialog({
             <div className="detail-layout">
               <div className="detail-main">
                 <div className={order.completion ? "review-comparison" : ""}>
-                  <section className="review-problem">
+                    <section className="review-problem" id="completion-report">
                     <h3>Исходная задача</h3>
                     <p className="detail-description">
                       {order.description || "Описание не указано"}
@@ -1812,9 +1919,9 @@ export function OrderDialog({
                         </strong>
                       </div>
                       {order.completion.materials.length > 0 && (
-                        <div className="materials-report">
+                        <div className="materials-report" id="completion-materials">
                           {order.completion.materials.map((m, i) => (
-                            <div key={i}>
+                            <div key={i} id={`material-${m.material_id}`}>
                               <span>
                                 <Package size={14} />
                                 {m.name}
@@ -2022,15 +2129,12 @@ export function OrderDialog({
                           {order.photos
                             .filter((p) => p.kind === kind)
                             .map((p) => (
-                              <Photo
-                                key={p.id}
-                                url={p.url}
-                                alt={
-                                  kind === "before"
-                                    ? "Фото до выполнения"
-                                    : "Фото после выполнения"
-                                }
-                              />
+                              <div key={p.id} id={`photo-${p.id}`}>
+                                <Photo
+                                  url={p.url}
+                                  alt={kind === "before" ? "Фото до выполнения" : "Фото после выполнения"}
+                                />
+                              </div>
                             ))}
                           {canUpload &&
                             order.photos.filter((p) => p.kind === kind).length <
@@ -2073,17 +2177,25 @@ export function OrderDialog({
                     </p>
                   )}
                 </div>
+                {["completed", "ai_review"].includes(order.status) && !order.ai_review && (
+                  <section className="ai-review" role="status">
+                    <h3>ИИ проверяет отчёт</h3>
+                    <p>Сдача сохранена. Результат появится после фоновой проверки; приёмку выполнит мастер.</p>
+                  </section>
+                )}
                 {order.ai_review && (
                   <section className="ai-review">
                     <div>
                       <Sparkles size={18} />
                       <h3>
-                        {order.ai_review.is_stub
-                          ? "Формальная проверка"
-                          : "Проверка ИИ"}
+                        {order.ai_review.source === "rules_fallback"
+                          ? "Проверка без LLM"
+                          : order.ai_review.is_stub
+                            ? "Формальная проверка"
+                            : "Проверка ИИ"}
                       </h3>
                       {order.ai_review.is_stub && (
-                        <span className="stub-tag">ДЕМО · ЗАГЛУШКА</span>
+                        <span className="stub-tag">{order.ai_review.checked_without_llm ? "ПРОВЕРЕНО БЕЗ LLM" : "ДЕМО · ЗАГЛУШКА"}</span>
                       )}
                     </div>
                     <div className="review-verdict">
@@ -2091,19 +2203,40 @@ export function OrderDialog({
                         {(
                           {
                             passed: "Принято",
+                            accepted: "Принято",
+                            accepted_with_remarks: "Принято с замечаниями",
                             needs_attention: "Принято с замечаниями",
                             needs_rework: "Требует доработки",
+                            needs_master_review: "Нужна проверка мастером",
                             rework: "Требует доработки",
                           } as Record<string, string>
-                        )[order.ai_review.verdict] || "Нужна проверка мастером"}
+                        )[order.ai_review.service_verdict || order.ai_review.verdict] || "Нужна проверка мастером"}
                       </strong>
                       <span>
-                        Предварительная оценка: {order.ai_review.score} / 5
+                        Предварительная оценка: {order.ai_review.score == null ? "не определена" : `${order.ai_review.score} / 5`}
                       </span>
                     </div>
-                    <p>{order.ai_review.explanation}</p>
+                    {order.ai_review.needs_master_review && <p role="status">Нужна проверка мастером: по имеющимся данным нельзя подтвердить качество автоматически.</p>}
+                    {worker ? (
+                      <>
+                        <p><strong>Что сделано хорошо:</strong> {order.completion?.work_done ? "Результат работ описан в отчёте." : "Подтверждённых данных пока нет."}</p>
+                        <p><strong>Что улучшить:</strong> {order.ai_review.issues?.length ? order.ai_review.issues.join("; ") : "Замечаний по доступным данным нет."}</p>
+                        <p>{order.ai_review.explanation_worker || order.ai_review.explanation}</p>
+                      </>
+                    ) : <p>{order.ai_review.explanation}</p>}
+                    {order.ai_review.photo_summary && <p>{order.ai_review.photo_summary}</p>}
+                    {order.ai_review.issues?.map((issue, index) => <p key={index}>{issue}</p>)}
+                    {manager && order.ai_review.remarks?.map((remark, index) => {
+                      const reference = remark.evidence_ref;
+                      const photoId = reference === "after_photo" ? order.ai_review?.photo_review?.after_photo_id : reference === "before_photo" ? order.ai_review?.photo_review?.before_photo_id : null;
+                      const target = photoId ? `photo-${photoId}` : reference.startsWith("material:") ? `material-${reference.slice(9)}` : reference.startsWith("event:") ? `event-${reference.slice(6)}` : reference === "materials" ? "completion-materials" : "completion-report";
+                      return <p key={index}>{remark.text} <a href={`#${target}`}>Показать основание</a></p>;
+                    })}
+                    {worker && order.status === "rework" && <p><strong>На доработку:</strong> {[...order.events].reverse().find((event) => event.action === "rework")?.comment || "Уточните замечания у мастера."}</p>}
+                    {worker && order.completed_at && order.started_at && <p>Время от начала до сдачи: {number((new Date(order.completed_at).getTime() - new Date(order.started_at).getTime()) / 3600000, 1)} ч · норматив {number(order.normal_hours, 1)} ч (включая паузы).</p>}
+                    {order.ai_review.confidence != null && <small>Уверенность модели: {Math.round(order.ai_review.confidence * 100)}%</small>}
                     <small>
-                      {order.ai_review.is_stub
+                      {order.ai_review.is_stub && !order.ai_review.checked_without_llm
                         ? "Проверяется наличие фотографий. Содержимое снимков не анализируется. "
                         : ""}
                       Окончательное решение принимает мастер.
@@ -2113,6 +2246,10 @@ export function OrderDialog({
                         Оценка мастера: {order.score} / 5
                       </strong>
                     )}
+                    {order.ai_review.service_verdict && <div className="inline-actions">
+                      <button className="button secondary" type="button" onClick={() => void downloadAIReport("pdf")}>Скачать PDF</button>
+                      <button className="button secondary" type="button" onClick={() => void downloadAIReport("xlsx")}>Скачать Excel</button>
+                    </div>}
                   </section>
                 )}
                 {mode === "complete" && (
@@ -2351,6 +2488,12 @@ export function OrderDialog({
                             ))}
                           </select>
                         </label>
+                        {(order.ai_review?.score == null || Number(score) !== order.ai_review.score) && (
+                          <label>
+                            Причина изменения оценки <b>*</b>
+                            <textarea required minLength={3} maxLength={3000} rows={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Объясните решение — оно сохранится в истории" />
+                          </label>
+                        )}
                         <p className="field-hint">
                           Вы подтверждаете выполнение и качество работы. Наряд
                           будет закрыт.
@@ -2400,7 +2543,7 @@ export function OrderDialog({
                 </h3>
                 <div className="timeline">
                   {order.events.map((e, i) => (
-                    <div className="timeline-item" key={e.id}>
+                    <div className="timeline-item" key={e.id} id={`event-${e.id}`}>
                       <span
                         className={`timeline-point ${i === order.events.length - 1 ? "latest" : ""}`}
                       />
@@ -2418,6 +2561,7 @@ export function OrderDialog({
                             resume: "Работа продолжена",
                             complete: "Отчёт отправлен",
                             ai_review: "Отчёт проверен",
+                            ai_review_pending: "Проверка ИИ поставлена в очередь",
                             rework: "Возвращён на доработку",
                             close: "Принят мастером",
                             cancel: "Отменён",
@@ -2488,7 +2632,7 @@ export function OrderDialog({
                   Завершить работу
                 </button>
               )}
-              {manager && order.status === "ai_review" && (
+              {manager && order.status === "ai_review" && order.ai_review && (
                 <>
                   <button
                     className="button secondary"
@@ -2497,13 +2641,16 @@ export function OrderDialog({
                   >
                     На доработку
                   </button>
-                  <button
+                  {order.ai_review?.score != null && order.ai_review.verdict !== "needs_rework" && <button
                     className="button primary"
                     disabled={busy}
-                    onClick={() => actionClick("close")}
+                    onClick={() => void execute("close", order.ai_review!.score!)}
                   >
                     <CheckCheck size={17} />
-                    Принять работу
+                    Согласиться и принять
+                  </button>}
+                  <button className="button secondary" disabled={busy} onClick={() => actionClick("close")}>
+                    Изменить оценку
                   </button>
                 </>
               )}

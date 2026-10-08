@@ -380,11 +380,13 @@ export function AnalyticsPage({
   notify,
   version = 0,
   onInspectOrders,
+  canUseAI = false,
 }: {
   reference: Reference;
   notify: (s: string) => void;
   version?: number;
   onInspectOrders?: (filters: SourceFilters) => void;
+  canUseAI?: boolean;
 }) {
   const [data, setData] = useState<Analytics | null>(null);
   const [error, setError] = useState("");
@@ -409,6 +411,26 @@ export function AnalyticsPage({
   const [advanced, setAdvanced] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [tab, setTab] = useState("overview");
+  const [aiInsights, setAiInsights] = useState<{
+    query: string;
+    selection: string;
+    dataAt: string;
+    summary: string;
+    insights: { title: string; description: string; recommendation: string; fact_ids: string[] }[];
+    facts: { id: string; text: string }[];
+  } | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [answerFacts, setAnswerFacts] = useState<string[]>([]);
+  const [answerBusy, setAnswerBusy] = useState(false);
+  const [extended, setExtended] = useState<{
+    query: string;
+    shift: { issued: number; completed: number; overdue: number; rejected_or_reworked: number; reported_downtime_minutes: number | null; summary: string };
+    ratings: { employee_id: number; employee_alias: string; score: number | null; components: Record<string, number | null>; explanation: string }[];
+  } | null>(null);
+  const [extendedBusy, setExtendedBusy] = useState(false);
   const selection = JSON.stringify([days, filters]);
   const request = useMemo(() => {
     const now = new Date();
@@ -491,6 +513,87 @@ export function AnalyticsPage({
       setExporting(false);
     }
   }
+  async function analyze() {
+    if (!loaded || loaded.selection !== selection || aiBusy) return;
+    setAiBusy(true);
+    setAiError("");
+    try {
+      const result = await api<{
+        summary: string;
+        insights: { title: string; description: string; recommendation: string; fact_ids: string[] }[];
+        facts: { id: string; text: string }[];
+      }>(`/ai/insights?${loaded.query}`, { method: "POST" });
+      setAiInsights({ ...result, query: loaded.query, selection: loaded.selection, dataAt: loaded.at });
+    } catch (failure) {
+      setAiError((failure as Error).message);
+    } finally {
+      setAiBusy(false);
+    }
+  }
+  async function askAssistant(event: FormEvent) {
+    event.preventDefault();
+    if (!question.trim() || answerBusy) return;
+    setAnswerBusy(true);
+    setAiError("");
+    setAnswer("");
+    setAnswerFacts([]);
+    try {
+      const result = await api<{ answer: string; facts: { id: string; text: string }[] }>("/ai/assistant", {
+        method: "POST",
+        body: JSON.stringify({ question: question.trim() }),
+      });
+      setAnswer(result.answer);
+      setAnswerFacts(result.facts.map((fact) => fact.text));
+    } catch (failure) {
+      setAiError((failure as Error).message);
+    } finally {
+      setAnswerBusy(false);
+    }
+  }
+  async function loadExtendedReport() {
+    if (!loaded || loaded.selection !== selection || extendedBusy) return;
+    if (filters.area_id || filters.equipment_id || filters.assignee_id || filters.brigade_id) {
+      setAiError("Расширенный отчёт смены и рейтинг пока доступны только без фильтров участка, оборудования и сотрудников.");
+      return;
+    }
+    setExtendedBusy(true);
+    setAiError("");
+    try {
+      const period = new URLSearchParams({ start: loaded.bounds.from_date, end: loaded.bounds.to_date });
+      const [shift, ratingResult] = await Promise.all([
+        api<{ issued: number; completed: number; overdue: number; rejected_or_reworked: number; reported_downtime_minutes: number | null; summary: string }>(`/ai/reports/shift?${period}`),
+        api<{ ratings: { employee_id: number; employee_alias: string; score: number | null; components: Record<string, number | null>; explanation: string }[] }>(`/ai/ratings?${period}`),
+      ]);
+      setExtended({ query: loaded.query, shift, ratings: ratingResult.ratings });
+    } catch (failure) {
+      setAiError((failure as Error).message);
+    } finally {
+      setExtendedBusy(false);
+    }
+  }
+  async function downloadExtendedReport(format: "pdf" | "xlsx") {
+    if (!loaded || extended?.query !== loaded.query) return;
+    const sessionToken = token();
+    const period = new URLSearchParams({ start: loaded.bounds.from_date, end: loaded.bounds.to_date, format });
+    try {
+      const response = await fetch(`/api/ai/reports/shift?${period}`, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      if (sessionToken !== token()) return;
+      if (response.status === 401) window.dispatchEvent(new Event("naryad:unauthorized"));
+      if (!response.ok) throw new Error("Не удалось выгрузить отчёт смены ИИ");
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `НарядAI-смена.${format}`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (failure) {
+      if (sessionToken === token()) setAiError((failure as Error).message);
+    }
+  }
   function choosePeriod(period: string) {
     setDays(period);
     setFilters((current) => ({ ...current, from_date: "", to_date: "" }));
@@ -519,6 +622,14 @@ export function AnalyticsPage({
     });
   }
   const visibleBounds = loaded?.bounds ?? request.bounds;
+  const visibleAI = aiInsights?.selection === loaded?.selection ? aiInsights : null;
+  const visibleExtended = extended?.query === loaded?.query ? extended : null;
+  const shownInsights: (Analytics["insights"][number] & {
+    recommendation?: string;
+    fact_ids?: string[];
+  })[] = visibleAI
+    ? visibleAI.insights.map((insight) => ({ ...insight, severity: "info", is_stub: false }))
+    : data?.insights || [];
   return (
     <>
       <div className="analytics-toolbar">
@@ -805,6 +916,28 @@ export function AnalyticsPage({
                 материалами.
               </p>
             </details>
+            {canUseAI && (
+              <section className="panel">
+                <SectionTitle title="Расширенный отчёт ИИ-сервиса" caption="Факты по выбранному периоду; неизвестные данные не считаются нулём." action={
+                  <button className="button secondary" type="button" disabled={extendedBusy || busy || !loaded || loaded.selection !== selection} onClick={() => void loadExtendedReport()}>
+                    {extendedBusy ? "Считаем…" : "Показать отчёт и рейтинг"}
+                  </button>
+                } />
+                {visibleExtended && <>
+                  <p>{visibleExtended.shift.summary}</p>
+                  <p>Выдано: {visibleExtended.shift.issued}; выполнено: {visibleExtended.shift.completed}; просрочено: {visibleExtended.shift.overdue}; возвращено или отклонено: {visibleExtended.shift.rejected_or_reworked}.</p>
+                  <p>Простой по карточкам: {visibleExtended.shift.reported_downtime_minutes == null ? "неизвестен" : `${visibleExtended.shift.reported_downtime_minutes} мин`}. Фактические интервалы остановки не подтверждены.</p>
+                  <strong>Рейтинг исполнителей: {visibleExtended.ratings.length} с данными за период.</strong>
+                  <div className="inline-actions">
+                    <button className="button secondary" type="button" onClick={() => void downloadExtendedReport("pdf")}>PDF смены</button>
+                    <button className="button secondary" type="button" onClick={() => void downloadExtendedReport("xlsx")}>Excel смены</button>
+                  </div>
+                  <div className="table-wrap"><table className="data-table"><thead><tr><th>Исполнитель</th><th>Баллы</th><th>Качество</th><th>В срок</th><th>Без повторов</th></tr></thead><tbody>
+                    {visibleExtended.ratings.map((entry) => <tr key={entry.employee_id}><td>{entry.employee_alias}</td><td>{entry.score ?? "неизвестно"}</td><td>{entry.components.quality ?? "неизвестно"}</td><td>{entry.components.on_time ?? "неизвестно"}</td><td>{entry.components.no_repeat ?? "неизвестно"}</td></tr>)}
+                  </tbody></table></div>
+                </>}
+              </section>
+            )}
             <div className="analytics-tabs tabs">
               {[
                 ["overview", "Обзор"],
@@ -931,17 +1064,21 @@ export function AnalyticsPage({
                 <section className="insights-section">
                   <SectionTitle
                     title={
-                      data.is_stub
+                      data.is_stub && !visibleAI
                         ? "Демонстрационные подсказки"
                         : "Сигналы по истории"
                     }
                     caption={
-                      data.is_stub
+                      data.is_stub && !visibleAI
                         ? "Правила на данных выборки. Настоящий анализ ИИ ещё не подключён."
                         : "Выводы по выбранному периоду"
                     }
                     action={
-                      data.is_stub ? (
+                      canUseAI ? (
+                        <button className="button secondary" type="button" onClick={analyze} disabled={aiBusy || busy || loaded?.selection !== selection}>
+                          {aiBusy ? "ИИ анализирует…" : "Запустить ИИ-анализ"}
+                        </button>
+                      ) : data.is_stub ? (
                         <span className="stub-tag">
                           <Sparkles size={12} />
                           ИИ · ЗАГЛУШКА
@@ -950,7 +1087,7 @@ export function AnalyticsPage({
                     }
                   />
                   <div className="insights-grid">
-                    {data.insights.map((ins, i) => (
+                    {shownInsights.map((ins, i) => (
                       <article key={i} className="insight-card">
                         <span
                           className={`insight-icon insight-${ins.severity}`}
@@ -966,6 +1103,12 @@ export function AnalyticsPage({
                         <span className="insight-number">0{i + 1}</span>
                         <h3>{ins.title}</h3>
                         <p>{ins.description}</p>
+                        {ins.recommendation && <p>{ins.recommendation}</p>}
+                        {visibleAI && ins.fact_ids && (
+                          <small>
+                            Основание: {ins.fact_ids.map((id) => visibleAI.facts.find((fact) => fact.id === id)?.text).filter(Boolean).join(" ")}
+                          </small>
+                        )}
                         <span className="insight-foot">
                           {ins.is_stub
                             ? "Правило демонстрации"
@@ -975,19 +1118,37 @@ export function AnalyticsPage({
                       </article>
                     ))}
                   </div>
+                  {aiError && <ErrorBox message={aiError} />}
                 </section>
                 <div className="ai-summary">
                   <Sparkles size={20} />
                   <div>
                     <strong>
                       Краткий обзор периода{" "}
-                      {data.is_stub && (
+                      {data.is_stub && !visibleAI && (
                         <span className="stub-tag">ЗАГЛУШКА</span>
                       )}
                     </strong>
-                    <p>{data.ai_summary}</p>
+                    <p>{visibleAI?.summary || data.ai_summary}</p>
+                    {visibleAI && <small>ИИ-анализ по данным на {new Date(visibleAI.dataAt).toLocaleString("ru-RU")}. Для обновления запустите анализ снова.</small>}
                   </div>
                 </div>
+                {canUseAI && (
+                  <section className="panel">
+                    <SectionTitle title="Ассистент мастера" caption="Ответ по доступным данным. Изменения нарядов выполняются отдельно." />
+                    <form onSubmit={askAssistant}>
+                      <label>
+                        Вопрос
+                        <input value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={500} placeholder="Кто из электриков сейчас свободен?" />
+                      </label>
+                      <button className="button secondary" type="submit" disabled={answerBusy || question.trim().length < 3}>
+                        {answerBusy ? "Формируем ответ…" : "Спросить ИИ"}
+                      </button>
+                    </form>
+                    {answer && <p role="status">{answer}</p>}
+                    {answerFacts.length > 0 && <small>Основание: {answerFacts.join(" ")}</small>}
+                  </section>
+                )}
               </>
             ) : tab === "team" ? (
               <section className="panel">

@@ -8,17 +8,19 @@ from .schemas import PhotoRecord, Snapshot
 
 
 class BackendDataSource(DataSource):
-    def __init__(self, base_url: str, token: str, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, base_url: str, token: str, transport: httpx.AsyncBaseTransport | None = None,
+                 service_token: str = ""):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.transport = transport
+        self.service_token = service_token
 
     def _client(self):
-        if not self.token:
+        if not self.token and not self.service_token:
             raise DataSourceError("BACKEND_TOKEN не задан; доступ к API НарядAI закрыт")
         return httpx.AsyncClient(
             base_url=self.base_url,
-            headers={"Authorization": f"Bearer {self.token}"},
+            headers={"Authorization": f"Bearer {self.service_token or self.token}"},
             timeout=20,
             transport=self.transport,
         )
@@ -36,6 +38,9 @@ class BackendDataSource(DataSource):
 
     async def snapshot(self) -> Snapshot:
         async with self._client() as client:
+            if self.service_token:
+                response = await self._get(client, "/api/ai-service/snapshot")
+                return Snapshot.model_validate(response.json())
             reference = (await self._get(client, "/api/reference")).json()
             orders = (await self._get(client, "/api/orders", {"limit": 5000})).json()
             if len(orders) >= 5000:
@@ -53,5 +58,5 @@ class BackendDataSource(DataSource):
         if not photo.url or not re.fullmatch(r"/api/photos/\d+", photo.url):
             raise DataSourceError("Недопустимая ссылка на фото НарядAI")
         async with self._client() as client:
-            return (await self._get(client, photo.url)).content
-
+            path = photo.url.replace("/api/photos/", "/api/ai-service/photos/", 1) if self.service_token else photo.url
+            return (await self._get(client, path)).content

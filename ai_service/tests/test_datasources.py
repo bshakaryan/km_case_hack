@@ -98,3 +98,23 @@ def test_backend_source_requires_token():
     with pytest.raises(DataSourceError, match="BACKEND_TOKEN"):
         asyncio.run(BackendDataSource("http://backend:8000", "").snapshot())
 
+
+def test_backend_source_service_identity_is_read_only():
+    payload = snapshot_payload()
+    paths = []
+
+    def handler(request: httpx.Request):
+        paths.append((request.method, request.url.path))
+        assert request.headers["authorization"] == "Bearer private-service-token"
+        if request.url.path == "/api/ai-service/snapshot":
+            return httpx.Response(200, json=payload)
+        if request.url.path == "/api/ai-service/photos/4":
+            return httpx.Response(200, content=b"protected")
+        return httpx.Response(404)
+
+    source = BackendDataSource("http://backend:8000", "", httpx.MockTransport(handler),
+                               service_token="private-service-token")
+    assert asyncio.run(source.snapshot()).orders[0].id == 7
+    photo = PhotoRecord(id=4, kind="before", url="/api/photos/4")
+    assert asyncio.run(source.photo_bytes(photo)) == b"protected"
+    assert paths == [("GET", "/api/ai-service/snapshot"), ("GET", "/api/ai-service/photos/4")]

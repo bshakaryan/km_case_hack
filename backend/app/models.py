@@ -173,3 +173,18 @@ class AIAssessment(Base):
     is_stub: Mapped[bool] = mapped_column(Boolean, default=True)
     master_score: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AIReviewJob(Base):
+    __tablename__ = "ai_review_jobs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
+    completion_event_id: Mapped[int] = mapped_column(ForeignKey("order_events.id"), unique=True)
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    photo_ids: Mapped[list] = mapped_column(JSON)
+    result: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

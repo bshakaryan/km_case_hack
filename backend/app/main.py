@@ -3,14 +3,17 @@ import csv
 import io
 import logging
 import os
+import re
 import secrets
 import warnings
+import httpx
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,8 +23,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import Base, make_engine, session_factory
-from .models import AIAssessment, Area, AuthSession, Brigade, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
-from .schemas import Completion, Login, OrderCreate, OrderPatch, Transition
+from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
+from .ai import ANSWER_SCHEMA, HINT_SCHEMA, INSIGHTS_SCHEMA, OpenAIProvider, assistant_facts, evidence_facts, process_one_review, redact_personnel, supported_evidence
+from .ai_service_client import AIServiceProvider
+from .schemas import AssistantQuestion, Completion, Login, OrderCreate, OrderHintRequest, OrderPatch, Transition
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
 from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, audit, aware, downtime_minutes, employee_dict, iso, monitor_deadlines, notify, order_dict, photo_dict, shift_start
@@ -47,7 +52,12 @@ class Realtime:
                 self.clients.discard(ws)
 
 
-def create_app(database_url=None, seed=True, monitor=True):
+def create_app(database_url=None, seed=True, monitor=True, ai_provider=None, ai_worker=True):
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+    if ai_provider is None and os.getenv("AI_PROVIDER", "stub").lower() == "openai":
+        ai_provider = OpenAIProvider()
+    elif ai_provider is None and os.getenv("AI_PROVIDER", "stub").lower() == "service":
+        ai_provider = AIServiceProvider()
     engine = make_engine(database_url)
     sessions = session_factory(engine)
     realtime = Realtime()
@@ -69,6 +79,20 @@ def create_app(database_url=None, seed=True, monitor=True):
                 log.exception("Deadline monitor failed; retrying in five seconds")
             await asyncio.sleep(5)
 
+    async def ai_loop():
+        while True:
+            processed = False
+            try:
+                processed = await asyncio.to_thread(process_one_review, sessions, ai_provider)
+                if processed:
+                    await realtime.publish("orders.updated")
+                    await realtime.publish("notifications.updated")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("AI review worker failed")
+            await asyncio.sleep(2 if processed else 5)
+
     @asynccontextmanager
     async def lifespan(app):
         Base.metadata.create_all(engine)
@@ -76,11 +100,13 @@ def create_app(database_url=None, seed=True, monitor=True):
             with sessions() as db:
                 seed_database(db)
         task = asyncio.create_task(deadline_loop()) if monitor else None
+        ai_task = asyncio.create_task(ai_loop()) if ai_provider and ai_worker else None
         yield
-        if task:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        for running_task in (task, ai_task):
+            if running_task:
+                running_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await running_task
         for ws in list(realtime.clients):
             with suppress(Exception):
                 await ws.close(code=1001)
@@ -183,7 +209,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.get("/health")
     def health(db: DB):
         db.execute(sql_text("SELECT 1"))
-        return {"status": "ok", "database": "connected", "ai": "stub", "native": "stub"}
+        return {"status": "ok", "database": "connected", "ai": "service" if getattr(ai_provider, "mode", None) == "service" else "openai" if ai_provider else "stub", "native": "stub"}
 
     @app.post("/api/auth/login")
     def login(payload: Login, request: Request, db: DB):
@@ -218,6 +244,31 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.get("/api/reference")
     def reference(db: DB, user: User):
         return {"areas": rows(db, Area, ["id", "name"]), "equipment": rows(db, Equipment, ["id", "name", "inventory_number", "area_id", "type", "criticality"]), "employees": [employee_dict(p) for p in db.scalars(select(Employee).order_by(Employee.id))], "brigades": rows(db, Brigade, ["id", "name"]), "fault_codes": rows(db, FaultCode, ["id", "code", "name"]), "materials": rows(db, Material, ["id", "name", "unit"]), "time_norms": rows(db, TimeNorm, ["id", "name", "hours"])}
+
+    def require_ai_service(request: Request):
+        expected = os.getenv("AI_SERVICE_TOKEN", "")
+        authorization = request.headers.get("Authorization", "")
+        supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if not expected:
+            raise HTTPException(503, "Сервисный доступ ИИ не настроен")
+        if not secrets.compare_digest(supplied, expected):
+            raise HTTPException(401, "Неверный токен ИИ-сервиса")
+
+    @app.get("/api/ai-service/snapshot")
+    def ai_service_snapshot(request: Request, db: DB):
+        require_ai_service(request)
+        orders = list(db.scalars(select(Order).order_by(Order.id).limit(5000)))
+        if len(orders) >= 5000:
+            raise HTTPException(409, "История превышает 5000 нарядов; полный снимок недоступен")
+        return {**reference(db=db, user=None), "orders": [order_dict(db, order, detail=True) for order in orders]}
+
+    @app.get("/api/ai-service/photos/{id_}")
+    def ai_service_photo(id_: int, request: Request, db: DB):
+        require_ai_service(request)
+        photo = db.get(Photo, id_)
+        if not photo:
+            raise HTTPException(404, "Фото не найдено")
+        return Response(photo.data, media_type="image/jpeg", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
     reference_models = {"areas": Area, "equipment": Equipment, "employees": Employee, "brigades": Brigade, "fault_codes": FaultCode, "materials": Material, "time_norms": TimeNorm}
 
@@ -370,6 +421,8 @@ def create_app(database_url=None, seed=True, monitor=True):
         allowed, target = transitions[action]
         if order.status not in allowed:
             raise HTTPException(409, f"Действие {action} недоступно для статуса {order.status}")
+        if action in ["close", "rework"] and order.ai_review is None:
+            raise HTTPException(409, "Дождитесь результата проверки ИИ или ручного fallback")
         if action in ["start", "resume"]:
             person = db.scalar(select(Employee).where(Employee.id == order.assignee_id).with_for_update())
             if not person.on_shift:
@@ -385,6 +438,9 @@ def create_app(database_url=None, seed=True, monitor=True):
         if action == "close":
             if payload.score is None:
                 raise HTTPException(422, "Мастер должен поставить итоговую оценку от 1 до 5")
+            suggested = (order.ai_review or {}).get("score")
+            if (order.ai_review or {}).get("service_verdict") and (suggested is None or abs(payload.score - suggested) > 0.001) and not payload.reason.strip():
+                raise HTTPException(422, "Укажите причину изменения оценки ИИ")
             order.score = payload.score
             order.closed_at = utcnow()
             order.ai_review = {**(order.ai_review or {}), "master_score": payload.score}
@@ -429,12 +485,35 @@ def create_app(database_url=None, seed=True, monitor=True):
         if order.work_type == "unplanned":
             order.downtime_minutes = round((order.completed_at - aware(order.created_at)).total_seconds() / 60, 1)
         order.status = "completed"
-        audit(db, order, "complete", user.id, "in_progress", payload.work_done)
-        order.ai_review = AIReviewStub.review(db, order)
-        db.add(AIAssessment(order_id=order.id, **order.ai_review))
-        order.status = "ai_review"
-        audit(db, order, "ai_review", user.id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
-        notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
+        completion_event = audit(db, order, "complete", user.id, "in_progress", payload.work_done)
+        if ai_provider:
+            db.flush()
+            people = list(db.scalars(select(Employee)))
+            fault = db.get(FaultCode, payload.fault_code_id)
+            snapshot = {
+                "order_number": order.number,
+                "problem": redact_personnel(order.description or order.title, people),
+                "work_done": redact_personnel(payload.work_done, people),
+                "fault_code": fault.code,
+                "fault_name": fault.name,
+                "materials_this_attempt": materials,
+                "normal_hours": order.normal_hours,
+                "actual_hours": round((order.completed_at - aware(order.started_at)).total_seconds() / 3600, 2) if order.started_at else None,
+                "deadline_met": aware(order.completed_at) <= aware(order.deadline),
+                "submitted_by": user.id,
+            }
+            photo_ids = list(db.scalars(select(Photo.id).where(Photo.order_id == order.id).order_by(Photo.id)))
+            db.add(AIReviewJob(order_id=order.id, completion_event_id=completion_event.id, snapshot=snapshot, photo_ids=photo_ids, status="pending", attempts=0, next_run_at=utcnow()))
+            order.ai_review = None
+            if getattr(ai_provider, "mode", None) == "service":
+                order.status = "ai_review"
+                audit(db, order, "ai_review_pending", user.id, "completed", "Проверка ИИ поставлена в очередь")
+        else:
+            order.ai_review = AIReviewStub.review(db, order)
+            db.add(AIAssessment(order_id=order.id, **order.ai_review))
+            order.status = "ai_review"
+            audit(db, order, "ai_review", user.id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
+            notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
         return await changed(db, order)
 
     @app.post("/api/orders/{id_}/photos", status_code=201)
@@ -518,6 +597,172 @@ def create_app(database_url=None, seed=True, monitor=True):
     def get_analytics(db: DB, user: User, days: int = Query(90, ge=1, le=731), from_date: str | None = None, to_date: str | None = None, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None):
         return analytics_data(db, user, days, from_date, to_date, area_id, equipment_id, assignee_id, brigade_id)[1]
 
+    @app.post("/api/ai/insights")
+    async def ai_insights(db: DB, user: User, days: int = Query(90, ge=1, le=731), from_date: str | None = None, to_date: str | None = None, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None):
+        require_role(user, "master", "manager", "admin")
+        if not ai_provider:
+            raise HTTPException(503, "ИИ не настроен")
+        if getattr(ai_provider, "mode", None) == "service":
+            if any(value is not None for value in (equipment_id, assignee_id, brigade_id)):
+                raise HTTPException(422, "ИИ-аналитика пока поддерживает фильтр только по участку")
+            start = parse_date(from_date) if from_date else utcnow() - timedelta(days=days)
+            end = parse_date(to_date, end=True) if to_date else utcnow()
+            if end <= start or (end - start).days > 731:
+                raise HTTPException(422, "Некорректный период аналитики")
+            try:
+                report = await ai_provider.get("/ai/analytics", {"start": iso(start), "end": iso(end), "area_id": area_id})
+            except (httpx.HTTPError, ValueError):
+                log.exception("AI service analytics failed")
+                raise HTTPException(503, "ИИ-аналитика временно недоступна")
+            findings = report.get("findings", [])
+            if not isinstance(findings, list):
+                raise HTTPException(502, "ИИ-сервис вернул некорректный отчёт")
+            facts = [{"id": f"finding:{index}", "text": item["summary"]} for index, item in enumerate(findings)]
+            finding_names = {"high_failure_equipment": "Частые поломки", "repeat_worker": "Повторный дефект",
+                             "after_ppr": "Поломка после ППР", "shift_lateness": "Просрочки по сменам",
+                             "material_overuse": "Аномальный расход", "unplanned_growth": "Рост внеплановых нарядов"}
+            return {"summary": f"Проверено {report.get('orders_analyzed', 0)} нарядов; сигналов для проверки мастером: {len(findings)}.",
+                    "insights": [{"title": finding_names.get(item["kind"], item["kind"]), "description": item["summary"],
+                                  "recommendation": item["recommendation"], "fact_ids": [f"finding:{index}"],
+                                  "order_ids": item.get("order_ids", [])} for index, item in enumerate(findings)],
+                    "facts": facts, "model": "rules", "is_stub": False, "checked_without_llm": True}
+        orders, _ = analytics_data(db, user, days, from_date, to_date, area_id, equipment_id, assignee_id, brigade_id)
+        facts = evidence_facts(db, orders)
+        db.rollback()
+        try:
+            result = await asyncio.to_thread(ai_provider.explain, facts, "Найди проверяемые закономерности и предложи действия мастеру", INSIGHTS_SCHEMA, "maintenance_insights")
+            if not isinstance(result.get("summary"), str) or not isinstance(result.get("insights"), list):
+                raise ValueError("Некорректный ответ модели")
+            for insight in result["insights"]:
+                supported_evidence(insight, facts)
+                if not insight["fact_ids"]:
+                    raise ValueError("Вывод без фактов")
+            return {**result, "is_stub": False, "model": ai_provider.model, "facts": facts}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            log.exception("AI insights failed")
+            raise HTTPException(503, "ИИ-аналитика временно недоступна")
+
+    @app.post("/api/ai/assistant")
+    async def ai_assistant(payload: AssistantQuestion, db: DB, user: User):
+        require_role(user, "master", "manager", "admin")
+        if not ai_provider:
+            raise HTTPException(503, "ИИ не настроен")
+        if getattr(ai_provider, "mode", None) == "service":
+            try:
+                result = await ai_provider.post("/ai/assistant/ask", {"question": payload.question})
+            except (httpx.HTTPError, ValueError):
+                log.exception("AI service assistant failed")
+                raise HTTPException(503, "ИИ-ассистент временно недоступен")
+            facts = result.get("facts", {})
+            return {"answer": result.get("answer", "Недостаточно данных"),
+                    "facts": [{"id": key, "text": f"{key}: {value}"} for key, value in facts.items()],
+                    "status": result.get("status"), "tool": result.get("tool"),
+                    "is_stub": False, "checked_without_llm": True}
+        orders = list(db.scalars(filtered(db, user)))
+        people = list(db.scalars(select(Employee)))
+        worker_names = {person.id: person.name for person in people if person.role == "worker"}
+        facts = assistant_facts(db, orders)
+        question = redact_personnel(payload.question, people)
+        db.rollback()
+        try:
+            result = await asyncio.to_thread(ai_provider.explain, facts, question, ANSWER_SCHEMA, "master_answer")
+            supported_evidence(result, facts)
+            if not isinstance(result.get("answer"), str) or not result["answer"].strip():
+                raise ValueError("Пустой ответ модели")
+            result["answer"] = re.sub(r"сотрудник\s+#(\d+)", lambda match: worker_names.get(int(match.group(1)), match.group(0)), result["answer"], flags=re.IGNORECASE)
+            return {**result, "is_stub": False, "model": ai_provider.model, "facts": [fact for fact in facts if fact["id"] in result["fact_ids"]]}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            log.exception("AI assistant failed")
+            raise HTTPException(503, "ИИ-ассистент временно недоступен")
+
+    @app.post("/api/ai/order-hints")
+    async def ai_order_hints(payload: OrderHintRequest, db: DB, user: User):
+        require_role(user, "master", "admin")
+        if not ai_provider:
+            raise HTTPException(503, "ИИ не настроен")
+        if getattr(ai_provider, "mode", None) == "service":
+            try:
+                result = await ai_provider.post("/ai/intake/text", {"phrase": payload.description})
+            except (httpx.HTTPError, ValueError):
+                log.exception("AI service order hints failed")
+                raise HTTPException(503, "Подсказка ИИ временно недоступна")
+            draft = result.get("draft") or {}
+            return {"fault_code_id": draft.get("fault_code_id"), "time_norm_id": draft.get("time_norm_id"),
+                    "explanation": "Подсказка по справочнику; проверьте шифр и норматив перед выдачей.",
+                    "is_stub": True, "checked_without_llm": True}
+        people = list(db.scalars(select(Employee)))
+        fault_codes = list(db.scalars(select(FaultCode)))
+        time_norms = list(db.scalars(select(TimeNorm)))
+        fault_ids = {item.id for item in fault_codes}
+        norm_ids = {item.id for item in time_norms}
+        facts = [{"id": f"fault:{item.id}", "text": f"Шифр {item.code}: {item.name}"} for item in fault_codes]
+        facts += [{"id": f"norm:{item.id}", "text": f"Норматив {item.name}: {item.hours} ч"} for item in time_norms]
+        description = redact_personnel(payload.description, people)
+        db.rollback()
+        try:
+            result = await asyncio.to_thread(ai_provider.explain, facts, description, HINT_SCHEMA, "order_hints")
+            if result.get("fault_code_id") is not None and result["fault_code_id"] not in fault_ids:
+                raise ValueError("Неизвестный шифр")
+            if result.get("time_norm_id") is not None and result["time_norm_id"] not in norm_ids:
+                raise ValueError("Неизвестный норматив")
+            if not isinstance(result.get("explanation"), str):
+                raise ValueError("Нет объяснения")
+            return {**result, "is_stub": False, "model": ai_provider.model}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            log.exception("AI order hints failed")
+            raise HTTPException(503, "ИИ-подсказка временно недоступна")
+
+    @app.get("/api/ai/reports/orders/{id_}")
+    async def ai_order_report(id_: int, db: DB, user: User, format: str = Query("json", pattern="^(json|pdf|xlsx)$")):
+        if getattr(ai_provider, "mode", None) != "service":
+            raise HTTPException(503, "Отчёты отдельного ИИ-сервиса не подключены")
+        get_order(db, id_, user)
+        audience = "worker" if user.role == "worker" else "master"
+        try:
+            if format != "json":
+                content = await ai_provider.download(f"/ai/reports/orders/{id_}", {"audience": audience, "format": format})
+                media_type = "application/pdf" if format == "pdf" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                return Response(content, media_type=media_type,
+                                headers={"Content-Disposition": f'attachment; filename="naryad-{id_}-ai-report.{format}"'})
+            return await ai_provider.get(f"/ai/reports/orders/{id_}", {"audience": audience})
+        except (httpx.HTTPError, ValueError):
+            log.exception("AI service order report failed")
+            raise HTTPException(503, "Отчёт ИИ временно недоступен")
+
+    @app.get("/api/ai/reports/shift")
+    async def ai_shift_report(start: datetime, end: datetime, user: User, format: str = Query("json", pattern="^(json|pdf|xlsx)$")):
+        require_role(user, "master", "manager", "admin")
+        if getattr(ai_provider, "mode", None) != "service":
+            raise HTTPException(503, "Отчёты отдельного ИИ-сервиса не подключены")
+        if end <= start:
+            raise HTTPException(422, "Конец периода должен быть позже начала")
+        try:
+            params = {"start": start.isoformat(), "end": end.isoformat()}
+            if format != "json":
+                content = await ai_provider.download("/ai/reports/shift", {**params, "format": format})
+                media_type = "application/pdf" if format == "pdf" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                return Response(content, media_type=media_type,
+                                headers={"Content-Disposition": f'attachment; filename="naryad-shift-ai-report.{format}"'})
+            return await ai_provider.get("/ai/reports/shift", params)
+        except (httpx.HTTPError, ValueError):
+            log.exception("AI service shift report failed")
+            raise HTTPException(503, "Отчёт смены временно недоступен")
+
+    @app.get("/api/ai/ratings")
+    async def ai_ratings(start: datetime, end: datetime, user: User):
+        if getattr(ai_provider, "mode", None) != "service":
+            raise HTTPException(503, "Рейтинг отдельного ИИ-сервиса не подключён")
+        if end <= start:
+            raise HTTPException(422, "Конец периода должен быть позже начала")
+        try:
+            result = await ai_provider.get("/ai/ratings", {"start": start.isoformat(), "end": end.isoformat()})
+        except (httpx.HTTPError, ValueError):
+            log.exception("AI service ratings failed")
+            raise HTTPException(503, "Рейтинг ИИ временно недоступен")
+        if user.role == "worker":
+            result["ratings"] = [item for item in result.get("ratings", []) if item.get("employee_id") == user.id]
+        return result
+
     @app.get("/api/reports/export")
     def export_report(db: DB, user: User, days: int = Query(90, ge=1, le=731), from_date: str | None = None, to_date: str | None = None, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, format: str = Query("csv", pattern="^(csv|xlsx)$")):
         orders, report = analytics_data(db, user, days, from_date, to_date, area_id, equipment_id, assignee_id, brigade_id)
@@ -558,7 +803,8 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @app.get("/api/integrations")
     def integrations(user: User):
-        return {"ai": {"mode": "stub", "status": "demo", "description": "Детерминированная заглушка. Реальные LLM и компьютерное зрение не подключены. Итоговое решение принимает мастер."}, "native": {"mode": "stub", "status": "demo", "description": "Контракт мобильного приложения и push-адаптер. События сохраняются в БД; отправки на устройства нет."}, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
+        service_mode = getattr(ai_provider, "mode", None) == "service"
+        return {"ai": {"mode": "service" if service_mode else "openai" if ai_provider else "stub", "status": "active" if ai_provider else "demo", "description": "Проверка через отдельный ai_service; итоговое решение принимает мастер." if service_mode else "Проверка текста и фото через OpenAI; итоговое решение принимает мастер." if ai_provider else "Детерминированная заглушка. Реальные LLM и компьютерное зрение не подключены. Итоговое решение принимает мастер."}, "native": {"mode": "stub", "status": "demo", "description": "Контракт мобильного приложения и push-адаптер. События сохраняются в БД; отправки на устройства нет."}, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
 
     @app.websocket("/api/ws")
     @app.websocket("/ws")

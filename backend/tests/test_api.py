@@ -107,8 +107,10 @@ def test_deadline_monitor_thresholds_deduplication_and_finished_exclusion(client
     with client.app.state.sessions() as db:
         emergency = db.get(Order, first["id"])
         emergency.created_at = now - timedelta(minutes=4)
+        db.scalar(select(OrderEvent).where(OrderEvent.order_id == emergency.id, OrderEvent.action == "issue")).created_at = emergency.created_at
         normal = db.get(Order, second["id"])
         normal.created_at = now - timedelta(minutes=4)
+        db.scalar(select(OrderEvent).where(OrderEvent.order_id == normal.id, OrderEvent.action == "issue")).created_at = normal.created_at
         normal.deadline = now - timedelta(minutes=2)
         finished = db.get(Order, third["id"])
         finished.status = "ai_review"
@@ -116,7 +118,7 @@ def test_deadline_monitor_thresholds_deduplication_and_finished_exclusion(client
         db.commit()
         assert monitor_deadlines(db, now) > 0
         assert monitor_deadlines(db, now) == 0
-        assert len(list(db.scalars(select(Notification).where(Notification.order_id == first["id"], Notification.kind == "unaccepted")))) == 2
+        assert len(list(db.scalars(select(Notification).where(Notification.order_id == first["id"], Notification.kind == "unaccepted")))) == 1
         assert not db.scalar(select(Notification).where(Notification.order_id == second["id"], Notification.kind == "unaccepted"))
         assert not db.scalar(select(Notification).where(Notification.order_id == third["id"], Notification.kind.in_(["overdue", "due_soon", "unaccepted"])))
         assert db.scalar(select(IntegrationLog).where(IntegrationLog.adapter == "native_stub"))

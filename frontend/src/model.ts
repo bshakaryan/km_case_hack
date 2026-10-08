@@ -83,10 +83,26 @@ export type OrderDetail = Order & {
   } | null;
   ai_review: {
     verdict: string;
-    score: number;
+    score: number | null;
     explanation: string;
     is_stub: boolean;
     master_score?: number | null;
+    confidence?: number;
+    photo_summary?: string;
+    issues?: string[];
+    model?: string;
+    source?: string;
+    service_verdict?: string;
+    explanation_worker?: string;
+    flags?: Record<string, unknown>;
+    remarks?: { text: string; evidence_ref: string }[];
+    needs_master_review?: boolean;
+    checked_without_llm?: boolean;
+    photo_review?: {
+      before_photo_id?: number | null;
+      after_photo_id?: number | null;
+      reasons?: string[];
+    };
   } | null;
 };
 export type Notice = {
