@@ -1,9 +1,7 @@
-"""Stateless, authenticated rules/text review of one immutable submission.
+"""Stateless, authenticated review of one immutable submission.
 
-The factory/v1 never construct an LLM, database, data source or CV model.
-v2 uses a bounded local child process; it never activates an external provider.
-An injected async interpreter is a bounded integration/test seam; production
-provider activation and external data policy remain a separate Q01 decision.
+Text checks remain deterministic. v2 sends only the selected linked JPEG pair
+to OpenAI Vision; it never constructs a local image model or reads a database.
 """
 from __future__ import annotations
 
@@ -22,7 +20,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .config import Settings
-from .llm_client import SemanticAssessment
+from .llm_client import SemanticAssessment, VisionAssessment
+from .openai_vision import OpenAIVisionError, OpenAIVisionReviewer
 from .schemas import CompletionRecord, OrderRecord, PhotoRecord, Snapshot
 from .verification import (
     calculate_flags, decide_verdict, rule_semantics, scrub, semantic_valid,
@@ -65,6 +64,18 @@ class PhotoContent(StrictRecord):
 class PhotoReviewEnvelope(ReviewEnvelope):
     schema_version: int = Field(ge=2, le=2)
     photo_content: list[PhotoContent] = Field(max_length=10)
+
+
+class ReportChecks(StrictRecord):
+    work_description: Literal["present", "missing"]
+    fault_code: Literal["present", "missing"]
+    fault_code_vs_problem: Literal["match", "mismatch", "unknown"]
+    work_vs_fault_code: Literal["match", "mismatch", "unknown"]
+    materials_vs_norm: Literal["within_norm", "issue", "missing", "unknown"]
+    time_vs_norm: Literal["within_norm", "over_norm", "unknown"]
+    deadline: Literal["on_time", "late", "unknown"]
+    after_photo: Literal["present", "missing"]
+    after_photo_required: bool
 
 
 class FrozenOrder(StrictRecord):
@@ -171,7 +182,7 @@ def _parse(raw: bytes, version=1):
     return envelope, context, report
 
 
-async def _review(envelope, context, report, llm, image_note=None):
+async def _review(envelope, context, report, llm, image_note=None, vision_used=False):
     order_values = context.order.model_dump()
     # Calendar elapsed time and demo material norms are not approved Q04/Q05 facts.
     order_values.update(started_at=None, normal_hours=None,
@@ -228,18 +239,44 @@ async def _review(envelope, context, report, llm, image_note=None):
         notes.append("Семантический ответ не прошёл проверку доказательств; требуется мастер.")
     elif unavailable:
         notes.append("Семантическая проверка недоступна; использованы только локальные правила.")
+    elif vision_used:
+        notes.append("Текст отчёта проверен правилами; для фото использована модель OpenAI Vision.")
     elif semantic is None:
         notes.append("Использованы только локальные правила; внешний ИИ отключён.")
     else:
         notes.append(semantic.explanation_master)
     if source_verdict == "needs_master_review":
         notes.append("Оценка неизвестна: требуется проверка мастером.")
+    materials_status = "unknown"
+    if flags["material_norm_status"] == "known":
+        materials_status = (
+            "missing" if flags["missing_materials"] else
+            "issue" if flags["excess_material_ids"] or flags["unusual_material_ids"] else
+            "within_norm"
+        )
+    report_checks = ReportChecks(
+        work_description="present" if not flags["missing_work"] else "missing",
+        fault_code="present" if not flags["missing_fault_code"] else "missing",
+        fault_code_vs_problem=flags["code_description_status"],
+        work_vs_fault_code="unknown" if match is None else "match" if match else "mismatch",
+        materials_vs_norm=materials_status,
+        time_vs_norm=flags["time_status"],
+        deadline=flags["deadline_status"],
+        after_photo=("present" if any(photo.kind == "after" for photo in order.photos) else "missing"),
+        after_photo_required=order.work_type == "unplanned",
+    ).model_dump()
+    explanation = (
+        "Визуальная рекомендация сформирована по выбранным фото. Текст отчёта, нормы материалов "
+        "и рабочее время моделью не анализировались; доступные формальные проверки приведены отдельно."
+        if vision_used else " ".join(notes)[:2000]
+    )
     return {"schema_version": 1, "attempt_id": envelope.attempt_id,
             "input_sha256": envelope.input_sha256,
             "result": {"verdict": verdict, "score": score,
-                       "explanation": " ".join(notes)[:2000], "is_stub": semantic is None,
-                       "master_score": None, "source_verdict": source_verdict,
-                       "llm_used": semantic is not None, "is_recommendation": True}}
+            "explanation": explanation, "is_stub": semantic is None and not vision_used,
+            "master_score": None, "source_verdict": source_verdict,
+            "llm_used": semantic is not None or vision_used, "is_recommendation": True,
+            "report_checks": report_checks}}
 
 
 def _owned_photo_input(raw):
@@ -256,15 +293,16 @@ def _owned_photo_input(raw):
         _PHOTO_PARSE_GATE.release()
 
 
-def create_attempt_app(settings: Settings | None = None, llm=None, photo_runner=None) -> FastAPI:
-    """Build only the internal bridge; environment never activates a provider."""
-    settings = settings if settings is not None else Settings(ai_service_token=os.getenv("AI_SERVICE_TOKEN", ""))
+def create_attempt_app(settings: Settings | None = None, llm=None, vision_client=None) -> FastAPI:
+    """Build the internal bridge; OpenAI Vision is used only by v2 when configured."""
+    settings = settings if settings is not None else Settings.from_env()
     expected = settings.ai_service_token.get_secret_value().encode("utf-8")
     app = FastAPI(title="Submission review bridge", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/healthz")
     async def healthz():
-        return {"status": "ok"}
+        configured = bool(settings.openai_api_key.get_secret_value() and settings.openai_vision_model.strip())
+        return {"status": "ok", "vision": "configured" if configured else "not_configured"}
 
     def authorize(request):
         # Parse no body before server-to-server authority is established.
@@ -322,28 +360,36 @@ def create_attempt_app(settings: Settings | None = None, llm=None, photo_runner=
         finally:
             if not submitted:
                 _PHOTO_PARSE_GATE.release()
-        from .attempt_photos import PhotoCheck, PhotoRunner, unavailable
+        from .attempt_photos import PhotoCheck, selected_pair
 
-        runner = photo_runner if photo_runner is not None else PhotoRunner()
-        try:
-            candidate = await runner.run(metadata, decoded)
-        except ValueError as error:
-            if str(error) == "invalid_photo_content":
-                raise HTTPException(422, "invalid_submission_review_input") from None
-            candidate = unavailable(metadata)
-        except Exception:
-            candidate = unavailable(metadata)
-        try:
-            check = PhotoCheck.model_validate(candidate).model_dump()
-        except (ValueError, TypeError):
-            raise HTTPException(502, "invalid_submission_review_result") from None
-        note = ("Локально проверены только связанные фото этой сдачи; устранение дефекта не подтверждено."
-                if check["status"] == "checked" else
-                "Локальная проверка фото недоступна; устранение дефекта неизвестно."
-                if check["status"] == "unavailable" else "В сохранённой сдаче нет фото после.")
-        # v2 never invokes the injected semantic seam or an external vision model.
-        result = await _review(envelope, context, report, None, note +
-                               " Давность съёмки, активное время и нормы материалов неизвестны.")
+        selected, before_jpeg, after_jpeg = selected_pair(metadata, decoded)
+        if after_jpeg is None:
+            check = PhotoCheck(status="no_after", before_id=selected["before"],
+                               after_id=None).model_dump()
+            vision_used = False
+            note = "Фото после выполнения в сохранённой попытке отсутствует."
+        else:
+            reviewer = vision_client or OpenAIVisionReviewer(
+                settings.openai_api_key, settings.openai_vision_model
+            )
+            try:
+                candidate = await reviewer.review(before_jpeg, after_jpeg)
+                vision = (candidate if isinstance(candidate, VisionAssessment)
+                          else VisionAssessment.model_validate(candidate, strict=True))
+                if before_jpeg is None and (vision.same_equipment is not None or vision.defect_resolved is not None):
+                    raise ValueError("invalid_vision_output")
+                check = PhotoCheck(status="checked", before_id=selected["before"],
+                                   after_id=selected["after"], vision=vision).model_dump()
+                vision_used = True
+            except OpenAIVisionError as error:
+                code = str(error)
+                status = 503 if code == "openai_vision_not_configured" else 502
+                raise HTTPException(status, code) from None
+            except (ValidationError, TypeError, ValueError):
+                raise HTTPException(502, "invalid_submission_review_result") from None
+            note = ("OpenAI Vision обработал только выбранные фото этой попытки; это визуальная "
+                    "рекомендация, не подтверждение ремонта. Время съёмки и фото других нарядов не проверялись.")
+        result = await _review(envelope, context, report, None, note, vision_used=vision_used)
         result["schema_version"] = 2
         result["result"].update(verdict="needs_attention", source_verdict="needs_master_review",
                                  score=None, photo_check=check)

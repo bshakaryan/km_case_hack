@@ -1227,6 +1227,11 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         aiReviewExplanation(review, job: order.aiReviewJob),
         style: const TextStyle(height: 1.4),
       ),
+      AiReportChecks(
+        checks: review['report_checks'],
+        isOpenAi: review['photo_check'] is Map &&
+            (review['photo_check'] as Map)['method'] == 'openai_vision',
+      ),
       AiPhotoCheck(check: review['photo_check']),
       const Divider(height: 24),
       Text(

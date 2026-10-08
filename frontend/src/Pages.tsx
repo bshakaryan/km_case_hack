@@ -1635,12 +1635,13 @@ export function IntegrationsPage() {
               <span className="eyebrow">СОСТОЯНИЕ СИСТЕМЫ</span>
               <h2>Что работает сейчас</h2>
               <p>
-                Веб-панель и Flutter работают с общим API и базой. Проверка
-                новой сдачи использует локальный модуль; внешний LLM/vision не
-                включён. Состояние push зависит от настроек окружения.
+                Веб-панель и Flutter работают с общим API и базой. Фото новой
+                сдачи проверяет OpenAI Vision при настроенном ключе; связанные
+                снимки передаются внешнему API. Состояние push зависит от
+                настроек окружения.
               </p>
             </div>
-            <span className="outlined-tag">ЛОКАЛЬНЫЙ КОНТУР</span>
+            <span className="outlined-tag">СЕРВЕРНАЯ ИНТЕГРАЦИЯ</span>
           </div>
           <div className="integration-grid">
             {[
@@ -1648,7 +1649,7 @@ export function IntegrationsPage() {
                 key: "ai",
                 title: "Проверка сдачи",
                 icon: Sparkles,
-                subtitle: "LOCAL REVIEW",
+                subtitle: "OPENAI VISION",
               },
               {
                 key: "native",

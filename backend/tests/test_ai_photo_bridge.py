@@ -1,6 +1,5 @@
 """Pixel transport/result binding for one immutable submission, never a grade."""
 import base64
-from collections import defaultdict
 from copy import deepcopy
 import hashlib
 import io
@@ -45,23 +44,24 @@ def photo_submission(client):
 
 
 def checked(photos):
-    # The test double claims only exact comparisons, not actual CV recognition.
     selected = {kind: max((row["id"] for row in photos if row["kind"] == kind), default=None)
         for kind in ("before", "after")}
-    grouped = defaultdict(list)
-    for row in photos:
-        grouped[hashlib.sha256(row["data"]).hexdigest()].append(row["id"])
-    data = {row["id"]: row["data"] for row in photos}
-    return {"status": "checked", "method": "local_cv", "scope": "submission_selected_pair",
+    has_pair = selected["before"] is not None
+    return {"status": "checked", "method": "openai_vision", "scope": "submission_selected_pair",
         "before_id": selected["before"], "after_id": selected["after"],
-        "duplicate_before": None if selected["before"] is None else data[selected["before"]] == data[selected["after"]],
-        "exact_duplicate_groups": sorted(sorted(ids) for ids in grouped.values() if len(ids) > 1),
-        "equipment_status": "unknown", "model_available": False, "capture_time_status": "unknown",
-        "repair_status": "unknown", "history_status": "not_checked"}
+        "vision": {"same_equipment": True if has_pair else None, "defect_resolved": None,
+            "quality": "unknown", "confidence": 0.5, "issues": [],
+            "explanation": "По снимкам нельзя уверенно подтвердить результат.",
+            "visual_criteria": {name: {"status": "not_assessable", "observation": ""}
+                for name in ("cleanliness", "fasteners", "guards", "leakage")}},
+        "capture_time_status": "unknown", "history_status": "not_checked"}
 
 
 def photo_reply(request, photos, changes=None):
-    result = {**unknown(), "photo_check": {**checked(photos), **(changes or {})}}
+    photo_check = {**checked(photos), **(changes or {})}
+    result = {**unknown(), "photo_check": photo_check}
+    if photo_check["status"] == "checked":
+        result.update(is_stub=False, llm_used=True)
     return reply(request, result)
 
 
@@ -114,12 +114,13 @@ def test_v2_transfers_exact_linked_jpeg_bytes_and_late_data_never_enters_review(
 
 
 @pytest.mark.parametrize("changes", [
-    {"after_id": 999}, {"before_id": 1}, {"after_id": 2}, {"before_id": True}, {"duplicate_before": "true"},
-    {"duplicate_before": False}, {"exact_duplicate_groups": []},
-    {"exact_duplicate_groups": [[1, 999]]}, {"exact_duplicate_groups": [[1, 4, 3]]},
-    {"equipment_status": "different", "model_available": False},
-    {"capture_time_status": "recent"}, {"repair_status": "repaired"},
-    {"history_status": "checked"}, {"unexpected": "not_allowed"},
+    {"after_id": 999}, {"before_id": 1}, {"after_id": 2}, {"before_id": True},
+    {"vision": {"same_equipment": "true"}}, {"vision": {"same_equipment": True, "unexpected": 1}},
+    {"vision": {"same_equipment": True, "defect_resolved": False, "quality": "unknown",
+        "confidence": float("nan"), "issues": [], "explanation": "invalid"}},
+    {"vision": {"same_equipment": True, "defect_resolved": False, "quality": "not_a_quality",
+        "confidence": 0.5, "issues": [], "explanation": "invalid"}},
+    {"capture_time_status": "recent"}, {"history_status": "checked"}, {"unexpected": "not_allowed"},
     {"status": "unavailable"}, {"status": "no_after"},
 ])
 def test_invalid_or_unbound_photo_claim_never_applies(service_client, changes):
@@ -193,7 +194,8 @@ def test_explicit_v1_rollback_preserves_text_contract_without_photo_transfer(ser
 def test_v2_cannot_claim_an_external_text_model_or_photo_grade(service_client):
     id_, _, _, _, photos = photo_submission(service_client)
     def handler(request):
-        result = {**unknown(), "is_stub": False, "llm_used": True, "photo_check": checked(photos)}
+        result = {**unknown(), "verdict": "passed", "score": 4.5, "source_verdict": "accepted",
+                  "is_stub": False, "llm_used": True, "photo_check": checked(photos)}
         return reply(request, result)
     service_client.app.state.run_ai_jobs(provider=AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN,
         httpx.MockTransport(handler)))
@@ -202,8 +204,7 @@ def test_v2_cannot_claim_an_external_text_model_or_photo_grade(service_client):
     assert current["ai_review_job"]["last_error_code"] == "invalid_result"
 
 
-@pytest.mark.parametrize("status", ["checked", "unavailable"])
-def test_after_only_or_unavailable_pixels_are_unknown_not_a_grade(service_client, status):
+def test_after_only_photo_has_no_comparison_claim_or_grade(service_client):
     id_ = new_order(service_client)
     start(service_client, id_)
     after_id = upload(service_client, id_, "after", "green")
@@ -212,14 +213,14 @@ def test_after_only_or_unavailable_pixels_are_unknown_not_a_grade(service_client
         after = db.get(Photo, after_id)
         photos = [{"id": after.id, "kind": after.kind, "data": bytes(after.data)}]
     def handler(request):
-        return photo_reply(request, photos, {"status": status})
+        return photo_reply(request, photos)
     service_client.app.state.run_ai_jobs(provider=AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN,
         httpx.MockTransport(handler)))
     result = detail(service_client, id_)["ai_review"]
     assert result["score"] is None and result["source_verdict"] == "needs_master_review"
     assert result["photo_check"]["before_id"] is None and result["photo_check"]["after_id"] == after_id
-    assert result["photo_check"]["duplicate_before"] is None
-    assert result["photo_check"]["equipment_status"] == "unknown" and result["photo_check"]["model_available"] is False
+    assert result["photo_check"]["vision"]["same_equipment"] is None
+    assert result["photo_check"]["vision"]["defect_resolved"] is None
 
 
 def test_v2_does_not_fallback_to_a_v1_response(service_client):
@@ -269,51 +270,50 @@ def test_v2_decoded_photo_and_json_bounds_are_checked_before_http(monkeypatch):
         envelope(tiny_snapshot(), 2)
 
 
-def test_actual_v2_asgi_handlers_validate_pixels_before_the_cv_double(service_client, monkeypatch):
-    # Actual HTTP encoding/handlers and SQL, with an explicit CV response double.
-    # This proves composition/input binding, not image recognition or a socket.
+def test_actual_v2_asgi_bridge_sends_selected_pixels_to_vision_double(service_client, monkeypatch):
+    # Actual HTTP encoding/handlers and SQL, with a provider double (no external request).
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
     from ai_service.app.attempt_bridge import create_attempt_app
     from ai_service.app.config import Settings
     id_, _, _, _, photos = photo_submission(service_client)
     calls = []
-    class RecordingRunner:
-        async def run(self, metadata, decoded):
-            assert metadata == [{"id": row["id"], "kind": row["kind"],
-                "sha256": hashlib.sha256(row["data"]).hexdigest()} for row in photos]
-            assert decoded == [{"id": row["id"], "data": row["data"]} for row in photos]
-            calls.append(metadata)
-            return checked(photos)
-    service = create_attempt_app(Settings(ai_service_token=TOKEN), photo_runner=RecordingRunner())
+    class RecordingVision:
+        async def review(self, before, after):
+            calls.append((before, after))
+            return checked(photos)["vision"]
+    service = create_attempt_app(Settings(ai_service_token=TOKEN, openai_api_key="synthetic-key"),
+                                 vision_client=RecordingVision())
     adapter = AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN, httpx.ASGITransport(app=service))
     service_client.app.state.run_ai_jobs(provider=adapter)
     current = detail(service_client, id_)
     assert current["status"] == "ai_review" and current["ai_review_job"]["status"] == "succeeded"
     assert current["ai_review"]["photo_check"] == checked(photos) and current["ai_review"]["score"] is None
-    assert len(calls) == 1
+    selected = {kind: max((row for row in photos if row["kind"] == kind), key=lambda row: row["id"])
+                for kind in ("before", "after")}
+    assert calls == [(selected["before"]["data"], selected["after"]["data"])]
 
 
-def test_optional_actual_cv_v2_asgi_primary_sql_and_manual_close(service_client, monkeypatch, tmp_path):
-    # Minimal backend CI intentionally omits CV dependencies; the AI CI job
-    # exercises the real spawned CV endpoint separately. Local opt-in presence
-    # allows this composition test without a network socket or external model.
-    pytest.importorskip("cv2", reason="Actual CV composition needs optional OpenCV; AI CI runs real CV separately")
-    pytest.importorskip("imagehash", reason="Actual CV composition needs optional ImageHash; AI CI runs real CV separately")
+def test_v2_openai_recommendation_is_persisted_and_master_still_closes_manually(service_client, monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
-    monkeypatch.setenv("AI_IMAGE_EMBEDDING_MODEL", str(tmp_path / "absent-synthetic-model.onnx"))
     from ai_service.app.attempt_bridge import create_attempt_app
     from ai_service.app.config import Settings
     id_, _, _, _, photos = photo_submission(service_client)
-    service = create_attempt_app(Settings(ai_service_token=TOKEN))
+
+    class Vision:
+        async def review(self, before, after):
+            assert before and after
+            return checked(photos)["vision"]
+
+    service = create_attempt_app(Settings(ai_service_token=TOKEN, openai_api_key="synthetic-key"),
+                                 vision_client=Vision())
     adapter = AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN, httpx.ASGITransport(app=service))
     service_client.app.state.run_ai_jobs(provider=adapter)
     current = detail(service_client, id_)
-    assert current["status"] == "ai_review" and current["ai_review_job"]["status"] == "succeeded"
     check = current["ai_review"]["photo_check"]
     assert check == checked(photos)
-    assert check["duplicate_before"] is True and check["model_available"] is False
-    assert current["ai_review"]["score"] is None and current["ai_review"]["source_verdict"] == "needs_master_review"
-    assert current["ai_review"]["llm_used"] is False and current["ai_review"]["is_stub"] is True
+    assert current["ai_review"]["score"] is None
+    assert current["ai_review"]["source_verdict"] == "needs_master_review"
+    assert current["ai_review"]["llm_used"] is True and current["ai_review"]["is_stub"] is False
     with service_client.app.state.sessions() as db:
         assert db.scalar(sa.select(sa.func.count()).select_from(AIAssessment)) == 1
         assert db.scalar(sa.select(AIAssessment.score)) is None

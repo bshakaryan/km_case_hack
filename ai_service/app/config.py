@@ -34,6 +34,7 @@ class Settings(BaseModel):
     llm_model_fast: str = ""
     llm_model_smart: str = ""
     llm_model_vision: str = ""
+    openai_vision_model: str = "gpt-6-astra"
     stt_model: str = ""
     openai_api_key: SecretStr = SecretStr("")
     anthropic_api_key: SecretStr = SecretStr("")
@@ -81,6 +82,7 @@ class Settings(BaseModel):
             llm_model_fast=os.getenv("LLM_MODEL_FAST", ""),
             llm_model_smart=os.getenv("LLM_MODEL_SMART", ""),
             llm_model_vision=os.getenv("LLM_MODEL_VISION", ""),
+            openai_vision_model=os.getenv("OPENAI_VISION_MODEL", "gpt-6-astra"),
             stt_model=os.getenv("STT_MODEL", ""),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),

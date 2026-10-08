@@ -34,14 +34,24 @@ Json review(String explanation) => {
 };
 Json photoCheck(String status, {Json overrides = const {}}) => {
   'status': status,
-  'method': 'local_cv',
+  'method': 'openai_vision',
   'scope': 'submission_selected_pair',
   'before_id': 21,
   'after_id': status == 'no_after' ? null : 22,
-  'duplicate_before': status == 'checked' ? false : null,
-  'exact_duplicate_groups': <List<int>>[],
-  'equipment_status': 'unknown',
-  'model_available': false,
+  'vision': status == 'checked'
+      ? {
+          'same_equipment': true,
+          'defect_resolved': null,
+          'quality': 'unknown',
+          'confidence': 0.5,
+          'issues': <String>[],
+          'explanation': 'По снимкам нельзя уверенно подтвердить результат.',
+          'visual_criteria': {
+            for (final name in ['cleanliness', 'fasteners', 'guards', 'leakage'])
+              name: {'status': 'not_assessable', 'observation': ''},
+          },
+        }
+      : null,
   'capture_time_status': 'unknown',
   'repair_status': 'unknown',
   'history_status': 'not_checked',
@@ -136,24 +146,13 @@ Future<void> openDetail(WidgetTester tester, AppController controller) async {
 
 void main() {
   testWidgets(
-    'local photo evidence is bounded and leaves repair, capture and other submissions unknown',
+    'OpenAI photo result is bounded and leaves repair, capture and other submissions unknown',
     (tester) async {
       tester.view.physicalSize = const Size(360, 800);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      final check = photoCheck(
-        'checked',
-        overrides: {
-          'duplicate_before': true,
-          'equipment_status': 'different',
-          'model_available': true,
-          'exact_duplicate_groups': [
-            List.generate(40, (index) => 100001 + index),
-            [200001, 200002],
-          ],
-        },
-      );
+      final check = photoCheck('checked');
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
@@ -164,43 +163,36 @@ void main() {
       expect(find.text('Результат проверки фото'), findsOneWidget);
       expect(find.textContaining('до №21; после №22'), findsOneWidget);
       expect(
-        find.textContaining('признаки повтора фото до ремонта'),
+        find.textContaining('модель считает, что на снимках одно оборудование'),
         findsOneWidget,
       );
       expect(
-        find.textContaining(
-          'Возможно, на выбранных снимках разное оборудование',
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('группы полностью одинаковых файлов: 2'),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('Качество ремонта и время съёмки не подтверждены'),
+        find.textContaining('качество по снимкам определить нельзя'),
         findsOneWidget,
       );
       expect(
         find.textContaining('Фото других нарядов и сдач не проверялись'),
         findsOneWidget,
       );
-      expect(find.textContaining('100001'), findsNothing);
-      expect(find.textContaining('200001'), findsNothing);
+      expect(find.textContaining('OpenAI — визуальная рекомендация'), findsOneWidget);
       expect(find.textContaining('Предварительная оценка:'), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
 
   testWidgets(
-    'unavailable and absent-after image checks do not pretend that comparison ran',
+    'legacy unavailable and absent-after image checks do not pretend that comparison ran',
     (tester) async {
       for (final status in ['unavailable', 'no_after']) {
         await tester.pumpWidget(
           MaterialApp(
             home: Scaffold(
               body: SingleChildScrollView(
-                child: AiPhotoCheck(check: photoCheck(status)),
+                child: AiPhotoCheck(
+                  check: photoCheck(status, overrides: status == 'unavailable'
+                      ? {'method': 'local_cv'}
+                      : {}),
+                ),
               ),
             ),
           ),
@@ -208,22 +200,22 @@ void main() {
         expect(
           find.textContaining(
             status == 'unavailable'
-                ? 'проверка изображений недоступна'
+                ? 'Старая локальная проверка изображений была недоступна'
                 : 'нет фото после выполнения',
           ),
           findsOneWidget,
         );
         expect(
-          find.text('Локальная проверка изображений выполнена.'),
+          find.text('Выбранные фото проанализированы OpenAI Vision.'),
           findsNothing,
         );
         expect(
-          find.textContaining('признаков повтора не найдено'),
+          find.textContaining('модель считает, что на снимках одно оборудование'),
           findsNothing,
         );
         expect(
           find.textContaining(
-            'Качество ремонта и время съёмки не подтверждены',
+            'не подтверждает факт и качество ремонта или время съёмки',
           ),
           findsOneWidget,
         );
@@ -231,8 +223,7 @@ void main() {
       }
       final unknown = photoCheck('checked');
       final labels = aiPhotoCheckLines(unknown);
-      expect(labels, contains('Совпадение оборудования не подтверждено.'));
-      expect(labels, contains('Модель сравнения оборудования недоступна.'));
+      expect(labels, contains('По визуальным признакам модель считает, что на снимках одно оборудование.'));
       expect(aiPhotoCheckLines(null), isEmpty);
       expect(
         aiReviewNote(review('V1_RESULT')),
@@ -244,7 +235,7 @@ void main() {
       );
       expect(
         aiReviewSource({'llm_used': false, 'photo_check': unknown}),
-        contains('локальная проверка фото'),
+        contains('OpenAI Vision'),
       );
     },
   );
@@ -258,9 +249,9 @@ void main() {
         'ai_review': {
           'verdict': 'needs_attention',
           'score': null,
-          'is_stub': true,
+          'is_stub': false,
           'source_verdict': 'needs_master_review',
-          'llm_used': false,
+          'llm_used': true,
           'is_recommendation': true,
           'bridge_version': 2,
           'explanation': 'Технические признаки требуют осмотра',
@@ -283,7 +274,7 @@ void main() {
         300,
       );
       expect(
-        find.text('Локальная проверка изображений выполнена.'),
+        find.text('Выбранные фото проанализированы OpenAI Vision.'),
         findsOneWidget,
       );
       expect(find.text('Оценка не определена'), findsOneWidget);
@@ -293,7 +284,7 @@ void main() {
       );
       expect(
         find.textContaining(
-          'локальная проверка фото; языковая модель не использовалась',
+          'OpenAI Vision для выбранных фото',
         ),
         findsOneWidget,
       );
@@ -369,7 +360,7 @@ void main() {
             ),
           ),
         );
-        expect(find.textContaining('Локальная проверка сдачи'), findsOneWidget);
+        expect(find.textContaining('Проверка сдачи'), findsOneWidget);
         expect(
           find.textContaining('Окончательное решение принимает мастер'),
           findsOneWidget,
@@ -422,7 +413,7 @@ void main() {
       );
       await openDetail(tester, controller);
       await tester.scrollUntilVisible(find.text('Оценка не определена'), 300);
-      expect(find.text('Локальная проверка сдачи'), findsOneWidget);
+      expect(find.text('Проверка сдачи'), findsOneWidget);
       expect(find.text('Нужна проверка мастером'), findsOneWidget);
       expect(
         find.textContaining('языковая модель не использовалась'),

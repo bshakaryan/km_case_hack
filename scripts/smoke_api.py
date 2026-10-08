@@ -99,7 +99,9 @@ def main():
         time.sleep(1)
         order = request(path, worker)
     assert order["status"] == "ai_review" and order["ai_review"]["is_stub"] is False
-    assert order["ai_review"]["score"] is None and order["ai_review"]["llm_used"] is False
+    assert order["ai_review"]["score"] is None and order["ai_review"]["llm_used"] is True
+    assert order["ai_review"]["photo_check"]["method"] == "openai_vision"
+    assert order["ai_review"]["source_verdict"] == "needs_master_review"
     request(path + "/transition", worker, {"action": "close", "score": 5}, expected=403, expected_version=order["version"])
     order = request(path + "/transition", master, {"action": "close", "score": 5}, expected_version=order["version"])
     assert order["status"] == "closed" and len(order["events"]) >= 6
@@ -109,7 +111,7 @@ def main():
     assert analytics["summary"]["total"] >= 500 and analytics["insight_method"] == "deterministic_rules"
     request("/api/notifications", worker)
     integrations = request("/api/integrations", master)
-    assert integrations["ai"]["mode"] == "ai_service" and integrations["ai"]["status"] == "configured"
+    assert integrations["ai"]["mode"] == "openai_vision" and integrations["ai"]["status"] == "configured"
     assert integrations["native"]["mode"] in ("disabled", "fcm")
     print(f"PASS: auth, RBAC, seed, full lifecycle, mandatory photo, protected media, audit, Excel, analytics. Order {order['number']}.")
 

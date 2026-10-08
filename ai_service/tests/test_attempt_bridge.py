@@ -57,7 +57,7 @@ def test_bridge_health_does_not_require_service_token():
     with client_for() as client:
         response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "vision": "not_configured"}
 
 
 def semantic(match):
@@ -308,7 +308,7 @@ def test_provider_error_never_echoes_secrets_or_input(caplog):
     assert TOKEN not in response.text + caplog.text
 
 
-def test_environment_cannot_construct_llm_store_or_activate_paid_calls(monkeypatch):
+def test_environment_key_does_not_activate_v1_photo_or_text_calls(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("The stateless default bridge constructed a runtime dependency")
 
@@ -324,6 +324,7 @@ def test_environment_cannot_construct_llm_store_or_activate_paid_calls(monkeypat
         response = client.post(ROUTE, json=signed_packet(), headers=HEADERS)
         assert response.status_code == 200
         assert response.json()["result"]["llm_used"] is False
+        assert client.get("/healthz").json() == {"status": "ok", "vision": "configured"}
         assert client.get("/docs").status_code == 404
         assert client.get("/ai/source/summary").status_code == 404
     settings = Settings(ai_service_token=TOKEN, data_source="backend", demo_mode=False,

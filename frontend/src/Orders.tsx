@@ -22,6 +22,7 @@ import {
 import {
   AiJobStatus,
   AiPhotoCheck,
+  AiReportChecks,
   aiReviewExplanation,
   aiReviewNote,
   aiReviewScoreLabel,
@@ -3012,6 +3013,10 @@ export function OrderDialog({
                     {aiReviewSource(order.ai_review) && (
                       <p className="muted">{aiReviewSource(order.ai_review)}</p>
                     )}
+                    <AiReportChecks
+                      checks={order.ai_review.report_checks}
+                      isOpenAi={order.ai_review.photo_check?.method === "openai_vision"}
+                    />
                     <AiPhotoCheck check={order.ai_review.photo_check} />
                     <small>
                       {aiReviewNote(order.ai_review, order.ai_review_job)}

@@ -178,6 +178,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     app.state.sessions = sessions
     app.state.realtime = realtime
     app.state.ai_review_mode = ai_mode
+    app.state.ai_vision_configured = os.getenv("AI_VISION_CONFIGURED", "false").strip().lower() == "true"
     app.state.run_ai_jobs = lambda provider=None, limit=10: dispatch_ai_jobs(sessions, provider=provider, limit=limit, providers=ai_providers)
     app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id", "X-Expected-Order-Version", "X-Previous-Client-Command-Id", "If-None-Match"], expose_headers=["ETag"])
 
@@ -999,9 +1000,13 @@ def create_app(database_url=None, seed=True, monitor=True):
         else:
             native = {"mode": "fcm", "status": "configured", "description": "Firebase Cloud Messaging (HTTP v1) настроен для Android. Успешная доставка зависит от регистрации устройства и ответа FCM."}
         if app.state.ai_review_mode == "queued_service":
-            ai = {"mode": "ai_service", "status": "configured", "description": "Для новых сдач настроен локальный модуль: текстовые правила и ограниченное сравнение связанных фото. Доступность сервиса контролируется его healthcheck; внешние LLM/vision не подключены, итоговое решение принимает мастер."}
+            status = "configured" if app.state.ai_vision_configured else "not_configured"
+            description = ("OpenAI Vision настроен для проверки выбранных фото сдачи. Внешнему API передаются только связанные фото, без отчёта и идентификаторов сотрудников; результат — рекомендация, окончательное решение принимает мастер. Фактический вызов зависит от действительности ключа и доступа к модели."
+                           if app.state.ai_vision_configured else
+                           "OpenAI Vision не настроен: добавьте OPENAI_API_KEY в игнорируемый корневой .env. AI_SERVICE_TOKEN — отдельный внутренний токен backend → ai-review. Без ключа новые проверки фото не выполняются; итоговое решение принимает мастер.")
+            ai = {"mode": "openai_vision", "status": status, "description": description}
         else:
-            ai = {"mode": app.state.ai_review_mode, "status": "fallback", "description": "Включён совместимый stub-режим проверки сдачи. Это тестовый fallback, а не подключённый модуль. Для локального модуля задайте AI_REVIEW_MODE=queued_service; итоговое решение принимает мастер."}
+            ai = {"mode": app.state.ai_review_mode, "status": "fallback", "description": "Включён совместимый тестовый stub-режим проверки сдачи. Для реальной проверки фото задайте AI_REVIEW_MODE=queued_service и OPENAI_API_KEY в игнорируемом корневом .env; итоговое решение принимает мастер."}
         return {"ai": ai, "native": native, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
 
     @app.websocket("/api/ws")

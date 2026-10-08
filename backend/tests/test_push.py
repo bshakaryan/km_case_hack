@@ -313,8 +313,8 @@ def test_integrations_native_stub_when_unconfigured(client, master, monkeypatch)
     data = client.get("/api/integrations", headers=master).json()
     assert data["native"] == {"mode": "disabled", "status": "not_configured", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
     ai_mode = client.app.state.ai_review_mode
-    expected_ai_mode = "ai_service" if ai_mode == "queued_service" else ai_mode
-    expected_ai_status = "active" if ai_mode == "queued_service" else "fallback"
+    expected_ai_mode = "openai_vision" if ai_mode == "queued_service" else ai_mode
+    expected_ai_status = ("configured" if client.app.state.ai_vision_configured else "not_configured") if ai_mode == "queued_service" else "fallback"
     assert data["ai"]["mode"] == expected_ai_mode and data["ai"]["status"] == expected_ai_status
     assert data["realtime"] == {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}
 
@@ -330,21 +330,30 @@ def test_integrations_native_fcm_when_configured(client, master, tmp_path, monke
     assert client.get("/api/integrations", headers=master).json()["native"]["mode"] == "disabled"
 
 
-def test_integrations_reports_local_ai_module_when_enabled(tmp_path, monkeypatch):
+def test_integrations_reports_openai_vision_configuration_without_exposing_key(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import create_app
 
     monkeypatch.setenv("AI_REVIEW_MODE", "queued_service")
     monkeypatch.setenv("AI_SERVICE_URL", "http://ai-review:8010")
     monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token-at-least-16")
+    monkeypatch.setenv("AI_VISION_CONFIGURED", "false")
     app = create_app(f"sqlite:///{tmp_path / 'integrations.db'}", monitor=False)
     with TestClient(app) as service_client:
         service_master = auth_headers(service_client, "master")
         integration = service_client.get("/api/integrations", headers=service_master).json()["ai"]
         health = service_client.get("/api/health").json()
-    assert integration["mode"] == health["ai"] == "ai_service"
-    assert integration["status"] == "configured"
-    assert "локальный модуль" in integration["description"]
+    assert integration["mode"] == "openai_vision" and health["ai"] == "ai_service"
+    assert integration["status"] == "not_configured"
+    assert "OPENAI_API_KEY" in integration["description"]
+    assert "AI_SERVICE_TOKEN" in integration["description"]
+
+    monkeypatch.setenv("AI_VISION_CONFIGURED", "true")
+    configured_app = create_app(f"sqlite:///{tmp_path / 'integrations-configured.db'}", monitor=False)
+    with TestClient(configured_app) as service_client:
+        integration = service_client.get("/api/integrations", headers=auth_headers(service_client, "master")).json()["ai"]
+    assert integration["mode"] == "openai_vision" and integration["status"] == "configured"
+    assert "только связанные фото" in integration["description"]
 
 
 @pytest.mark.parametrize("http_status,error,invalid_token", [

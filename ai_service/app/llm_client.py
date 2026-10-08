@@ -35,15 +35,33 @@ class SemanticAssessment(BaseModel):
     explanation_master: str
 
 
+class VisualCriterion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["no_visible_issue", "issue_visible", "not_assessable"]
+    observation: str = Field(max_length=240)
+
+
+class VisualCriteria(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cleanliness: VisualCriterion
+    fasteners: VisualCriterion
+    guards: VisualCriterion
+    leakage: VisualCriterion
+
+
 class VisionAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     same_equipment: bool | None
     defect_resolved: bool | None
     quality: Literal["excellent", "good", "mixed", "poor", "critical", "unknown"]
-    confidence: float = Field(ge=0, le=1)
-    issues: list[str]
-    explanation: str
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    issues: list[str] = Field(max_length=8)
+    explanation: str = Field(max_length=1000)
+    # Optional for historical records; required by the current OpenAI JSON schema.
+    visual_criteria: VisualCriteria | None = None
 
 
 SEMANTIC_SCHEMA = {
@@ -72,9 +90,26 @@ VISION_SCHEMA = {
         "confidence": {"type": "number"},
         "issues": {"type": "array", "items": {"type": "string"}},
         "explanation": {"type": "string"},
+        "visual_criteria": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                name: {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "status": {"type": "string", "enum": [
+                            "no_visible_issue", "issue_visible", "not_assessable"]},
+                        "observation": {"type": "string"},
+                    },
+                    "required": ["status", "observation"],
+                }
+                for name in ("cleanliness", "fasteners", "guards", "leakage")
+            },
+            "required": ["cleanliness", "fasteners", "guards", "leakage"],
+        },
     },
     "required": ["same_equipment", "defect_resolved", "quality", "confidence", "issues", "explanation"],
 }
+VISION_SCHEMA["required"].append("visual_criteria")
 
 
 class LLMClient:

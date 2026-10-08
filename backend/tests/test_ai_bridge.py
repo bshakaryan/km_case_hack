@@ -36,10 +36,9 @@ def reply(request, result=None, **changes):
     sent = json.loads(request.content)
     result = deepcopy(result or unknown())
     if sent["schema_version"] == 2:
-        result.setdefault("photo_check", {"status": "no_after", "method": "local_cv", "scope": "submission_selected_pair",
-            "before_id": None, "after_id": None, "duplicate_before": None, "exact_duplicate_groups": [],
-            "equipment_status": "unknown", "model_available": False, "capture_time_status": "unknown",
-            "repair_status": "unknown", "history_status": "not_checked"})
+        result.setdefault("photo_check", {"status": "no_after", "method": "openai_vision", "scope": "submission_selected_pair",
+            "before_id": None, "after_id": None, "vision": None, "capture_time_status": "unknown",
+            "history_status": "not_checked"})
     response = {"schema_version": sent["schema_version"], "attempt_id": sent["attempt_id"], "input_sha256": sent["input_sha256"], "result": result, **changes}
     return httpx.Response(200, json=response)
 

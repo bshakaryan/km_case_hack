@@ -37,6 +37,7 @@ const {
   aiReviewExplanation,
   aiReviewSource,
   aiReviewNote,
+  AiReportChecks,
   AiPhotoCheck,
 } = loaded.exports;
 const job = (status, overrides = {}) => ({
@@ -73,53 +74,85 @@ const order = {
 const render = (props) =>
   renderToStaticMarkup(React.createElement(AiJobStatus, props));
 const photoCheck = (status = "checked", overrides = {}) => ({
-  status, method: "local_cv", scope: "submission_selected_pair",
-  before_id: 21, after_id: 22, duplicate_before: false,
-  exact_duplicate_groups: [], equipment_status: "unknown",
-  model_available: false, capture_time_status: "unknown",
-  repair_status: "unknown", history_status: "not_checked",
+  status, method: "openai_vision", scope: "submission_selected_pair",
+  before_id: 21, after_id: 22,
+  vision: { same_equipment: true, defect_resolved: null, quality: "unknown",
+    confidence: 0.5, issues: [], explanation: "По снимкам нельзя уверенно подтвердить результат.",
+    visual_criteria: Object.fromEntries(["cleanliness", "fasteners", "guards", "leakage"]
+      .map((name) => [name, { status: "not_assessable", observation: "" }])) },
+  capture_time_status: "unknown", history_status: "not_checked",
   ...overrides,
 });
 const renderPhotos = (check) => renderToStaticMarkup(React.createElement(AiPhotoCheck, { check }));
 
-test("local photo evidence identifies the selected pair and keeps repair, equipment and capture unknown", () => {
+test("formal report checks are separate and unavailable norms stay explicit", () => {
+  const html = renderToStaticMarkup(React.createElement(AiReportChecks, {
+    isOpenAi: true,
+    checks: {
+      work_description: "present", fault_code: "present",
+      fault_code_vs_problem: "match", work_vs_fault_code: "unknown",
+      materials_vs_norm: "unknown", time_vs_norm: "unknown",
+      deadline: "unknown", after_photo: "present", after_photo_required: true,
+    },
+  }));
+  assert.match(html, /Отчёт и формальные критерии/);
+  assert.match(html, /Описание выполненных работ[\s\S]*Заполнено/);
+  assert.match(html, /словарное совпадение/);
+  assert.match(html, /эвристики/);
+  assert.match(html, /нормы не доступны этой проверке/);
+  assert.match(html, /время\/норматив не подтверждены/);
+  assert.match(html, /Обязательно для внеплановой работы/);
+
+  const historical = renderToStaticMarkup(React.createElement(AiReportChecks, { isOpenAi: true }));
+  assert.match(historical, /Детальная сводка не сохранена/);
+  assert.match(historical, /не пересчитывался/);
+});
+
+test("OpenAI photo result identifies the selected pair and preserves uncertainty", () => {
   const check = photoCheck();
   const html = renderPhotos(check);
-  assert.match(html, /Локальная проверка изображений выполнена/);
-  assert.match(html, /до №21; после №22/);
-  assert.match(html, /В выбранной паре признаков повтора не найдено/);
-  assert.match(html, /Совпадение оборудования не подтверждено/);
-  assert.match(html, /Модель сравнения оборудования недоступна/);
-  assert.match(html, /Качество ремонта и время съёмки не подтверждены/);
-  assert.match(html, /Фото других нарядов и сдач не проверялись/);
-  const review = { score: null, llm_used: false, source_verdict: "needs_master_review", photo_check: check };
-  assert.match(aiReviewSource(review), /локальная проверка фото/);
-  assert.match(aiReviewNote(review), /технические признаки/);
+  assert.match(html, /Визуальная проверка OpenAI/);
+  assert.match(html, /до №21 · после №22/);
+  assert.match(html, /Оборудование[\s\S]*Визуально похоже/);
+  assert.match(html, /Общее впечатление по фото[\s\S]*недостаточно данных/);
+  assert.match(html, /Чистота и мусор[\s\S]*Не видно или ракурс недостаточен/);
+  assert.match(html, /Время съёмки, скрытое состояние и фото других нарядов не проверялись/);
+  const review = { score: null, llm_used: true, source_verdict: "needs_master_review", photo_check: check };
+  assert.match(aiReviewSource(review), /OpenAI Vision/);
+  assert.match(aiReviewNote(review), /итоговую оценку и приёмку выполняет мастер/);
   assert.doesNotMatch(aiReviewNote(review), /Содержимое снимков не анализируется/);
-  assert.equal(aiReviewScoreLabel(review.score), "Оценка не определена");
+  assert.equal(aiReviewScoreLabel(review.score, { photo_check: check, source_verdict: "needs_master_review" }), "Автоматический балл не выставляется");
 });
 
-test("possible duplicate and equipment mismatch are bounded warnings, not a repair verdict", () => {
+test("OpenAI visual concerns remain advice and do not become a final verdict", () => {
   const html = renderPhotos(photoCheck("checked", {
-    duplicate_before: true, equipment_status: "different", model_available: true,
-    exact_duplicate_groups: [Array.from({ length: 40 }, (_, index) => 100001 + index), [200001, 200002]],
+    vision: { same_equipment: false, defect_resolved: false, quality: "poor", confidence: 0.8,
+      issues: ["Дополнительная ржавчина на трубе."], explanation: "На фото после видны отдельные замечания.",
+      visual_criteria: {
+        cleanliness: { status: "issue_visible", observation: "Пятна на основании." },
+        fasteners: { status: "not_assessable", observation: "" },
+        guards: { status: "no_visible_issue", observation: "" },
+        leakage: { status: "issue_visible", observation: "Видны масляные следы." },
+      } },
   }));
-  assert.match(html, /признаки повтора фото до ремонта/);
-  assert.match(html, /Возможно, на выбранных снимках разное оборудование/);
-  assert.match(html, /группы полностью одинаковых файлов: 2/);
-  assert.doesNotMatch(html, /100001|200001|Совпадение оборудования подтверждено|Предварительная оценка/);
-  assert.match(html, /Качество ремонта и время съёмки не подтверждены/);
+  assert.match(html, /Оборудование[\s\S]*Визуально различается/);
+  assert.match(html, /Видимый дефект[\s\S]*Признаки дефекта остаются/);
+  assert.match(html, /Общее впечатление по фото[\s\S]*заметны существенные недостатки/);
+  assert.match(html, /Чистота и мусор[\s\S]*Пятна на основании/);
+  assert.match(html, /Дополнительные замечания[\s\S]*Дополнительная ржавчина на трубе/);
 });
 
-test("unavailable and absent-after results never pretend that image comparison completed", () => {
-  for (const status of ["unavailable", "no_after"]) {
-    const check = photoCheck(status, { duplicate_before: null, after_id: status === "no_after" ? null : 22 });
-    const html = renderPhotos(check);
-    assert.match(html, status === "unavailable" ? /проверка изображений недоступна/ : /нет фото после выполнения/);
-    assert.doesNotMatch(html, /проверка изображений выполнена|признаков повтора не найдено|Полностью одинаковые файлы.*не найдены/);
-    assert.match(html, /время съёмки не подтверждены/);
-    assert.match(aiReviewNote({ photo_check: check }), /Окончательное решение принимает мастер/);
-  }
+test("legacy local CV is labelled historical and missing-after stays explicit", () => {
+  const legacy = photoCheck("checked", { method: "local_cv", duplicate_before: true,
+    exact_duplicate_groups: [[21, 22]], equipment_status: "unknown", model_available: false });
+  assert.match(aiReviewTitle({ photo_check: legacy }), /Историческая локальная проверка фото/);
+  assert.match(renderPhotos(legacy), /Историческая локальная CV-проверка выполнена/);
+  assert.match(renderPhotos(legacy), /прежнего локального модуля/);
+  assert.doesNotMatch(renderPhotos(legacy), /Результат OpenAI/);
+
+  const missing = photoCheck("no_after", { before_id: 21, after_id: null, vision: null });
+  assert.match(renderPhotos(missing), /нет фото после выполнения/);
+  assert.doesNotMatch(renderPhotos(missing), /фото проанализированы/);
   assert.equal(renderPhotos(undefined), "");
   assert.match(aiReviewNote({ is_stub: true }), /содержимое снимков не анализируется/);
 });
@@ -127,7 +160,7 @@ test("unavailable and absent-after results never pretend that image comparison c
 test("a service job is a saved report awaiting a recommendation, not the local formal stub", () => {
   for (const status of ["pending", "running", "failed", "superseded"]) {
     const html = render({ job: job(status, { provider: "ai_service" }) });
-    assert.match(html, /Локальная проверка сдачи/);
+    assert.match(html, /Проверка сдачи/);
     assert.match(html, /Окончательное решение принимает мастер/);
     assert.doesNotMatch(html, /Формальная проверка · демо|PRIVATE_PROVIDER_DIAGNOSTIC/);
     assert.doesNotMatch(html, /текст отчёта и правила|проверка изображений выполнена|Содержимое снимков не анализируется/);
@@ -148,7 +181,7 @@ test("source metadata distinguishes rules from text models without making a fina
     source_verdict: "needs_master_review", llm_used: false,
     is_recommendation: true, explanation: "Проверьте отчёт",
   };
-  assert.equal(aiReviewTitle(review, job("succeeded", { provider: "ai_service" })), "Локальная проверка сдачи");
+  assert.equal(aiReviewTitle(review, job("succeeded", { provider: "ai_service" })), "Проверка сдачи");
   assert.equal(aiReviewVerdict(review), "Нужна проверка мастером");
   assert.match(aiReviewSource(review), /языковая модель не использовалась/);
   assert.match(aiReviewSource({ ...review, llm_used: true }), /текстовая модель и правила/);

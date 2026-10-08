@@ -116,21 +116,51 @@ export type OrderDetail = Order & {
     is_recommendation?: true;
     bridge_version?: 1 | 2;
     photo_check?: SubmissionPhotoCheck;
+    report_checks?: SubmissionReportChecks;
   } | null;
 };
 export type SubmissionPhotoCheck = {
   status: "checked" | "unavailable" | "no_after";
-  method: "local_cv";
+  method: "openai_vision" | "local_cv";
   scope: "submission_selected_pair";
   before_id: number | null;
   after_id: number | null;
-  duplicate_before: boolean | null;
-  exact_duplicate_groups: number[][];
-  equipment_status: "different" | "unknown";
-  model_available: boolean;
-  capture_time_status: "unknown";
-  repair_status: "unknown";
-  history_status: "not_checked";
+  vision?: {
+    same_equipment: boolean | null;
+    defect_resolved: boolean | null;
+    quality: "excellent" | "good" | "mixed" | "poor" | "critical" | "unknown";
+    confidence: number;
+    issues: string[];
+    explanation: string;
+    visual_criteria?: {
+      cleanliness: VisualCriterion;
+      fasteners: VisualCriterion;
+      guards: VisualCriterion;
+      leakage: VisualCriterion;
+    } | null;
+  } | null;
+  duplicate_before?: boolean | null;
+  exact_duplicate_groups?: number[][];
+  equipment_status?: "different" | "unknown";
+  model_available?: boolean;
+  capture_time_status?: "unknown";
+  repair_status?: "unknown";
+  history_status?: "not_checked";
+};
+export type VisualCriterion = {
+  status: "no_visible_issue" | "issue_visible" | "not_assessable";
+  observation: string;
+};
+export type SubmissionReportChecks = {
+  work_description: "present" | "missing";
+  fault_code: "present" | "missing";
+  fault_code_vs_problem: "match" | "mismatch" | "unknown";
+  work_vs_fault_code: "match" | "mismatch" | "unknown";
+  materials_vs_norm: "within_norm" | "issue" | "missing" | "unknown";
+  time_vs_norm: "within_norm" | "over_norm" | "unknown";
+  deadline: "on_time" | "late" | "unknown";
+  after_photo: "present" | "missing";
+  after_photo_required: boolean;
 };
 export type AiReviewJob = {
   id: Id;

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-DEADLINE_SECONDS = 8
+DEADLINE_SECONDS = 25
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_V2_REQUEST_BYTES = 56 * 1024 * 1024
 MAX_PHOTO_BYTES = 4 * 1024 * 1024

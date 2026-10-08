@@ -1,8 +1,6 @@
 """Durable review jobs with attempt, assignment, provider and lease fences."""
 from copy import deepcopy
-from collections import defaultdict
 from datetime import timedelta, timezone
-import hashlib
 from typing import Literal
 from uuid import uuid4
 
@@ -29,20 +27,54 @@ def begin_sqlite_write(db):
             connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
+class VisualCriterion(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    status: Literal["no_visible_issue", "issue_visible", "not_assessable"]
+    observation: str = Field(max_length=240)
+
+
+class VisualCriteria(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    cleanliness: VisualCriterion
+    fasteners: VisualCriterion
+    guards: VisualCriterion
+    leakage: VisualCriterion
+
+
+class VisionCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    same_equipment: bool | None
+    defect_resolved: bool | None
+    quality: Literal["excellent", "good", "mixed", "poor", "critical", "unknown"]
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    issues: list[str] = Field(max_length=8)
+    explanation: str = Field(max_length=1000)
+    visual_criteria: VisualCriteria | None = None
+
+
 class PhotoCheck(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    status: Literal["checked", "unavailable", "no_after"]
-    method: Literal["local_cv"]
+    status: Literal["checked", "no_after"]
+    method: Literal["openai_vision"]
     scope: Literal["submission_selected_pair"]
     before_id: int | None = Field(gt=0)
     after_id: int | None = Field(gt=0)
-    duplicate_before: bool | None
-    exact_duplicate_groups: list[list[int]] = Field(max_length=5)
-    equipment_status: Literal["different", "unknown"]
-    model_available: bool
+    vision: VisionCheck | None
     capture_time_status: Literal["unknown"]
-    repair_status: Literal["unknown"]
     history_status: Literal["not_checked"]
+
+
+class ReportChecks(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    work_description: Literal["present", "missing"]
+    fault_code: Literal["present", "missing"]
+    fault_code_vs_problem: Literal["match", "mismatch", "unknown"]
+    work_vs_fault_code: Literal["match", "mismatch", "unknown"]
+    materials_vs_norm: Literal["within_norm", "issue", "missing", "unknown"]
+    time_vs_norm: Literal["within_norm", "over_norm", "unknown"]
+    deadline: Literal["on_time", "late", "unknown"]
+    after_photo: Literal["present", "missing"]
+    after_photo_required: bool
 
 
 class ReviewResult(BaseModel):
@@ -58,6 +90,7 @@ class ReviewResult(BaseModel):
     input_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     bridge_version: Literal[1, 2] | None = None
     photo_check: PhotoCheck | None = None
+    report_checks: ReportChecks | None = None
 
 
 class FormalStub:
@@ -113,52 +146,41 @@ def validate_result(result, provider="stub"):
         if value["bridge_version"] == 1:
             if "photo_check" in value:
                 raise ValueError("invalid_result")
-        elif (value["source_verdict"] != "needs_master_review" or value["score"] is not None
-                or value["llm_used"] is not False or value["is_stub"] is not True
-                or value.get("photo_check") is None):
-            raise ValueError("invalid_result")
+        else:
+            check = value.get("photo_check")
+            if check is None or check["method"] != "openai_vision":
+                raise ValueError("invalid_result")
+            used_vision = check["status"] == "checked"
+            if (value["source_verdict"] != "needs_master_review" or value["score"] is not None
+                    or value["llm_used"] is not used_vision or value["is_stub"] is used_vision):
+                raise ValueError("invalid_result")
     else:
         raise ValueError("invalid_result")
     return value
 
 
 def validate_photo_check(check, snapshot):
-    """Bind local CV claims to this exact immutable linked-photo set."""
+    """Bind OpenAI Vision results to the selected pair in this immutable attempt."""
     photos = snapshot["photos"]
     selected = {kind: max((photo["id"] for photo in photos if photo["kind"] == kind), default=None)
         for kind in ("before", "after")}
     if check["before_id"] != selected["before"] or check["after_id"] != selected["after"]:
         raise ValueError("invalid_result")
+    if check["method"] != "openai_vision":
+        raise ValueError("invalid_result")
     status = check["status"]
     if status == "no_after" and selected["after"] is not None:
         raise ValueError("invalid_result")
-    if status != "checked":
-        if (check["duplicate_before"] is not None or check["equipment_status"] != "unknown"
-                or check["model_available"] is not False or check["exact_duplicate_groups"] != []):
+    if status == "no_after":
+        if check["vision"] is not None:
             raise ValueError("invalid_result")
         return
-    if selected["after"] is None:
+    if status != "checked" or selected["after"] is None or not isinstance(check["vision"], dict):
         raise ValueError("invalid_result")
     if selected["before"] is None:
-        if (check["duplicate_before"] is not None or check["equipment_status"] != "unknown"
-                or check["model_available"] is not False):
+        if (check["vision"].get("same_equipment") is not None
+                or check["vision"].get("defect_resolved") is not None):
             raise ValueError("invalid_result")
-    elif type(check["duplicate_before"]) is not bool:
-        raise ValueError("invalid_result")
-    if check["equipment_status"] == "different" and check["model_available"] is not True:
-        raise ValueError("invalid_result")
-    chosen = {photo["id"]: photo["data"] for photo in photos}
-    if (selected["before"] is not None and chosen[selected["before"]] == chosen[selected["after"]]
-            and check["duplicate_before"] is not True):
-        raise ValueError("invalid_result")
-    hashes = defaultdict(list)
-    for photo in photos:
-        hashes[hashlib.sha256(photo["data"]).hexdigest()].append(photo["id"])
-    expected = sorted(sorted(ids) for ids in hashes.values() if len(ids) > 1)
-    groups = check["exact_duplicate_groups"]
-    if (any(len(group) < 2 or len(group) > 10 or any(type(id_) is not int or id_ <= 0 for id_ in group)
-            for group in groups) or groups != expected):
-        raise ValueError("invalid_result")
 
 
 def apply_success(db, order, attempt, job, result):

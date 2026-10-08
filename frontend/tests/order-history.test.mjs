@@ -220,7 +220,7 @@ test("a service recommendation with unknown score preserves the separate master'
       },
     })],
   });
-  assert.match(html, /Локальная проверка сдачи/);
+  assert.match(html, /Проверка сдачи/);
   assert.match(html, /Оценка не определена/);
   assert.match(html, /Нужна проверка мастером/);
   assert.match(html, /языковая модель не использовалась/);

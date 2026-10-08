@@ -5,6 +5,7 @@ import { Photo } from "./ui";
 import {
   AiJobStatus,
   AiPhotoCheck,
+  AiReportChecks,
   aiReviewExplanation,
   aiReviewNote,
   aiReviewScoreLabel,
@@ -207,6 +208,10 @@ export function OrderHistory({
                         </p>
                       )}
                       <p>{aiReviewExplanation(attempt.ai_review, attempt.ai_job)}</p>
+                      <AiReportChecks
+                        checks={attempt.ai_review.report_checks}
+                        isOpenAi={attempt.ai_review.photo_check?.method === "openai_vision"}
+                      />
                       <AiPhotoCheck check={attempt.ai_review.photo_check} />
                       <p className="muted">
                         {aiReviewNote(attempt.ai_review, attempt.ai_job)}

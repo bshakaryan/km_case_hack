@@ -193,6 +193,11 @@ class OrderHistory extends StatelessWidget {
                 if (aiReviewSource(review) != null)
                   _text(aiReviewSource(review)!),
                 _text(aiReviewExplanation(review, job: attempt['ai_job'])),
+                AiReportChecks(
+                  checks: review['report_checks'],
+                  isOpenAi: review['photo_check'] is Map &&
+                      (review['photo_check'] as Map)['method'] == 'openai_vision',
+                ),
                 AiPhotoCheck(check: review['photo_check']),
                 _text(aiReviewNote(review, job: attempt['ai_job'])),
               ],
