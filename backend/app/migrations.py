@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 BACKEND = Path(__file__).resolve().parents[1]
-REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push", "0004_order_history")
+REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push", "0004_order_history", "0005_ai_review_jobs")
 
 
 class SchemaCompatibilityError(RuntimeError):
@@ -78,6 +78,9 @@ def expected_schema(revision):
     if revision in REVISIONS[4:]:
         history = ScriptDirectory.from_config(alembic_config()).get_revision("0004_order_history").module
         history.schema(metadata)
+    if revision in REVISIONS[5:]:
+        jobs = ScriptDirectory.from_config(alembic_config()).get_revision("0005_ai_review_jobs").module
+        jobs.schema(metadata)
     return metadata
 
 

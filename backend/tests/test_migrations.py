@@ -85,11 +85,11 @@ def test_filled_legacy_upgrade_preserves_data_and_backfills_current_assignment(t
     upgrade_database(engine)
     after = snapshot(engine)
     assert {name: rows for name, rows in after.items() if name in before} == before
-    schema = expected_schema("0004_order_history")
+    schema = expected_schema("0005_ai_review_jobs")
     with engine.connect() as connection:
         assigned = dict(connection.execute(sa.select(schema.tables["orders"].c.id, schema.tables["orders"].c.assigned_at)).all())
         assert assigned == {1: created + timedelta(minutes=40), 2: created, 3: created, 4: created + timedelta(minutes=30), 5: created}
-        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0004_order_history"
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0005_ai_review_jobs"
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
         assert not connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     upgrade_database(engine)
@@ -199,7 +199,7 @@ def test_assignment_migration_downgrade_and_upgrade_preserve_filled_database(tmp
     before = snapshot(engine)
     with engine.connect() as connection:
         command.downgrade(alembic_config(connection), "0002_client_commands")
-    removed = {"device_tokens", "push_tasks", "order_assignments", "submission_attempts", "submission_photos", "submission_writeoffs", "submission_decisions"}
+    removed = {"device_tokens", "push_tasks", "order_assignments", "submission_attempts", "submission_photos", "submission_writeoffs", "submission_decisions", "ai_review_jobs"}
     assert snapshot(engine) == {name: rows for name, rows in before.items() if name not in removed}
     assert "assigned_at" not in {column["name"] for column in sa.inspect(engine).get_columns("orders")}
     upgrade_database(engine)

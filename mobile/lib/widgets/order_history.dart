@@ -4,6 +4,7 @@ import '../data/app_controller.dart';
 import '../data/models.dart';
 import '../ui.dart' as app_ui;
 import 'order_photo.dart';
+import 'ai_job_status.dart';
 
 /// Detail-only snapshots supplied by the server; current editing stays separate.
 class OrderHistory extends StatelessWidget {
@@ -171,7 +172,11 @@ class OrderHistory extends StatelessWidget {
                   '${photo['kind'] == 'before' ? 'До ремонта' : 'После ремонта'} · ${photo['author_name'] ?? 'Автор не зафиксирован'} · ${_date(photo['created_at'])}',
                 ),
               ],
-              if (review.isNotEmpty) ...[
+              AiJobStatus(
+                job: attempt['ai_job'] is Map ? _map(attempt['ai_job']) : null,
+              ),
+              if (review.isNotEmpty &&
+                  showAttemptAiReview(attempt['ai_job'])) ...[
                 _heading(
                   review['is_stub'] == true
                       ? 'Формальная проверка · демо'

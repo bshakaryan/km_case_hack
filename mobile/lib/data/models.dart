@@ -26,11 +26,31 @@ class WorkOrder {
   List<Json> get assignmentHistory => _historyRows(data['assignment_history']);
   List<Json> get submissionAttempts =>
       _historyRows(data['submission_attempts']);
+  Json? get aiReviewJob => data['ai_review_job'] is Map
+      ? Map<String, dynamic>.from(data['ai_review_job'] as Map)
+      : null;
+  bool get showAiReview =>
+      aiReviewJob == null || aiReviewJob!['status'] == 'succeeded';
+  bool get canRetryAiReview {
+    final job = aiReviewJob;
+    return !pendingSync &&
+        status == 'completed' &&
+        job?['status'] == 'failed' &&
+        job?['retry_allowed'] == true &&
+        submissionAttempts.isNotEmpty &&
+        submissionAttempts.last['ai_review'] == null &&
+        submissionAttempts.last['assessment_id'] == null &&
+        submissionAttempts.last['id'] == job?['attempt_id'];
+  }
 
   // Lists and historical command replays may omit detail-only fields. A new
   // explicit empty array is authoritative; only missing fields use the cache.
   WorkOrder withCachedHistory(WorkOrder? previous) => WorkOrder.fromJson({
-    for (final key in ['assignment_history', 'submission_attempts'])
+    for (final key in [
+      'assignment_history',
+      'submission_attempts',
+      'ai_review_job',
+    ])
       if (!data.containsKey(key) && previous?.data.containsKey(key) == true)
         key: previous!.data[key],
     ...data,

@@ -39,7 +39,8 @@ def check_preservation(engine):
     before = dump(engine)
     upgrade_database(engine)
     after = dump(engine)
-    assert {name: rows for name, rows in after.items() if name not in HISTORY} == before
+    assert {name: rows for name, rows in after.items() if name not in HISTORY | {"ai_review_jobs"}} == before
+    assert not after["ai_review_jobs"]
     assignments = after["order_assignments"]
     assert len(assignments) == 5
     previous_orders = {row["id"]: row for row in before["orders"]}
@@ -95,6 +96,7 @@ def test_seed_adds_conservative_snapshots_once(tmp_path):
         assert len(state["submission_attempts"]) == sum(order["completion"] is not None for order in state["orders"])
         assert all(row["source"] == "legacy_snapshot" for row in state["order_assignments"] + state["submission_attempts"])
         assert not state["submission_photos"] and not state["submission_writeoffs"]
+        assert not state["ai_review_jobs"]
         with session_factory(engine)() as db:
             seed_database(db)
         assert dump(engine) == state

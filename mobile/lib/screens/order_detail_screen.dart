@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../data/app_controller.dart';
+import '../data/api.dart';
 import '../data/models.dart';
 import '../ui.dart' as app_ui;
 import '../widgets/order_photo.dart';
 import '../widgets/order_history.dart';
+import '../widgets/ai_job_status.dart';
 import 'completion_screen.dart';
 
 const _blue = Color(0xFF173E68);
@@ -31,6 +33,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   bool _loading = true;
   bool _busy = false;
   bool _fetching = false;
+  bool _aiRetryUncertain = false;
   int _revision = 0;
   DateTime? _updatedAt;
   Timer? _timer;
@@ -76,6 +79,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         _order = order;
         _error = null;
         _updatedAt = DateTime.now();
+        if (!widget.controller.offline) _aiRetryUncertain = false;
       });
     } catch (error) {
       if (mounted && revision == _revision) {
@@ -84,6 +88,47 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     } finally {
       _fetching = false;
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _retryAiReview() async {
+    final order = _order;
+    if (_busy ||
+        _aiRetryUncertain ||
+        order == null ||
+        !order.canRetryAiReview) {
+      return;
+    }
+    _revision++;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final updated = await widget.controller.retryAiReview(
+        order.id,
+        (order.aiReviewJob!['attempt_id'] as num).toInt(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _order = updated;
+        _updatedAt = DateTime.now();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Проверка поставлена в очередь. Отчёт сохранён.'),
+        ),
+      );
+    } catch (failure) {
+      if (mounted) {
+        setState(() {
+          _error = failure.toString();
+          _aiRetryUncertain =
+              failure is! ApiException || failure.requestMayHaveSucceeded;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -413,7 +458,20 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   ]),
                   _photos(order),
                   if (order.data['completion'] is Map) _report(order),
-                  if (order.data['ai_review'] is Map) _review(order),
+                  if (!order.pendingSync)
+                    AiJobStatus(
+                      job: order.aiReviewJob,
+                      onRetry: _master && order.canRetryAiReview
+                          ? _retryAiReview
+                          : null,
+                      busy: _busy,
+                      uncertain: _aiRetryUncertain,
+                      offline: widget.controller.offline,
+                    ),
+                  if (order.data['ai_review'] is Map &&
+                      order.showAiReview &&
+                      !order.pendingSync)
+                    _review(order),
                   OrderHistory(order: order, controller: widget.controller),
                   _history(order),
                   if (_updatedAt != null)
@@ -512,7 +570,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               : 'Внеплановый ремонт',
           style: const TextStyle(color: Color(0xFF64748B)),
         ),
-        if (order.status == 'ai_review') ...[
+        if ({'completed', 'ai_review'}.contains(order.status)) ...[
           const Divider(height: 28),
           Text(
             order.pendingSync || widget.controller.isOrderPending(order.id)

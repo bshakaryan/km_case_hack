@@ -2,6 +2,7 @@ import { useState } from "react";
 import { formatDate, number } from "./model";
 import type { OrderDetail, RefItem, SubmissionAttempt } from "./model";
 import { Photo } from "./ui";
+import { AiJobStatus, showAiReview } from "./AiReviewJob";
 
 function AttemptPhotos({ photos }: { photos: SubmissionAttempt["photos"] }) {
   const [open, setOpen] = useState(false);
@@ -178,7 +179,8 @@ export function OrderHistory({
                     </p>
                   )}
                   <AttemptPhotos photos={attempt.photos} />
-                  {attempt.ai_review && (
+                  <AiJobStatus job={attempt.ai_job} />
+                  {attempt.ai_review && showAiReview(attempt.ai_job) && (
                     <section className="history-assessment">
                       <h5>
                         {attempt.ai_review.is_stub

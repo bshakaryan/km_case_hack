@@ -897,7 +897,9 @@ class AppController extends ChangeNotifier {
               command.payload['action'] as String,
             );
           } else if (command.kind == OutboxKind.complete) {
-            data['status'] = 'ai_review';
+            data['status'] = 'completed';
+            data['ai_review'] = null;
+            data['ai_review_job'] = null;
           }
         }
         data['_queued_status'] = data['status'];
@@ -1566,13 +1568,111 @@ class AppController extends ChangeNotifier {
       onOffline: (command) {
         final updated = _offlineOrderState(id);
         final updatedData = Map<String, dynamic>.from(updated.data);
-        updatedData['status'] = 'ai_review';
+        updatedData['status'] = 'completed';
+        updatedData['ai_review'] = null;
+        updatedData['ai_review_job'] = null;
         updatedData['_queued_status'] = updated.data['status'];
         updatedData['completed_at'] = DateTime.now().toIso8601String();
         return WorkOrder.fromJson(updatedData);
       },
     );
     return result as WorkOrder;
+  }
+
+  // This gateway has no client-command key: never enqueue or replay its POST.
+  Future<WorkOrder> retryAiReview(int id, int attemptId) async {
+    if (user == null) throw const ApiException('Войдите в приложение.', 401);
+    final current = orders.where((order) => order.id == id).firstOrNull;
+    if (!user!.isMaster ||
+        current?.canRetryAiReview != true ||
+        current?.aiReviewJob?['attempt_id'] != attemptId) {
+      throw const ApiException(
+        'Повтор доступен мастеру для последней неудачной проверки.',
+        409,
+      );
+    }
+    if (offline) {
+      throw const ApiException(
+        'Для повтора проверки подключитесь к серверу.',
+        0,
+      );
+    }
+    if (saving) {
+      throw const ApiException(
+        'Дождитесь завершения предыдущего действия.',
+        409,
+      );
+    }
+    final session = _session;
+    final source = api;
+    saving = true;
+    _notify();
+    try {
+      final response = await source.retryAiReview(id, attemptId);
+      if (!_current(session)) {
+        throw const ApiException(
+          'Сессия изменилась. Проверьте результат повтора.',
+          401,
+          requestMayHaveSucceeded: true,
+        );
+      }
+      final previous = orders.firstWhere((order) => order.id == id);
+      if (previous.submissionAttempts.isNotEmpty &&
+          previous.submissionAttempts.last['id'] != response['attempt_id']) {
+        return await loadOrder(id);
+      }
+      final latest = previous.submissionAttempts.lastOrNull;
+      final latestJob = latest?['ai_job'];
+      final replyJob = response['job'];
+      // The POST snapshot may arrive after a read has already observed its
+      // worker result. Do not regress that same submission to pending.
+      const advancedStates = {'running', 'succeeded', 'superseded'};
+      if (replyJob is Map &&
+          replyJob['status'] == 'pending' &&
+          (previous.status != 'completed' ||
+              latest?['assessment_id'] != null ||
+              latest?['ai_review'] != null ||
+              (latestJob is Map &&
+                  advancedStates.contains(latestJob['status'])) ||
+              advancedStates.contains(previous.aiReviewJob?['status']))) {
+        return previous;
+      }
+      final updated = WorkOrder.fromJson({
+        ...previous.data,
+        'ai_review': response['ai_review'],
+        'ai_review_job': response['job'],
+        'submission_attempts': previous.submissionAttempts
+            .map(
+              (attempt) => attempt['id'] == response['attempt_id']
+                  ? {
+                      ...attempt,
+                      'ai_job': response['job'],
+                      'ai_review': response['ai_review'],
+                    }
+                  : attempt,
+            )
+            .toList(),
+      });
+      ++_dataRevision;
+      _upsert(updated);
+      await _persistSnapshot(session, force: true);
+      if (!_current(session)) {
+        throw const ApiException(
+          'Сессия изменилась. Проверьте результат повтора.',
+          401,
+          requestMayHaveSucceeded: true,
+        );
+      }
+      return updated;
+    } on ApiException catch (failure) {
+      if (_current(session) && failure.statusCode == 401) _expireSession();
+      rethrow;
+    } finally {
+      if (_current(session)) {
+        saving = false;
+        _notify();
+      }
+    }
   }
 
   Future<void> uploadPhoto(

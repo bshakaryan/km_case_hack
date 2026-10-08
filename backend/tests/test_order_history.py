@@ -134,7 +134,7 @@ def test_submissions_freeze_photos_extra_materials_ai_and_master_decisions(histo
 
 
 def test_failed_completion_rolls_back_attempt_links_and_offline_claim(history_client, monkeypatch):
-    import app.main as main_module
+    import app.services as services_module
     client = history_client
     id_ = new_order(client)
     start(client, id_)
@@ -142,7 +142,7 @@ def test_failed_completion_rolls_back_attempt_links_and_offline_claim(history_cl
     def fail_after_history(*args, **kwargs):
         raise RuntimeError("Injected notification failure")
     with monkeypatch.context() as patch:
-        patch.setattr(main_module, "notify", fail_after_history)
+        patch.setattr(services_module, "notify", fail_after_history)
         with pytest.raises(RuntimeError, match="Injected notification failure"):
             complete(client, id_)
     with client.app.state.sessions() as db:

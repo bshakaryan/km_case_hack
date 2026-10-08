@@ -30,7 +30,7 @@
 
 Статусы работ и следующий пакет ведём в [плане](implementation-plan.md), а факты испытаний — в [проверках](verification.md). Это общая точка входа для разработчиков и автоматизированных помощников.
 
-Пакет PostgreSQL/CI опубликован в отдельной `feature/postgresql-ci` от `6386066`, [PR #2](https://github.com/bshakaryan/km_case_hack/pull/2); четыре проверки CI прошли. Следующий пакет `feature/order-history` основан на этой ветке и добавляет историю назначений/попыток с отображением в React и Flutter. До слияния этих PR main сохраняет прежнее поведение. Контракт ветки описан в [API](api-contract.md), результаты и пределы проверки — в [verification](verification.md). После истории следует сохраняемая AI-задача и защищённый gateway; выбор провайдера остаётся открытым.
+Пакеты PostgreSQL/CI ([PR #2](https://github.com/bshakaryan/km_case_hack/pull/2)) и истории ([PR #3](https://github.com/bshakaryan/km_case_hack/pull/3)) опубликованы с успешным CI. По решению владельца развиваем цепочку зависимых веток, откладывая слияние в main: `feature/postgresql-ci → feature/order-history → feature/ai-review-jobs`. Последний пакет основан на `cbd0b64` и добавляет сохраняемые задачи проверки конкретной сдачи и авторизованное чтение/повтор. Контракт ветки описан в [API](api-contract.md), факты испытаний — в [verification](verification.md). Пока используется локальная формальная проверка; выбор реального провайдера остаётся Q01.
 
 ## Текущее состояние офлайна
 

@@ -432,6 +432,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-v
 .ai-review > div:first-child { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-bottom: 10px; }
 .ai-review h3 { flex: 1; font-size: 15px; }
 .ai-review p { margin-top: 8px; line-height: 1.6; }
+.ai-job-status .button { margin-top: 12px; }
 .ai-review > small { display: block; margin-top: 10px; font-size: 13px; line-height: 1.55; }
 .final-score { display: block; margin-top: 14px; padding-top: 12px; border-top: 1px solid #d8d1e5; font-size: 14px; }
 .ai-review ul { padding-left: 20px; margin: 10px 0 0; }

@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -87,6 +88,13 @@ def main():
     request(f"/api/photos/{photo['id']}", expected=401)
     assert request(f"/api/photos/{photo['id']}", worker, raw=True).startswith(b"\xff\xd8")
     order = request(path + "/complete", worker, completion)
+    # The queued mode acknowledges the report before its background review.
+    review_deadline = time.monotonic() + 60
+    while order["status"] == "completed" and time.monotonic() < review_deadline:
+        job = order.get("ai_review_job") or {}
+        assert job.get("status") not in ("failed", "superseded"), "Review could not finish; the report remains saved"
+        time.sleep(1)
+        order = request(path, worker)
     assert order["status"] == "ai_review" and order["ai_review"]["is_stub"] is True
     request(path + "/transition", worker, {"action": "close", "score": 5}, expected=403)
     order = request(path + "/transition", master, {"action": "close", "score": 5})
@@ -97,7 +105,7 @@ def main():
     assert analytics["summary"]["total"] >= 500 and analytics["is_stub"] is True
     request("/api/notifications", worker)
     integrations = request("/api/integrations", master)
-    assert integrations["ai"]["mode"] == "stub" and integrations["native"]["mode"] in ("stub", "fcm")
+    assert integrations["ai"]["mode"] in ("stub", "queued_stub", "inline_stub") and integrations["native"]["mode"] in ("stub", "fcm")
     print(f"PASS: auth, RBAC, seed, full lifecycle, mandatory photo, protected media, audit, Excel, analytics. Order {order['number']}.")
 
 

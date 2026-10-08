@@ -25,8 +25,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
+from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
 from .migrations import upgrade_database
-from .models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
+from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
 from .push import StubSender, dispatch_push, env_int, get_sender
 from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPatch, Transition
 from .security import check_pin, hash_pin, token_hash
@@ -85,12 +86,29 @@ class Realtime:
 
 
 def create_app(database_url=None, seed=True, monitor=True):
+    ai_mode = os.getenv("AI_REVIEW_MODE", "queued_stub").strip()
+    if ai_mode not in {"queued_stub", "inline_stub"}:
+        raise ValueError("AI_REVIEW_MODE must be queued_stub or inline_stub")
     engine = make_engine(database_url)
     sessions = session_factory(engine)
     realtime = Realtime()
     attempts = defaultdict(deque)
     # One sender instance keeps the OAuth2 access token cached across dispatches.
     push_sender = get_sender()
+
+    async def ai_loop():
+        while True:
+            try:
+                changed_orders = await asyncio.to_thread(dispatch_ai_jobs, sessions)
+                for order_id in changed_orders:
+                    await realtime.publish("orders.updated", order_id)
+                    await realtime.publish("notifications.updated")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # No provider exception text or submitted data enters logs.
+                log.warning("AI job dispatch unavailable; retrying")
+            await asyncio.sleep(1)
 
     def run_monitor():
         with sessions() as db:
@@ -130,7 +148,12 @@ def create_app(database_url=None, seed=True, monitor=True):
                 seed_database(db)
         task = asyncio.create_task(deadline_loop()) if monitor else None
         push_task = asyncio.create_task(push_loop()) if monitor and not isinstance(push_sender, StubSender) else None
+        ai_task = asyncio.create_task(ai_loop()) if monitor and ai_mode == "queued_stub" else None
         yield
+        if ai_task:
+            ai_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await ai_task
         if push_task:
             push_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -148,6 +171,8 @@ def create_app(database_url=None, seed=True, monitor=True):
     app.state.engine = engine
     app.state.sessions = sessions
     app.state.realtime = realtime
+    app.state.ai_review_mode = ai_mode
+    app.state.run_ai_jobs = lambda provider=None, limit=10: dispatch_ai_jobs(sessions, provider=provider, limit=limit)
     app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id"])
 
     def get_db():
@@ -208,8 +233,8 @@ def create_app(database_url=None, seed=True, monitor=True):
             raise HTTPException(422, "Работник вне смены")
         return person.id
 
-    def changed(db, order):
-        body = order_dict(db, order, detail=True)
+    def changed(db, order, user=None):
+        body = order_dict(db, order, detail=True, user=user)
         db.commit()
         from_thread.run(realtime.publish, "orders.updated", order.id)
         from_thread.run(realtime.publish, "notifications.updated")
@@ -436,7 +461,45 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @app.get("/api/orders/{id_}")
     def order_detail(id_: int, db: DB, user: User):
-        return order_dict(db, get_order(db, id_, user), detail=True)
+        return order_dict(db, get_order(db, id_, user), detail=True, user=user)
+
+    def submission_for_order(db, order, attempt_id):
+        attempt = db.get(SubmissionAttempt, attempt_id)
+        if attempt is None or attempt.order_id != order.id:
+            raise HTTPException(404, "Попытка сдачи не найдена")
+        return attempt
+
+    @app.get("/api/orders/{id_}/submissions/{attempt_id}/ai-review")
+    def get_ai_review(id_: int, attempt_id: int, db: DB, user: User):
+        order = get_order(db, id_, user)
+        attempt = submission_for_order(db, order, attempt_id)
+        job = db.scalar(select(AIReviewJob).where(AIReviewJob.attempt_id == attempt.id))
+        latest = db.scalar(select(SubmissionAttempt.id).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
+        retry_allowed = bool(user.role in {"master", "admin"} and job and job.status == "failed" and latest == attempt.id and order.status == "completed" and attempt.ai_review is None and attempt.assessment_id is None)
+        return {"attempt_id": attempt.id, "ai_review": attempt.ai_review, "job": job_dict(job, retry_allowed)}
+
+    @app.post("/api/orders/{id_}/submissions/{attempt_id}/ai-review/retry")
+    def retry_ai_review(id_: int, attempt_id: int, db: DB, user: User, request: Request):
+        require_role(user, "master", "admin")
+        begin_sqlite_write(db)
+        order = get_order(db, id_, user, lock=True)
+        attempt = submission_for_order(db, order, attempt_id)
+        job = db.scalar(select(AIReviewJob).where(AIReviewJob.attempt_id == attempt.id).with_for_update())
+        def perform():
+            latest = db.scalar(select(SubmissionAttempt.id).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
+            if job is None or job.status != "failed" or order.status != "completed" or latest != attempt.id or attempt.ai_review is not None or attempt.assessment_id is not None:
+                raise HTTPException(409, "Повтор доступен только для последней неудачной проверки завершённой работы")
+            job.status = "pending"
+            job.attempts = 0
+            job.next_attempt_at = utcnow()
+            job.finished_at = None
+            job.last_error_code = None
+            job.lease_token = None
+            job.lease_expires_at = None
+            audit(db, order, "ai_review_retry", user.id, order.status, "Повтор формальной проверки ИИ")
+            db.flush()
+            return {"attempt_id": attempt.id, "ai_review": None, "job": job_dict(job)}, [("orders.updated", order.id)]
+        return run_idempotent(db, user, request, "ai_review_retry", request_hash(str(attempt_id)), 200, perform, order_id=id_)
 
     @app.post("/api/orders", status_code=201)
     def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
@@ -475,7 +538,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             append_assignment(db, order, user.id)
             audit(db, order, "issue", user.id, comment=payload.comment)
             notify(db, [order.assignee_id], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
-            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+            return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return run_idempotent(db, user, request, "order_create", command_hash, 201, perform)
 
@@ -505,7 +568,7 @@ def create_app(database_url=None, seed=True, monitor=True):
                 setattr(order, key, value)
             audit_fields.append(f"{key}={iso(value) if isinstance(value, datetime) else value}")
         audit(db, order, "edit", user.id, old_status, "; ".join(audit_fields))
-        return changed(db, order)
+        return changed(db, order, user=user)
 
     @app.post("/api/orders/{id_}/transition")
     def transition(id_: int, payload: Transition, db: DB, user: User, request: Request):
@@ -524,7 +587,7 @@ def create_app(database_url=None, seed=True, monitor=True):
 
         def perform():
             if action == "queue" and order.status == "queued":
-                return order_dict(db, order, detail=True), [("orders.updated", order.id)]
+                return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id)]
             if action in ["reject", "pause", "rework", "cancel"] and not payload.reason:
                 raise HTTPException(422, "Укажите причину действия")
             transitions = {"accept": ({"issued", "rework"}, "accepted"), "queue": ({"issued", "rework", "accepted"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"ai_review"}, "closed"), "rework": ({"ai_review"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
@@ -578,7 +641,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             audit(db, order, action, user.id, old_status, payload.reason or payload.comment)
             notice = "Наряд добавлен в очередь" if action == "queue" else "Статус наряда изменён"
             notify(db, [order.assignee_id, order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
-            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+            return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
 
@@ -619,15 +682,12 @@ def create_app(database_url=None, seed=True, monitor=True):
                 order.downtime_minutes = round((order.completed_at - aware(order.created_at)).total_seconds() / 60, 1)
             order.status = "completed"
             audit(db, order, "complete", user.id, "in_progress", payload.work_done)
-            order.ai_review = AIReviewStub.review(db, order)
-            assessment = AIAssessment(order_id=order.id, **order.ai_review)
-            db.add(assessment)
-            db.flush()
-            append_submission(db, order, user.id, submission_payload, writeoffs, assessment)
-            order.status = "ai_review"
-            audit(db, order, "ai_review", user.id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
-            notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
-            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+            order.ai_review = None
+            attempt = append_submission(db, order, user.id, submission_payload, writeoffs)
+            job = enqueue_job(db, attempt)
+            if ai_mode == "inline_stub":
+                run_inline(db, order, attempt, job)
+            return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return run_idempotent(db, user, request, "complete", command_hash, 200, perform, order_id=id_)
 

@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { OrderHistory } from "./OrderHistory";
 import {
+  AiJobStatus,
+  applyAiReviewJob,
+  canRetryAiReview,
+  requestAiReviewRetry,
+  showAiReview,
+} from "./AiReviewJob";
+import {
   completionValidationIssues,
   periodInputDate,
   withinCreatedPeriod,
@@ -1442,6 +1449,7 @@ export function OrderDialog({
   const [completionValidationError, setCompletionValidationError] =
     useState("");
   const [photoUncertain, setPhotoUncertain] = useState(false);
+  const [aiRetryUncertain, setAiRetryUncertain] = useState(false);
   const [materialSearch, setMaterialSearch] = useState("");
   const mutationLock = useRef(false);
   const revision = useRef(0);
@@ -1468,6 +1476,7 @@ export function OrderDialog({
         if (valid && requestRevision === revision.current) {
           setOrder(o);
           setError("");
+          setAiRetryUncertain(false);
         }
       })
       .catch((e) => {
@@ -1519,6 +1528,7 @@ export function OrderDialog({
     try {
       const latest = await api<OrderDetail>(`/orders/${id}`);
       setOrder(latest);
+      setAiRetryUncertain(false);
       if (
         completionUncertain &&
         ["ai_review", "completed", "closed", "rework"].includes(latest.status)
@@ -1538,6 +1548,38 @@ export function OrderDialog({
     } catch (failure) {
       setError((failure as Error).message);
     } finally {
+      setBusy(false);
+    }
+  }
+  async function retryAiReview() {
+    if (
+      mutationLock.current ||
+      !order ||
+      !canRetryAiReview(order, user.role) ||
+      aiRetryUncertain
+    )
+      return;
+    mutationLock.current = true;
+    revision.current++;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await requestAiReviewRetry(
+        id,
+        order.ai_review_job!.attempt_id,
+      );
+      setOrder((current) =>
+        current ? applyAiReviewJob(current, response) : current,
+      );
+      notify("Проверка поставлена в очередь. Отчёт сохранён.");
+      onChange();
+    } catch (failure) {
+      setAiRetryUncertain(
+        !(failure instanceof ApiError) || failure.requestMayHaveSucceeded,
+      );
+      setError((failure as Error).message);
+    } finally {
+      mutationLock.current = false;
       setBusy(false);
     }
   }
@@ -2108,7 +2150,17 @@ export function OrderDialog({
                     </p>
                   )}
                 </div>
-                {order.ai_review && (
+                <AiJobStatus
+                  job={order.ai_review_job}
+                  busy={busy}
+                  uncertain={aiRetryUncertain}
+                  onRetry={
+                    canRetryAiReview(order, user.role)
+                      ? () => void retryAiReview()
+                      : undefined
+                  }
+                />
+                {order.ai_review && showAiReview(order.ai_review_job) && (
                   <section className="ai-review">
                     <div>
                       <Sparkles size={18} />

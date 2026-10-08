@@ -287,3 +287,27 @@ class SubmissionDecision(Base):
     score: Mapped[float | None] = mapped_column(Float)
     comment: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AIReviewJob(Base):
+    __tablename__ = "ai_review_jobs"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", name="uq_ai_review_job_attempt"),
+        CheckConstraint("status IN ('pending','running','succeeded','failed','superseded')", name="ck_ai_review_job_status"),
+        CheckConstraint("attempts >= 0", name="ck_ai_review_job_attempts"),
+        CheckConstraint("max_attempts > 0", name="ck_ai_review_job_max_attempts"),
+        Index("ix_ai_review_jobs_status_next", "status", "next_attempt_at"),
+        Index("ix_ai_review_jobs_status_lease", "status", "lease_expires_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("submission_attempts.id"))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    provider: Mapped[str] = mapped_column(String(40), default="stub")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    lease_token: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

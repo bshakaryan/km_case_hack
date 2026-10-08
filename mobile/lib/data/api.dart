@@ -155,7 +155,12 @@ class NaryadApi {
     Json? body,
     String? commandId,
   }) async {
-    final result = await _json(path, method: method, body: body, commandId: commandId);
+    final result = await _json(
+      path,
+      method: method,
+      body: body,
+      commandId: commandId,
+    );
     if (result is Map<String, dynamic>) return result;
     throw ApiException(
       'Неожиданный формат ответа сервера.',
@@ -198,8 +203,12 @@ class NaryadApi {
       WorkOrder.fromJson(await _object('/orders/$id'));
   Future<WorkOrder> createOrder(Json data, {String? commandId}) async =>
       WorkOrder.fromJson(
-        await _object('/orders',
-            method: 'POST', body: data, commandId: commandId),
+        await _object(
+          '/orders',
+          method: 'POST',
+          body: data,
+          commandId: commandId,
+        ),
       );
   Future<WorkOrder> transition(
     int id,
@@ -215,17 +224,22 @@ class NaryadApi {
       commandId: commandId,
     ),
   );
-  Future<WorkOrder> complete(
-    int id,
-    Json data, {
-    String? commandId,
-  }) async => WorkOrder.fromJson(
-    await _object(
-      '/orders/$id/complete',
-      method: 'POST',
-      body: data,
-      commandId: commandId,
-    ),
+  Future<WorkOrder> complete(int id, Json data, {String? commandId}) async =>
+      WorkOrder.fromJson(
+        await _object(
+          '/orders/$id/complete',
+          method: 'POST',
+          body: data,
+          commandId: commandId,
+        ),
+      );
+
+  Future<Json> attemptAiReview(int orderId, int attemptId) =>
+      _object('/orders/$orderId/submissions/$attemptId/ai-review');
+  Future<Json> retryAiReview(int orderId, int attemptId) => _object(
+    '/orders/$orderId/submissions/$attemptId/ai-review/retry',
+    method: 'POST',
+    body: <String, dynamic>{},
   );
 
   Future<void> uploadPhoto(
@@ -265,16 +279,11 @@ class NaryadApi {
   }
 
   // Idempotent upsert of the device record for push delivery.
-  Future<Json> registerDevice(String token, {String? appVersion}) =>
-      _object(
-        '/devices',
-        method: 'POST',
-        body: {
-          'token': token,
-          'platform': 'android',
-          'app_version': ?appVersion,
-        },
-      );
+  Future<Json> registerDevice(String token, {String? appVersion}) => _object(
+    '/devices',
+    method: 'POST',
+    body: {'token': token, 'platform': 'android', 'app_version': ?appVersion},
+  );
 
   // Idempotent removal of the device record on logout or session expiry.
   Future<Json> unregisterDevice(String token) =>
