@@ -73,6 +73,12 @@ class OrderPatch(Payload):
         return self
 
 
+class OrderPage(BaseModel):
+    items: list[dict]
+    next_cursor: str | None
+    total: int = Field(ge=0)
+
+
 class Transition(Payload):
     action: Literal["accept", "queue", "reject", "start", "pause", "resume", "close", "rework", "cancel"]
     reason: str = Field(default="", max_length=3000)

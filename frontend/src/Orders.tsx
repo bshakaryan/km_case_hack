@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { OrderHistory } from "./OrderHistory";
 import { AssignmentParticipants } from "./AssignmentParticipants";
+import { canViewEquipmentHistory } from "./journal";
 import {
   assignmentEditChanges,
   brigadeWorkers,
@@ -1749,6 +1750,8 @@ export function OrderDialog({
   onClose,
   onChange,
   notify,
+  onEquipment,
+  active = true,
 }: {
   id: Id;
   reference: Reference;
@@ -1760,6 +1763,8 @@ export function OrderDialog({
   onClose: () => void;
   onChange: () => void;
   notify: (s: string) => void;
+  onEquipment?: (id: Id) => void;
+  active?: boolean;
 }) {
   const [order, setOrder] = useState<OrderDetail | null>(null);
   const [error, setError] = useState("");
@@ -2406,6 +2411,7 @@ export function OrderDialog({
       subtitle="КАРТОЧКА РАБОТЫ"
       onClose={closeDialog}
       wide
+      active={active}
     >
       <div className="modal-body order-detail-body">
         {(mode === "complete" ||
@@ -2533,7 +2539,34 @@ export function OrderDialog({
                       <Factory size={14} />
                       Оборудование
                     </small>
-                    <strong>{order.equipment_name}</strong>
+                    {onEquipment && canViewEquipmentHistory(user.role) ? (
+                      <button
+                        type="button"
+                        className="text-button equipment-history-link"
+                        disabled={
+                          busy ||
+                          writeBlocked ||
+                          draft.pending > 0 ||
+                          mode === "edit" ||
+                          mode === "action"
+                        }
+                        onClick={() => {
+                          if (
+                            !mutationLock.current &&
+                            !busy &&
+                            !writeBlocked &&
+                            draft.pending === 0 &&
+                            mode !== "edit" &&
+                            mode !== "action"
+                          )
+                            onEquipment(order.equipment_id);
+                        }}
+                      >
+                        {order.equipment_name} · история
+                      </button>
+                    ) : (
+                      <strong>{order.equipment_name}</strong>
+                    )}
                     <span>{order.area_name}</span>
                   </div>
                   <div>

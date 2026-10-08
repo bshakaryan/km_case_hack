@@ -9,6 +9,7 @@ import {
   ImageOff,
 } from "lucide-react";
 import { statusNames, priorityNames, token } from "./model";
+import { activateModal } from "./modal-context";
 export function Status({ value }: { value: string }) {
   return (
     <span className={`status status-${value}`}>
@@ -74,68 +75,28 @@ export function Modal({
   onClose,
   children,
   wide = false,
+  active = true,
 }: {
   title: string;
   subtitle?: string;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  active?: boolean;
 }) {
   const panel = useRef<HTMLElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
   useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const focusable = () =>
-      Array.from(
-        panel.current?.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
-        ) || [],
-      ).filter((element) => element.getClientRects().length > 0);
-    panel.current?.focus();
-    const fn = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        close.current();
-      }
-      if (e.key === "Tab") {
-        const elements = focusable();
-        const first = elements[0],
-          last = elements.at(-1);
-        if (!first) {
-          e.preventDefault();
-          panel.current?.focus();
-          return;
-        }
-        if (
-          e.shiftKey &&
-          (document.activeElement === first ||
-            document.activeElement === panel.current)
-        ) {
-          e.preventDefault();
-          last?.focus();
-        } else if (
-          !e.shiftKey &&
-          (document.activeElement === last ||
-            !panel.current?.contains(document.activeElement))
-        ) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    document.addEventListener("keydown", fn);
-    const old = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", fn);
-      document.body.style.overflow = old;
-      if (previous?.isConnected) previous.focus();
-    };
-  }, []);
+    if (!active) return;
+    if (panel.current)
+      return activateModal(document, panel.current, () => close.current());
+  }, [active]);
   return (
     <div
       className="modal-overlay"
+      style={active ? undefined : { display: "none" }}
+      aria-hidden={active ? undefined : true}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

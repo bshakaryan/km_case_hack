@@ -13,6 +13,7 @@ import '../widgets/order_photo.dart';
 import '../widgets/order_history.dart';
 import '../widgets/ai_job_status.dart';
 import 'completion_screen.dart';
+import 'order_journal_screen.dart';
 import 'create_order_screen.dart' show prepareOrderPhoto;
 
 const _blue = Color(0xFF173E68);
@@ -578,6 +579,27 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   _section('Сроки и оборудование', [
                     _row('Участок', order.areaName),
                     _row('Оборудование', order.equipmentName),
+                    if (const {
+                          'master',
+                          'manager',
+                          'admin',
+                        }.contains(widget.controller.user?.role) &&
+                        order.data['equipment_id'] is int)
+                      TextButton.icon(
+                        onPressed: _busy
+                            ? null
+                            : () => Navigator.of(context).push<void>(
+                                MaterialPageRoute(
+                                  builder: (_) => OrderJournalScreen(
+                                    controller: widget.controller,
+                                    equipmentId:
+                                        order.data['equipment_id'] as int,
+                                  ),
+                                ),
+                              ),
+                        icon: const Icon(Icons.history),
+                        label: const Text('История оборудования'),
+                      ),
                     _row(
                       order.isBrigade ? 'Ответственный' : 'Исполнитель',
                       order.assigneeName,

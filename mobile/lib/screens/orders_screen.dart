@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/app_controller.dart';
 import '../data/models.dart';
 import '../ui.dart';
+import 'order_journal_screen.dart';
 
 class OrdersScreen extends StatefulWidget {
   const OrdersScreen({
@@ -59,6 +60,24 @@ class _OrdersScreenState extends State<OrdersScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (_) => OrderJournalScreen(
+                    controller: widget.controller,
+                    assigneeId: widget.assigneeId,
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.manage_search),
+              label: const Text('Полный журнал'),
+            ),
+          ),
+        ),
         TextField(
           decoration: const InputDecoration(
             hintText: 'Номер, оборудование, проблема',

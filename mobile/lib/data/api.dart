@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'order_journal.dart';
 
 class ApiException implements Exception {
   const ApiException(
@@ -241,6 +242,40 @@ class NaryadApi {
   Future<Json> reference() => _object('/reference');
   Future<List<Json>> employees() => _list('/employees');
   Future<List<Json>> orders() => _list('/orders?limit=5000');
+  Future<OrderPage> ordersPage(
+    OrderJournalQuery query, {
+    String? cursor,
+    int limit = 100,
+  }) async {
+    if (limit < 1 || limit > 200) {
+      throw const ApiException('Размер страницы должен быть от 1 до 200.', 422);
+    }
+    final parameters = Uri(
+      queryParameters: query.parameters(limit: limit, cursor: cursor),
+    ).query;
+    try {
+      return OrderPage.fromJson(await _object('/orders/page?$parameters'));
+    } on FormatException {
+      throw const ApiException(
+        'Сервер вернул некорректную страницу журнала.',
+        200,
+      );
+    }
+  }
+
+  Future<EquipmentDetails> equipmentDetails(int id) async {
+    try {
+      final result = EquipmentDetails.fromJson(await _object('/equipment/$id'));
+      if (result.id != id) throw const FormatException('Другое оборудование.');
+      return result;
+    } on FormatException {
+      throw const ApiException(
+        'Сервер вернул некорректную карточку оборудования.',
+        200,
+      );
+    }
+  }
+
   Future<Json> dashboard() => _object('/dashboard');
   Future<List<Json>> notifications() => _list('/notifications');
   Future<Json> analytics() => _object('/analytics');

@@ -12,7 +12,7 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from anyio import from_thread
@@ -29,7 +29,8 @@ from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict
 from .migrations import upgrade_database
 from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
 from .push import StubSender, dispatch_push, env_int, get_sender
-from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPatch, Transition
+from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPage, OrderPatch, Transition
+from .order_paging import after_cursor, apply_scope, broad_search, decode_cursor, encode_cursor, fingerprint, order_tuple, sort_columns
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
 from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, append_assignment, append_submission, append_submission_decision, audit, aware, current_participants, downtime_minutes, effective_queue_statuses, employee_dict, end_current_assignment, iso, monitor_deadlines, notify, order_dict, participant_ids, photo_dict, queue_positions, shift_start, waiting_orders, worker_order_access
@@ -511,6 +512,67 @@ def create_app(database_url=None, seed=True, monitor=True):
         selected = list(db.scalars(query.order_by(Order.created_at.desc()).limit(limit)))
         participants = current_participants(db, selected)
         return [order_dict(db, o, refs=refs, positions=positions, statuses=statuses, participants=participants[o.id]) for o in selected]
+
+    @app.get("/api/orders/page", response_model=OrderPage)
+    def orders_page(request: Request, db: DB, user: User,
+        area_id: int | None = None, equipment_id: int | None = None,
+        assignee_id: int | None = None, brigade_id: int | None = None,
+        priority: str | None = None, status: str | None = None,
+        search: str | None = Query(None, max_length=200),
+        from_date: str | None = None, to_date: str | None = None,
+        scope: Literal["all", "active", "closed"] = "all",
+        focus: Literal["all", "overdue", "emergency", "issued", "ai_review", "rejected"] = "all",
+        sort: Literal["newest", "deadline", "priority"] = "newest",
+        limit: int = Query(100, ge=1, le=200), cursor: str | None = Query(None, max_length=4096)):
+        require_role(user, "master", "worker", "manager", "admin")
+        canonical = {"area_id": area_id, "equipment_id": equipment_id,
+            "assignee_id": assignee_id, "brigade_id": brigade_id,
+            "priority": priority or None, "status": status or None,
+            "search": search.strip().lower() or None if search is not None else None,
+            "from_date": iso(parse_date(from_date).astimezone(timezone.utc)) if from_date else None,
+            "to_date": iso(parse_date(to_date, end=True).astimezone(timezone.utc)) if to_date else None,
+            "scope": scope, "focus": focus, "sort": sort}
+        query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id,
+            canonical["priority"], canonical["status"], from_date=canonical["from_date"],
+            to_date=canonical["to_date"], participant_access=True)
+        query = broad_search(db, query, canonical["search"])
+        query = apply_scope(query, scope, focus, utcnow())
+        query_fingerprint = fingerprint(user, canonical)
+        # Derive the signing key from the current persisted session identity.
+        # No bearer/hash is included in payloads, logs or error diagnostics.
+        session_hash = token_hash(request.headers["Authorization"][7:])
+        last = None
+        if cursor is not None:
+            ceiling, last = decode_cursor(cursor, query_fingerprint, sort, session_hash)
+        else:
+            ceiling = db.scalar(query.with_only_columns(func.max(Order.id), maintain_column_froms=True)) or 0
+        window = query.where(Order.id <= ceiling)
+        total = db.scalar(select(func.count()).select_from(window.subquery()))
+        columns, descending = sort_columns(sort)
+        selected_query = after_cursor(window, columns, descending, last) if last is not None else window
+        selected = list(db.scalars(selected_query.order_by(*[
+            column.desc() if descending else column.asc() for column in columns]).limit(limit + 1)))
+        more = len(selected) > limit
+        selected = selected[:limit]
+        refs = {"areas": {a.id: a for a in db.scalars(select(Area))},
+            "equipment": {e.id: e for e in db.scalars(select(Equipment))},
+            "employees": {p.id: p for p in db.scalars(select(Employee))}}
+        participants = current_participants(db, selected)
+        positions, statuses = queue_positions(db), effective_queue_statuses(db)
+        return {"items": [order_dict(db, order, refs=refs, positions=positions,
+                statuses=statuses, participants=participants[order.id]) for order in selected],
+            "next_cursor": encode_cursor(query_fingerprint, ceiling, order_tuple(selected[-1], sort), session_hash) if more else None,
+            "total": total}
+
+    @app.get("/api/equipment/{id_}")
+    def equipment_detail(id_: int, db: DB, user: User):
+        require_role(user, "master", "manager", "admin")
+        equipment = db.get(Equipment, id_)
+        if equipment is None:
+            raise HTTPException(404, "Оборудование не найдено")
+        area = db.get(Area, equipment.area_id)
+        return {key: getattr(equipment, key) for key in
+            ["id", "name", "inventory_number", "area_id", "type", "criticality"]} | {"area_name": area.name}
 
     @app.get("/api/orders/{id_}")
     def order_detail(id_: int, db: DB, user: User):

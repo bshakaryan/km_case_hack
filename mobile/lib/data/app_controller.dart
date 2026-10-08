@@ -11,6 +11,7 @@ import 'form_draft.dart';
 import 'local_store.dart';
 import 'local_store_open.dart';
 import 'models.dart';
+import 'order_journal.dart';
 import 'push_service.dart';
 
 class AppController extends ChangeNotifier {
@@ -813,6 +814,48 @@ class AppController extends ChangeNotifier {
       orders.insert(0, order);
     } else {
       orders[index] = order.withCachedHistory(orders[index]);
+    }
+  }
+
+  /// Server journal reads never replace the operative cache or write basis.
+  Future<OrderPage> loadOrderPage(
+    OrderJournalQuery query, {
+    String? cursor,
+    int limit = 100,
+  }) => _readJournal(
+    (source) => source.ordersPage(query, cursor: cursor, limit: limit),
+  );
+
+  Future<EquipmentDetails> loadEquipmentDetails(int id) {
+    if (!const {'master', 'manager', 'admin'}.contains(user?.role)) {
+      throw const ApiException(
+        'История оборудования доступна мастеру и руководителю.',
+        403,
+      );
+    }
+    return _readJournal((source) => source.equipmentDetails(id));
+  }
+
+  Future<T> _readJournal<T>(Future<T> Function(NaryadApi) read) async {
+    if (user == null) throw const ApiException('Войдите в приложение.', 401);
+    final session = _session;
+    final source = api;
+    final token = source.token;
+    final ownerId = user!.id;
+    final role = user!.role;
+    bool current() =>
+        _current(session) &&
+        identical(api, source) &&
+        source.token == token &&
+        user?.id == ownerId &&
+        user?.role == role;
+    try {
+      final result = await read(source);
+      if (!current()) throw const ApiException('Сессия изменилась.', 401);
+      return result;
+    } on ApiException catch (error) {
+      if (current() && error.statusCode == 401) _expireSession();
+      rethrow;
     }
   }
 
