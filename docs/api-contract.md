@@ -40,6 +40,7 @@
 | `POST /reference/{collection}` | Только `admin`. Создаёт запись, возвращает её, HTTP `201`. |
 | `PATCH /reference/{collection}/{id}` | Только `admin`. Изменяет переданные поля, возвращает запись. Удаления нет. |
 | `GET /employees` | Только `master|manager|admin`. Работники: `Employee` + `{status, current_order, queue_count, rating, completed_count}`. |
+| `POST /orders/suggestions` | Только `master|admin`. Без записи: `{description, area_id, equipment_id}` → `{source, fault_code, time_norm, employee, explanation}`. `source` — `openai` или `unavailable`; остальные подсказки могут быть `null`. ИИ выбирает шифр и норматив только из действующих справочников; исполнитель выбирается сервером только среди свободных работников на смене нужной специальности. В ответе исполнителя есть `{id, name, specialty, average_score, closed_count, reason}`; оценка — средний балл по закрытым нарядам этого типа оборудования, а не итоговый рейтинг. При отсутствии ключа или ошибке провайдера возвращаются `source:unavailable` и пустые подсказки; создание наряда остаётся доступным. Мастер явно применяет предложение, сервер заново проверяет назначение при создании. |
 
 `Employee = {id, name, login, role, specialty, grade, brigade_id:int|null, on_shift:bool}`. PIN и его хеш не возвращаются. Демоданные: `master`, `master2`, `worker`, `worker2`…`worker15`, `manager`, `admin`; PIN `1234` — только для демосреды.
 

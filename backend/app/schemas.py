@@ -14,6 +14,12 @@ class Login(Payload):
     pin: str = Field(min_length=4, max_length=32)
 
 
+class OrderSuggestionRequest(Payload):
+    description: str = Field(min_length=3, max_length=5000)
+    area_id: int = Field(gt=0)
+    equipment_id: int = Field(gt=0)
+
+
 class OrderCreate(Payload):
     title: str = Field(min_length=3, max_length=200)
     description: str = Field(min_length=1, max_length=5000)

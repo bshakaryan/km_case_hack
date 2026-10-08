@@ -518,6 +518,9 @@ class NaryadApi {
     return result;
   }
 
+  Future<Json> suggestOrder(Json data) =>
+      _object('/orders/suggestions', method: 'POST', body: data);
+
   Future<WorkOrder> createOrder(Json data, {String? commandId}) async =>
       _orderReceipt(
         await _object(
