@@ -85,6 +85,11 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
   String _workType = 'unplanned';
   String _priority = 'normal';
   DateTime _deadline = DateTime.now().toUtc().add(const Duration(hours: 2));
+  double _normalHours = 2;
+  Json? _suggestion;
+  String? _suggestionKey;
+  bool _suggesting = false;
+  int _suggestionRequest = 0;
   bool _busy = false;
   bool _leaving = false;
   bool _picking = false;
@@ -124,6 +129,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     'work_type': _workType,
     'priority': _priority,
     'deadline': _deadline.toUtc().toIso8601String(),
+    'normal_hours': _normalHours,
     'created': _created?.toJson(),
     'creation_uncertain': _creationUncertain,
     'operation': _operation,
@@ -188,6 +194,10 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
           'planned',
         }.contains(data['priority']) ||
         data['deadline'] is! String ||
+        (data['normal_hours'] != null &&
+            (data['normal_hours'] is! num ||
+                (data['normal_hours'] as num) <= 0 ||
+                (data['normal_hours'] as num) > 1000)) ||
         DateTime.tryParse(data['deadline'] as String) == null ||
         !const {null, 'create', 'photo'}.contains(data['operation']) ||
         (data['error'] != null && data['error'] is! String) ||
@@ -270,6 +280,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
         _workType = data['work_type'] as String? ?? 'unplanned';
         _priority = data['priority'] as String? ?? 'normal';
         _deadline = DateTime.parse(data['deadline'] as String);
+        _normalHours = (data['normal_hours'] as num?)?.toDouble() ?? 2;
         if (data['created'] is Map) {
           _created = WorkOrder.fromJson(
             Map<String, dynamic>.from(data['created'] as Map),
@@ -371,6 +382,68 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
   void _edit(VoidCallback change) {
     setState(change);
     _draftChanged();
+  }
+
+  String get _currentSuggestionKey => jsonEncode([
+    _areaId,
+    _equipmentId,
+    _description.text.trim(),
+  ]);
+
+  Json? get _currentSuggestion =>
+      _suggestionKey == _currentSuggestionKey ? _suggestion : null;
+
+  void _invalidateSuggestion() {
+    if (_suggestionKey != null || _suggesting) {
+      setState(() {
+        _suggestionKey = null;
+        _suggestion = null;
+        _suggesting = false;
+        _suggestionRequest++;
+      });
+    }
+  }
+
+  Future<void> _requestSuggestions() async {
+    final description = _description.text.trim();
+    final areaId = _areaId;
+    final equipmentId = _equipmentId;
+    if (description.length < 3 || areaId == null || equipmentId == null) return;
+    final request = ++_suggestionRequest;
+    final key = _currentSuggestionKey;
+    final api = widget.controller.api;
+    final owner = widget.controller.user?.id;
+    setState(() {
+      _suggesting = true;
+      _suggestion = null;
+      _suggestionKey = null;
+    });
+    try {
+      final result = await api.suggestOrder({
+        'description': description,
+        'area_id': areaId,
+        'equipment_id': equipmentId,
+      });
+      if (!mounted || request != _suggestionRequest ||
+          key != _currentSuggestionKey ||
+          !identical(api, widget.controller.api) ||
+          owner != widget.controller.user?.id) return;
+      setState(() {
+        _suggestion = result;
+        _suggestionKey = key;
+      });
+    } catch (_) {
+      if (!mounted || request != _suggestionRequest ||
+          key != _currentSuggestionKey) return;
+      setState(() {
+        _suggestion = {'source': 'unavailable'};
+        _suggestionKey = key;
+      });
+    } finally {
+      if (mounted && request == _suggestionRequest) {
+        setState(() => _suggesting = false);
+      }
+    }
   }
 
   Future<void> _closeUnavailable() async {
@@ -481,6 +554,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     widget.controller.addListener(_controllerChanged);
     _title.addListener(_draftChanged);
     _description.addListener(_draftChanged);
+    _description.addListener(_invalidateSuggestion);
     _comment.addListener(_draftChanged);
     unawaited(_restoreDraft());
   }
@@ -895,6 +969,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
             'responsible_id': _responsibleId,
           'priority': _priority,
           'deadline': _deadline.toUtc().toIso8601String(),
+          'normal_hours': _normalHours,
           'comment': _comment.text.trim(),
         };
         try {
@@ -1310,6 +1385,10 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     final employee = _find(widget.controller.employees, _assigneeId);
     final brigade = _find(_reference('brigades'), _brigadeId);
     final responsible = _find(widget.controller.employees, _responsibleId);
+    final suggestion = _currentSuggestion;
+    final suggestedFault = suggestion?['fault_code'];
+    final suggested = suggestion?['employee'];
+    final suggestedNorm = suggestion?['time_norm'];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1317,6 +1396,28 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
           'Кому и к какому сроку',
           style: Theme.of(context).textTheme.headlineSmall,
         ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: _suggesting || _areaId == null || _equipmentId == null ||
+                  _description.text.trim().length < 3
+              ? null
+              : _requestSuggestions,
+          icon: const Icon(Icons.auto_awesome_outlined),
+          label: Text(_assigneeId == null && !_byBrigade
+              ? 'Подсказать шифр, норматив и исполнителя'
+              : 'Подсказать шифр и норматив'),
+        ),
+        if (_suggesting) ...[
+          const SizedBox(height: 8),
+          const LinearProgressIndicator(),
+          const Text('Подбираем шифр, норматив и исполнителя…'),
+        ],
+        if (suggestedFault is Map) ...[
+          const SizedBox(height: 8),
+          Text('Предложенный шифр: ${suggestedFault['code']} — ${suggestedFault['name']}'),
+        ],
+        if (suggestion?['source'] == 'unavailable')
+          const Text('ИИ-подсказки недоступны. Выберите исполнителя и срок вручную.'),
         const SizedBox(height: 16),
         SegmentedButton<bool>(
           segments: const [
@@ -1342,6 +1443,39 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
               ? null
               : _employeeDetail(employee),
         ),
+        if (!_byBrigade && _assigneeId == null && suggested is Map) ...[
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Подсказка по исполнителю',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  Text('${suggested['name']} · ${suggested['specialty']}'),
+                  Text('${suggested['reason']}'),
+                  TextButton(
+                    onPressed: _find(widget.controller.employees,
+                                suggested['id'] as int?)?['status'] == 'free'
+                        ? () => _edit(() {
+                              _assigneeId = suggested['id'] as int;
+                              _brigadeId = null;
+                              _responsibleId = null;
+                              _error = null;
+                            })
+                        : null,
+                    child: const Text('Выбрать исполнителя'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+        if (!_byBrigade && _assigneeId == null &&
+            suggestion?['source'] == 'openai' &&
+            suggested == null)
+          const Text('Свободный исполнитель нужной специальности не найден. Выберите вручную.'),
         if (_byBrigade) ...[
           _choice(
             'Ответственный за сдачу',
@@ -1370,6 +1504,22 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
           _chooseDeadline,
           icon: Icons.calendar_month_outlined,
         ),
+        if (suggestedNorm is Map) ...[
+          Text('Подсказка по нормативу: ${suggestedNorm['hours']} ч · ${suggestedNorm['name']}'),
+          TextButton(
+            onPressed: () {
+              final hours = (suggestedNorm['hours'] as num).toDouble();
+              _edit(() {
+                _normalHours = hours;
+                _deadline = DateTime.now().toUtc().add(
+                    Duration(milliseconds: (hours * 3600000).round()));
+                _error = null;
+              });
+            },
+            child: const Text('Применить норматив и срок'),
+          ),
+        ],
+        Text('Норматив в наряде: ${_normalHours.toStringAsFixed(1)} ч'),
         Wrap(
           spacing: 8,
           children: [
@@ -1377,6 +1527,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
               ActionChip(
                 label: Text('Через $hours ч'),
                 onPressed: () => _edit(() {
+                  _normalHours = hours.toDouble();
                   _deadline = DateTime.now().toUtc().add(
                     Duration(hours: hours),
                   );

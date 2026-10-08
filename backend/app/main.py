@@ -26,12 +26,13 @@ from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
 from .analytics_ai import add_narrative
+from .order_suggestions import suggest_order
 from .conditional_response import conditional_json_response
 from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
 from .migrations import upgrade_database
 from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
 from .push import StubSender, dispatch_push, env_int, get_sender
-from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPage, OrderPatch, Transition
+from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPage, OrderPatch, OrderSuggestionRequest, Transition
 from .order_paging import after_cursor, apply_scope, broad_search, decode_cursor, encode_cursor, fingerprint, order_tuple, sort_columns
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
@@ -504,6 +505,14 @@ def create_app(database_url=None, seed=True, monitor=True):
             rating = rating_map.get(person.id, {})
             result.append({**employee_dict(person), "status": "off_shift" if not person.on_shift else "busy" if current else "queued" if queue_count else "free", "current_order": current.number if current else None, "queue_count": queue_count, "rating": rating.get("score", 0), "completed_count": rating.get("closed_count", 0)})
         return result
+
+    @app.post("/api/orders/suggestions")
+    def order_suggestions(payload: OrderSuggestionRequest, db: DB, user: User):
+        require_role(user, "master", "admin")
+        equipment = db.get(Equipment, payload.equipment_id)
+        if equipment is None or equipment.area_id != payload.area_id:
+            raise HTTPException(422, "Оборудование не принадлежит выбранному участку")
+        return suggest_order(db, payload.description, equipment)
 
     @app.get("/api/orders")
     def orders(request: Request, db: DB, user: User, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, priority: str | None = None, status: str | None = None, search: str | None = Query(None, max_length=200), from_date: str | None = None, to_date: str | None = None, limit: int = Query(1000, ge=1, le=5000)):

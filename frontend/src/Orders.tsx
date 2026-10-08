@@ -788,6 +788,20 @@ type CreateFormFields = {
   normal_hours: string;
   comment: string;
 };
+type OrderSuggestion = {
+  source: "openai" | "unavailable";
+  fault_code: { id: number; code: string; name: string } | null;
+  time_norm: { id: number; name: string; hours: number } | null;
+  employee: {
+    id: number;
+    name: string;
+    specialty: string;
+    average_score: number | null;
+    closed_count: number;
+    reason: string;
+  } | null;
+  explanation: string;
+};
 type CreateFormDraft = {
   form: CreateFormFields;
   step: number;
@@ -992,6 +1006,45 @@ export function CreateOrder({
   const selectedEmployee = employees.find(
     (person) => String(person.id) === form.assignee_id,
   );
+  const suggestionKey = JSON.stringify([
+    form.description.trim(),
+    form.area_id,
+    form.equipment_id,
+  ]);
+  const latestSuggestionKey = useRef(suggestionKey);
+  latestSuggestionKey.current = suggestionKey;
+  const suggestionRequest = useRef(0);
+  const [suggestionResult, setSuggestionResult] = useState<{
+    key: string;
+    value: OrderSuggestion;
+  } | null>(null);
+  const [suggestionLoadingKey, setSuggestionLoadingKey] = useState<string | null>(null);
+  const suggestion = suggestionResult?.key === suggestionKey ? suggestionResult.value : null;
+  const suggesting = suggestionLoadingKey === suggestionKey;
+  useEffect(() => () => { suggestionRequest.current += 1; }, []);
+  async function loadSuggestions() {
+    if (!form.equipment_id || !form.area_id || form.description.trim().length < 3) return;
+    const key = suggestionKey;
+    const request = ++suggestionRequest.current;
+    setSuggestionLoadingKey(key);
+    try {
+      const value = await post<OrderSuggestion>("/orders/suggestions", {
+        description: form.description.trim(),
+        area_id: idValue(form.area_id),
+        equipment_id: idValue(form.equipment_id),
+      });
+      if (request === suggestionRequest.current && latestSuggestionKey.current === key && sessionValid())
+        setSuggestionResult({ key, value });
+    } catch {
+      if (request === suggestionRequest.current && latestSuggestionKey.current === key && sessionValid())
+        setSuggestionResult({ key, value: {
+          source: "unavailable", fault_code: null, time_norm: null,
+          employee: null, explanation: "ИИ-подсказки сейчас недоступны.",
+        } });
+    } finally {
+      if (request === suggestionRequest.current) setSuggestionLoadingKey(null);
+    }
+  }
   const eligibleBrigadeWorkers = brigadeWorkers(employees, form.brigade_id);
   const update = (key: string, value: string) =>
     setForm((current) => ({
@@ -1440,6 +1493,25 @@ export function CreateOrder({
                     · фото: {photos.length}
                   </small>
                 </div>
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={suggesting || !form.area_id || !form.equipment_id || form.description.trim().length < 3}
+                  onClick={() => void loadSuggestions()}
+                >
+                  <Sparkles size={16} /> {assignment === "employee" && !form.assignee_id
+                    ? "Подсказать шифр, норматив и исполнителя"
+                    : "Подсказать шифр и норматив"}
+                </button>
+                {suggesting && <p className="field-hint">Подбираем шифр, норматив и исполнителя…</p>}
+                {suggestion && (
+                  <div className="info-banner" role="status">
+                    <Sparkles size={18} />
+                    <p>{suggestion.source === "unavailable"
+                      ? "ИИ-подсказки недоступны. Выберите назначение и срок вручную."
+                      : `Предложенный шифр: ${suggestion.fault_code ? `${suggestion.fault_code.code} — ${suggestion.fault_code.name}` : "не определён"}. ${suggestion.explanation}`}</p>
+                  </div>
+                )}
                 <div className="segmented assignment-toggle">
                   <button
                     type="button"
@@ -1530,6 +1602,19 @@ export function CreateOrder({
                       ожидают начала: {selectedEmployee.queue_count}
                     </span>
                   </div>
+                )}
+                {assignment === "employee" && !form.assignee_id && suggestion?.employee && (
+                  <div className="employee-preview available">
+                    <strong>Подсказка: {suggestion.employee.name}</strong>
+                    <span>{suggestion.employee.specialty} · {suggestion.employee.reason}</span>
+                    <button className="text-button" type="button" onClick={() => update("assignee_id", String(suggestion.employee!.id))}
+                      disabled={employees.find((person) => String(person.id) === String(suggestion.employee?.id))?.status !== "free"}>
+                      Выбрать исполнителя
+                    </button>
+                  </div>
+                )}
+                {assignment === "employee" && !form.assignee_id && suggestion?.source === "openai" && !suggestion.employee && (
+                  <p className="field-hint">Свободный исполнитель нужной специальности не найден. Выберите вручную.</p>
                 )}
                 {assignment === "brigade" && (
                   <>
@@ -1626,6 +1711,16 @@ export function CreateOrder({
                         </option>
                       ))}
                     </datalist>
+                    {suggestion?.time_norm && (
+                      <span className="field-hint">
+                        Подсказка: {suggestion.time_norm.name} · {suggestion.time_norm.hours} ч{" "}
+                        <button className="text-button" type="button" onClick={() => {
+                          const hours = suggestion.time_norm!.hours;
+                          setForm((current) => ({ ...current, normal_hours: String(hours),
+                            deadline: new Date(Date.now() + hours * 3600000 + 5 * 3600000).toISOString().slice(0, 16) }));
+                        }}>Применить норматив и срок</button>
+                      </span>
+                    )}
                   </label>
                 </div>
                 <label>
