@@ -75,8 +75,8 @@ def orb_overlap(first: Image.Image, second: Image.Image):
     if first_descriptors is None or second_descriptors is None:
         return {"matches": 0, "inliers": 0, "overlap": 0.0}
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
-    good = [match for match, alternate in matcher.knnMatch(first_descriptors, second_descriptors, k=2)
-            if match.distance < 0.75 * alternate.distance]
+    good = [row[0] for row in matcher.knnMatch(first_descriptors, second_descriptors, k=2)
+            if len(row) == 2 and row[0].distance < 0.75 * row[1].distance]
     inliers = 0
     if len(good) >= 4:
         source_points = np.float32([first_points[match.queryIdx].pt for match in good]).reshape(-1, 1, 2)

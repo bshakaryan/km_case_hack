@@ -193,6 +193,7 @@ class OrderHistory extends StatelessWidget {
                 if (aiReviewSource(review) != null)
                   _text(aiReviewSource(review)!),
                 _text('${review['explanation'] ?? 'Объяснение не сохранено.'}'),
+                AiPhotoCheck(check: review['photo_check']),
                 _text(aiReviewNote(review, job: attempt['ai_job'])),
               ],
               _heading('Решения мастера'),

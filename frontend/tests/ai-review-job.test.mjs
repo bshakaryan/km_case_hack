@@ -36,6 +36,7 @@ const {
   aiReviewVerdict,
   aiReviewSource,
   aiReviewNote,
+  AiPhotoCheck,
 } = loaded.exports;
 const job = (status, overrides = {}) => ({
   id: 8,
@@ -70,6 +71,57 @@ const order = {
 };
 const render = (props) =>
   renderToStaticMarkup(React.createElement(AiJobStatus, props));
+const photoCheck = (status = "checked", overrides = {}) => ({
+  status, method: "local_cv", scope: "submission_selected_pair",
+  before_id: 21, after_id: 22, duplicate_before: false,
+  exact_duplicate_groups: [], equipment_status: "unknown",
+  model_available: false, capture_time_status: "unknown",
+  repair_status: "unknown", history_status: "not_checked",
+  ...overrides,
+});
+const renderPhotos = (check) => renderToStaticMarkup(React.createElement(AiPhotoCheck, { check }));
+
+test("local photo evidence identifies the selected pair and keeps repair, equipment and capture unknown", () => {
+  const check = photoCheck();
+  const html = renderPhotos(check);
+  assert.match(html, /Локальная проверка изображений выполнена/);
+  assert.match(html, /до №21; после №22/);
+  assert.match(html, /В выбранной паре признаков повтора не найдено/);
+  assert.match(html, /Совпадение оборудования не подтверждено/);
+  assert.match(html, /Модель сравнения оборудования недоступна/);
+  assert.match(html, /Качество ремонта и время съёмки не подтверждены/);
+  assert.match(html, /Фото других нарядов и сдач не проверялись/);
+  const review = { score: null, llm_used: false, source_verdict: "needs_master_review", photo_check: check };
+  assert.match(aiReviewSource(review), /локальная проверка фото/);
+  assert.match(aiReviewNote(review), /технические признаки/);
+  assert.doesNotMatch(aiReviewNote(review), /Содержимое снимков не анализируется/);
+  assert.equal(aiReviewScoreLabel(review.score), "Оценка не определена");
+});
+
+test("possible duplicate and equipment mismatch are bounded warnings, not a repair verdict", () => {
+  const html = renderPhotos(photoCheck("checked", {
+    duplicate_before: true, equipment_status: "different", model_available: true,
+    exact_duplicate_groups: [Array.from({ length: 40 }, (_, index) => 100001 + index), [200001, 200002]],
+  }));
+  assert.match(html, /признаки повтора фото до ремонта/);
+  assert.match(html, /Возможно, на выбранных снимках разное оборудование/);
+  assert.match(html, /группы полностью одинаковых файлов: 2/);
+  assert.doesNotMatch(html, /100001|200001|Совпадение оборудования подтверждено|Предварительная оценка/);
+  assert.match(html, /Качество ремонта и время съёмки не подтверждены/);
+});
+
+test("unavailable and absent-after results never pretend that image comparison completed", () => {
+  for (const status of ["unavailable", "no_after"]) {
+    const check = photoCheck(status, { duplicate_before: null, after_id: status === "no_after" ? null : 22 });
+    const html = renderPhotos(check);
+    assert.match(html, status === "unavailable" ? /проверка изображений недоступна/ : /нет фото после выполнения/);
+    assert.doesNotMatch(html, /проверка изображений выполнена|признаков повтора не найдено|Полностью одинаковые файлы.*не найдены/);
+    assert.match(html, /время съёмки не подтверждены/);
+    assert.match(aiReviewNote({ photo_check: check }), /Окончательное решение принимает мастер/);
+  }
+  assert.equal(renderPhotos(undefined), "");
+  assert.match(aiReviewNote({ is_stub: true }), /содержимое снимков не анализируется/);
+});
 
 test("a service job is a saved report awaiting a recommendation, not the local formal stub", () => {
   for (const status of ["pending", "running", "failed", "superseded"]) {
@@ -77,6 +129,7 @@ test("a service job is a saved report awaiting a recommendation, not the local f
     assert.match(html, /Сервис проверки/);
     assert.match(html, /Окончательное решение принимает мастер/);
     assert.doesNotMatch(html, /Формальная проверка · демо|PRIVATE_PROVIDER_DIAGNOSTIC/);
+    assert.doesNotMatch(html, /текст отчёта и правила|проверка изображений выполнена|Содержимое снимков не анализируется/);
     assert.equal(showAiReview(job(status, { provider: "ai_service" })), false);
   }
 });

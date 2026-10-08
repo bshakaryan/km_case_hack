@@ -34,12 +34,18 @@ def unknown():
 
 def reply(request, result=None, **changes):
     sent = json.loads(request.content)
-    response = {"schema_version": 1, "attempt_id": sent["attempt_id"], "input_sha256": sent["input_sha256"], "result": result or unknown(), **changes}
+    result = deepcopy(result or unknown())
+    if sent["schema_version"] == 2:
+        result.setdefault("photo_check", {"status": "no_after", "method": "local_cv", "scope": "submission_selected_pair",
+            "before_id": None, "after_id": None, "duplicate_before": None, "exact_duplicate_groups": [],
+            "equipment_status": "unknown", "model_available": False, "capture_time_status": "unknown",
+            "repair_status": "unknown", "history_status": "not_checked"})
+    response = {"schema_version": sent["schema_version"], "attempt_id": sent["attempt_id"], "input_sha256": sent["input_sha256"], "result": result, **changes}
     return httpx.Response(200, json=response)
 
 
-def adapter(handler):
-    return AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN, httpx.MockTransport(handler))
+def adapter(handler, version=2):
+    return AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN, httpx.MockTransport(handler), version=version)
 
 
 def test_context_is_frozen_and_old_stub_jobs_keep_binding(job_client):
@@ -116,7 +122,7 @@ def test_declared_semantic_provenance_preserved_without_master_score(service_cli
     id_, _, _, _ = submitted(service_client)
     # Trusted service response double, not an actual paid model call.
     result = {**unknown(), "is_stub": False, "llm_used": True}
-    service_client.app.state.run_ai_jobs(provider=adapter(lambda request: reply(request, result)))
+    service_client.app.state.run_ai_jobs(provider=adapter(lambda request: reply(request, result), version=1))
     current = detail(service_client, id_)
     assert current["ai_review"]["is_stub"] is False and current["ai_review"]["llm_used"] is True
     assert current["score"] is None and current["ai_review"]["score"] is None
@@ -198,7 +204,7 @@ def test_real_service_asgi_contract_and_primary_sqlite(service_client, monkeypat
     from ai_service.app.attempt_bridge import create_attempt_app
     from ai_service.app.config import Settings
     service = create_attempt_app(Settings(ai_service_token=TOKEN))
-    real_adapter = AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN, httpx.ASGITransport(app=service))
+    real_adapter = AttemptServiceAdapter("http://127.0.0.1:8010", TOKEN, httpx.ASGITransport(app=service), version=1)
     id_, _, _, _ = submitted(service_client)
     service_client.app.state.run_ai_jobs(provider=real_adapter)
     current = detail(service_client, id_)

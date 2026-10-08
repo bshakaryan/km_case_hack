@@ -114,7 +114,23 @@ export type OrderDetail = Order & {
       | "needs_master_review";
     llm_used?: boolean;
     is_recommendation?: true;
+    bridge_version?: 1 | 2;
+    photo_check?: SubmissionPhotoCheck;
   } | null;
+};
+export type SubmissionPhotoCheck = {
+  status: "checked" | "unavailable" | "no_after";
+  method: "local_cv";
+  scope: "submission_selected_pair";
+  before_id: number | null;
+  after_id: number | null;
+  duplicate_before: boolean | null;
+  exact_duplicate_groups: number[][];
+  equipment_status: "different" | "unknown";
+  model_available: boolean;
+  capture_time_status: "unknown";
+  repair_status: "unknown";
+  history_status: "not_checked";
 };
 export type AiReviewJob = {
   id: Id;

@@ -39,19 +39,124 @@ String aiReviewVerdict(Json review) => switch (review['source_verdict']) {
   },
 };
 
-String? aiReviewSource(Json review) => review['llm_used'] == true
-    ? 'Источник: текстовая модель и правила'
-    : review['llm_used'] == false
-    ? 'Источник: текст отчёта и правила; языковая модель не использовалась'
-    : null;
+String? aiReviewSource(Json review) {
+  final photoCheck = review['photo_check'];
+  final photos = photoCheck is Map && photoCheck['status'] == 'checked';
+  if (review['llm_used'] == true) {
+    return photos
+        ? 'Источник: текстовая модель, правила и локальная проверка фото'
+        : 'Источник: текстовая модель и правила';
+  }
+  if (review['llm_used'] == false) {
+    return photos
+        ? 'Источник: текст отчёта, правила и локальная проверка фото; языковая модель не использовалась'
+        : 'Источник: текст отчёта и правила; языковая модель не использовалась';
+  }
+  return null;
+}
 
 String aiReviewNote(Json review, {Object? job}) {
+  final photoCheck = review['photo_check'];
+  if (photoCheck is Map) {
+    switch (photoCheck['status']) {
+      case 'checked':
+        return 'Локальная проверка фото даёт технические признаки, а не подтверждение ремонта. Окончательное решение принимает мастер.';
+      case 'unavailable':
+        return 'Проверка содержимого фото не завершена. Окончательное решение принимает мастер.';
+      case 'no_after':
+        return 'Фото после выполнения отсутствует в этой сдаче. Окончательное решение принимает мастер.';
+    }
+  }
   if (_serviceReview(review, job)) {
     return 'Проверяются текст отчёта и правила. Содержимое снимков не анализируется. Окончательное решение принимает мастер.';
   }
   return review['is_stub'] == true
       ? 'Проверяется наличие фото; содержимое снимков не анализируется. Окончательное решение принимает мастер.'
       : 'Окончательное решение принимает мастер.';
+}
+
+List<String> aiPhotoCheckLines(Object? check) {
+  if (check is! Map ||
+      !['checked', 'unavailable', 'no_after'].contains(check['status'])) {
+    return [];
+  }
+  final status = check['status'];
+  final lines = [
+    status == 'checked'
+        ? 'Локальная проверка изображений выполнена.'
+        : status == 'no_after'
+        ? 'В сохранённых фото этой сдачи нет фото после выполнения.'
+        : 'Локальная проверка изображений недоступна; вывод по содержимому не получен.',
+  ];
+  final before = check['before_id'];
+  final after = check['after_id'];
+  final beforeId = before is int && before > 0 ? before : null;
+  final afterId = after is int && after > 0 ? after : null;
+  if (beforeId != null || afterId != null) {
+    lines.add(
+      'Для сравнения выбраны фото этой сдачи: до ${beforeId == null ? 'не выбрано' : '№$beforeId'}; после ${afterId == null ? 'не выбрано' : '№$afterId'}.',
+    );
+  }
+  if (status == 'checked') {
+    if (check['duplicate_before'] == true) {
+      lines.add(
+        'В выбранной паре есть признаки повтора фото до ремонта; сверьте снимки вручную.',
+      );
+    } else if (check['duplicate_before'] == false) {
+      lines.add('В выбранной паре признаков повтора не найдено.');
+    } else {
+      lines.add('Признаки повтора относительно фото до не определены.');
+    }
+    lines.add(
+      check['equipment_status'] == 'different'
+          ? 'Возможно, на выбранных снимках разное оборудование; проверьте вручную.'
+          : 'Совпадение оборудования не подтверждено.',
+    );
+    if (check['model_available'] == false) {
+      lines.add('Модель сравнения оборудования недоступна.');
+    }
+  }
+  final groups = check['exact_duplicate_groups'];
+  final duplicates = groups is List
+      ? groups.whereType<List>().where((group) => group.length > 1).length
+      : 0;
+  if (duplicates > 0) {
+    lines.add(
+      'В сохранённых фото этой сдачи есть группы полностью одинаковых файлов: $duplicates.',
+    );
+  } else if (status == 'checked') {
+    lines.add('Полностью одинаковые файлы среди фото этой сдачи не найдены.');
+  }
+  lines.add(
+    'Качество ремонта и время съёмки не подтверждены. Фото других нарядов и сдач не проверялись.',
+  );
+  return lines;
+}
+
+class AiPhotoCheck extends StatelessWidget {
+  const AiPhotoCheck({super.key, this.check});
+
+  final Object? check;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = aiPhotoCheckLines(check);
+    if (lines.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Результат проверки фото',
+            style: TextStyle(fontWeight: FontWeight.w700),
+          ),
+          for (final line in lines)
+            Padding(padding: const EdgeInsets.only(top: 8), child: Text(line)),
+        ],
+      ),
+    );
+  }
 }
 
 class AiJobStatus extends StatelessWidget {
@@ -107,7 +212,7 @@ class AiJobStatus extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             job?['provider'] == 'ai_service'
-                ? 'Сервис проверки · текст отчёта и правила. Окончательное решение принимает мастер.'
+                ? 'Сервис проверки · рекомендация. Окончательное решение принимает мастер.'
                 : 'Формальная проверка · демо. Содержимое снимков не анализируется. Окончательное решение принимает мастер.',
             style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
           ),

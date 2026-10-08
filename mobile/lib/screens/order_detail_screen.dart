@@ -1229,6 +1229,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             .toString(),
         style: const TextStyle(height: 1.4),
       ),
+      AiPhotoCheck(check: review['photo_check']),
       const Divider(height: 24),
       Text(
         aiReviewNote(review, job: order.aiReviewJob),

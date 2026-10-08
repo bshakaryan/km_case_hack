@@ -4,6 +4,7 @@ import type { OrderDetail, RefItem, SubmissionAttempt } from "./model";
 import { Photo } from "./ui";
 import {
   AiJobStatus,
+  AiPhotoCheck,
   aiReviewNote,
   aiReviewScoreLabel,
   aiReviewSource,
@@ -205,6 +206,7 @@ export function OrderHistory({
                         </p>
                       )}
                       <p>{attempt.ai_review.explanation}</p>
+                      <AiPhotoCheck check={attempt.ai_review.photo_check} />
                       <p className="muted">
                         {aiReviewNote(attempt.ai_review, attempt.ai_job)}
                       </p>

@@ -1,6 +1,8 @@
 """Durable review jobs with attempt, assignment, provider and lease fences."""
 from copy import deepcopy
+from collections import defaultdict
 from datetime import timedelta, timezone
+import hashlib
 from typing import Literal
 from uuid import uuid4
 
@@ -27,6 +29,22 @@ def begin_sqlite_write(db):
             connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
+class PhotoCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    status: Literal["checked", "unavailable", "no_after"]
+    method: Literal["local_cv"]
+    scope: Literal["submission_selected_pair"]
+    before_id: int | None = Field(gt=0)
+    after_id: int | None = Field(gt=0)
+    duplicate_before: bool | None
+    exact_duplicate_groups: list[list[int]] = Field(max_length=5)
+    equipment_status: Literal["different", "unknown"]
+    model_available: bool
+    capture_time_status: Literal["unknown"]
+    repair_status: Literal["unknown"]
+    history_status: Literal["not_checked"]
+
+
 class ReviewResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
     verdict: Literal["passed", "needs_attention", "needs_rework"]
@@ -38,7 +56,8 @@ class ReviewResult(BaseModel):
     llm_used: bool | None = None
     is_recommendation: Literal[True] | None = None
     input_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    bridge_version: Literal[1] | None = None
+    bridge_version: Literal[1, 2] | None = None
+    photo_check: PhotoCheck | None = None
 
 
 class FormalStub:
@@ -86,12 +105,60 @@ def validate_result(result, provider="stub"):
         mapping = {"accepted": "passed", "accepted_with_remarks": "needs_attention", "needs_rework": "needs_rework", "needs_master_review": "needs_attention"}
         if (value.get("source_verdict") not in mapping or value["verdict"] != mapping[value["source_verdict"]]
                 or type(value.get("llm_used")) is not bool or value["is_stub"] == value["llm_used"]
-                or value.get("is_recommendation") is not True or not value.get("input_sha256") or value.get("bridge_version") != 1
+                or type(result.get("is_recommendation")) is not bool
+                or value.get("is_recommendation") is not True or not value.get("input_sha256")
+                or type(result.get("bridge_version")) is not int or value.get("bridge_version") not in {1, 2}
                 or (value["source_verdict"] == "needs_master_review") != (value["score"] is None)):
+            raise ValueError("invalid_result")
+        if value["bridge_version"] == 1:
+            if "photo_check" in value:
+                raise ValueError("invalid_result")
+        elif (value["source_verdict"] != "needs_master_review" or value["score"] is not None
+                or value["llm_used"] is not False or value["is_stub"] is not True
+                or value.get("photo_check") is None):
             raise ValueError("invalid_result")
     else:
         raise ValueError("invalid_result")
     return value
+
+
+def validate_photo_check(check, snapshot):
+    """Bind local CV claims to this exact immutable linked-photo set."""
+    photos = snapshot["photos"]
+    selected = {kind: max((photo["id"] for photo in photos if photo["kind"] == kind), default=None)
+        for kind in ("before", "after")}
+    if check["before_id"] != selected["before"] or check["after_id"] != selected["after"]:
+        raise ValueError("invalid_result")
+    status = check["status"]
+    if status == "no_after" and selected["after"] is not None:
+        raise ValueError("invalid_result")
+    if status != "checked":
+        if (check["duplicate_before"] is not None or check["equipment_status"] != "unknown"
+                or check["model_available"] is not False or check["exact_duplicate_groups"] != []):
+            raise ValueError("invalid_result")
+        return
+    if selected["after"] is None:
+        raise ValueError("invalid_result")
+    if selected["before"] is None:
+        if (check["duplicate_before"] is not None or check["equipment_status"] != "unknown"
+                or check["model_available"] is not False):
+            raise ValueError("invalid_result")
+    elif type(check["duplicate_before"]) is not bool:
+        raise ValueError("invalid_result")
+    if check["equipment_status"] == "different" and check["model_available"] is not True:
+        raise ValueError("invalid_result")
+    chosen = {photo["id"]: photo["data"] for photo in photos}
+    if (selected["before"] is not None and chosen[selected["before"]] == chosen[selected["after"]]
+            and check["duplicate_before"] is not True):
+        raise ValueError("invalid_result")
+    hashes = defaultdict(list)
+    for photo in photos:
+        hashes[hashlib.sha256(photo["data"]).hexdigest()].append(photo["id"])
+    expected = sorted(sorted(ids) for ids in hashes.values() if len(ids) > 1)
+    groups = check["exact_duplicate_groups"]
+    if (any(len(group) < 2 or len(group) > 10 or any(type(id_) is not int or id_ <= 0 for id_ in group)
+            for group in groups) or groups != expected):
+        raise ValueError("invalid_result")
 
 
 def apply_success(db, order, attempt, job, result):
@@ -196,8 +263,10 @@ def finish_job(sessions, claim, result=None, error_code=None):
             result = validate_result(result, claim.get("provider", "stub"))
             if claim.get("provider") == "ai_service":
                 from .ai_adapter import envelope
-                if result["input_sha256"] != envelope(claim["snapshot"])["input_sha256"]:
+                if result["input_sha256"] != envelope(claim["snapshot"], result["bridge_version"])["input_sha256"]:
                     raise ValueError("invalid_result")
+                if result["bridge_version"] == 2:
+                    validate_photo_check(result["photo_check"], claim["snapshot"])
         except (ValidationError, ValueError, TypeError):
             error_code = "invalid_result"
     with sessions() as db:

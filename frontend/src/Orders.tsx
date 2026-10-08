@@ -21,6 +21,7 @@ import {
 } from "./OrderVersion";
 import {
   AiJobStatus,
+  AiPhotoCheck,
   aiReviewNote,
   aiReviewScoreLabel,
   aiReviewSource,
@@ -3010,6 +3011,7 @@ export function OrderDialog({
                     {aiReviewSource(order.ai_review) && (
                       <p className="muted">{aiReviewSource(order.ai_review)}</p>
                     )}
+                    <AiPhotoCheck check={order.ai_review.photo_check} />
                     <small>
                       {aiReviewNote(order.ai_review, order.ai_review_job)}
                     </small>
