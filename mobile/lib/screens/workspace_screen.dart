@@ -13,6 +13,7 @@ import 'order_detail_screen.dart';
 import 'overview_screen.dart';
 import 'orders_screen.dart';
 import 'reports_screen.dart';
+import 'reference_catalog_screen.dart';
 
 class WorkspaceScreen extends StatefulWidget {
   const WorkspaceScreen({required this.controller, super.key});
@@ -158,6 +159,18 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
           ],
         ),
         actions: [
+          if (c.canManageReferences)
+            IconButton(
+              tooltip: 'Справочники',
+              onPressed: c.referenceWriteBusy
+                  ? null
+                  : () => Navigator.of(context).push<void>(
+                      MaterialPageRoute(
+                        builder: (_) => ReferenceCatalogScreen(controller: c),
+                      ),
+                    ),
+              icon: const Icon(Icons.inventory_2_outlined),
+            ),
           IconButton(
             onPressed: c.loading ? null : () => _refresh(),
             tooltip: 'Обновить данные',
@@ -207,7 +220,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                         ),
                       ),
                       Text(
-                        master
+                        c.user!.role == 'admin'
+                            ? 'Администратор'
+                            : master
                             ? 'Мастер'
                             : c.user!.isWorker
                             ? 'Исполнитель'

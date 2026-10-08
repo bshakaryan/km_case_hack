@@ -14,6 +14,7 @@ import 'models.dart';
 import 'order_journal.dart';
 import 'push_service.dart';
 import 'recovery_models.dart';
+import '../domain/reference_edit.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -73,6 +74,342 @@ class AppController extends ChangeNotifier {
   int _dataRevision = 0;
   int _outboxReloadRevision = 0;
   bool _disposed = false;
+  int? _referenceDeniedSession;
+  int _referenceReadId = 0;
+  final Map<ReferenceEditScope, _ReferenceEditContext> _referenceScopes = {};
+  final Map<String, ReferenceEditTicket> _referenceTickets = {};
+
+  bool get canManageReferences =>
+      !_disposed &&
+      user?.role == 'admin' &&
+      api.token != null &&
+      !api.isClosed &&
+      _referenceDeniedSession != _session;
+  bool get referenceWriteBusy =>
+      saving ||
+      _writeLease != null ||
+      _syncFuture != null ||
+      _recoveringQueue ||
+      outbox.any((command) => command.state == OutboxState.running);
+  List<ReferenceEditTicket> get referenceEdits => List.unmodifiable(
+    _referenceTickets.values.where((ticket) => ticket.isCurrent),
+  );
+
+  ReferenceEditScope captureReferenceScope() {
+    if (!canManageReferences || api.token == null || api.isClosed) {
+      throw const ApiException(
+        'Для изменения справочников войдите как администратор.',
+        403,
+      );
+    }
+    _referenceScopes.removeWhere((scope, _) => !scope.isCurrent);
+    _referenceTickets.removeWhere((_, ticket) => !ticket.isCurrent);
+    if (_referenceScopes.isNotEmpty) {
+      return _referenceScopes.keys.first;
+    }
+    final session = _session;
+    final source = api;
+    final epoch = source.sessionEpoch;
+    final owner = user!.id;
+    bool authorityCurrent() =>
+        _current(session) &&
+        identical(api, source) &&
+        !source.isClosed &&
+        source.sessionEpoch == epoch &&
+        user?.id == owner &&
+        user?.role == 'admin';
+    final scope = ReferenceEditScope(
+      () => authorityCurrent() && _referenceDeniedSession != session,
+    );
+    _referenceScopes[scope] = _ReferenceEditContext(
+      session,
+      source,
+      scope,
+      authorityCurrent,
+    );
+    return scope;
+  }
+
+  ReferenceMutationResult? _referencePreflight(ReferenceEditScope scope) {
+    if (!scope.isCurrent) {
+      return const ReferenceMutationResult(
+        ReferenceMutationStatus.scopeChanged,
+      );
+    }
+    if (offline) {
+      return const ReferenceMutationResult(
+        ReferenceMutationStatus.offline,
+        error: ReferenceEditError(
+          'Справочники сохраняются только при подключении к серверу.',
+        ),
+      );
+    }
+    if (referenceWriteBusy) {
+      return const ReferenceMutationResult(
+        ReferenceMutationStatus.busy,
+        error: ReferenceEditError(
+          'Дождитесь завершения текущей отправки или работы с очередью.',
+        ),
+      );
+    }
+    return null;
+  }
+
+  ReferenceEditTicket openReferenceEdit(
+    ReferenceCollection collection, {
+    int? id,
+    bool newOperation = false,
+  }) {
+    if (id != null && id <= 0) {
+      throw const ApiException('Некорректный id записи.', 422);
+    }
+    final key = '${collection.name}:${id ?? 'new'}';
+    final previous = _referenceTickets[key];
+    if (previous?.isCurrent == true &&
+        (previous!.state != ReferenceEditState.saved || !newOperation)) {
+      return previous;
+    }
+    final scope = captureReferenceScope();
+    final initial = id == null
+        ? <String, dynamic>{}
+        : (reference[collection.name] as List? ?? const [])
+              .whereType<Json>()
+              .where((row) => row['id'] == id)
+              .firstOrNull;
+    if (initial == null) {
+      throw const ApiException(
+        'Запись отсутствует в текущем справочнике. Обновите список.',
+        404,
+      );
+    }
+    final context = _referenceScopes[scope]!;
+    final ticket = ReferenceEditTicket(
+      collection: collection,
+      id: id,
+      scope: scope,
+      initialValues: initial,
+      preflight: () => _referencePreflight(scope),
+      send: (values) => _submitReference(context, collection, id, values),
+      changed: () {
+        if (scope.isCurrent) {
+          _notify();
+        }
+      },
+    );
+    _referenceTickets[key] = ticket;
+    return ticket;
+  }
+
+  Future<ReferenceMutationResult> _submitReference(
+    _ReferenceEditContext context,
+    ReferenceCollection collection,
+    int? id,
+    Json values,
+  ) async {
+    final blocked = _referencePreflight(context.scope);
+    if (blocked != null) {
+      return blocked;
+    }
+    final lease = Completer<void>();
+    _writeLease = lease;
+    saving = true;
+    ++_dataRevision;
+    _notify();
+    var sent = false;
+    try {
+      if (!context.scope.isCurrent) {
+        return const ReferenceMutationResult(
+          ReferenceMutationStatus.scopeChanged,
+        );
+      }
+      sent = true;
+      final row = await switch (collection) {
+        ReferenceCollection.equipment =>
+          id == null
+              ? context.source.createEquipment(values)
+              : context.source.updateEquipment(id, values),
+        ReferenceCollection.materials =>
+          id == null
+              ? context.source.createMaterial(values)
+              : context.source.updateMaterial(id, values),
+      };
+      if (!context.scope.isCurrent) {
+        return const ReferenceMutationResult(
+          ReferenceMutationStatus.scopeChanged,
+          mayHaveSucceeded: true,
+        );
+      }
+      ++_dataRevision;
+      ++_referenceReadId;
+      final existing = (reference[collection.name] as List? ?? const [])
+          .whereType<Json>()
+          .toList();
+      final index = existing.indexWhere((item) => item['id'] == row['id']);
+      if (index < 0) {
+        existing.add(Map<String, dynamic>.from(row));
+      } else {
+        existing[index] = Map<String, dynamic>.from(row);
+      }
+      reference = {...reference, collection.name: existing};
+      unawaited(_persistSnapshot(context.session, force: true));
+      return ReferenceMutationResult(ReferenceMutationStatus.saved, row: row);
+    } on ApiException catch (failure) {
+      if (!context.scope.isCurrent) {
+        return ReferenceMutationResult(
+          ReferenceMutationStatus.scopeChanged,
+          mayHaveSucceeded: sent,
+        );
+      }
+      if (failure.statusCode == 403) {
+        _referenceDeniedSession = context.session;
+        error = 'Доступ к справочникам отозван. Войдите снова.';
+      } else if (failure.statusCode == 401) {
+        _expireSession();
+      }
+      final uncertain =
+          failure.requestMayHaveSucceeded ||
+          failure.statusCode == 0 ||
+          failure.statusCode == 408 ||
+          failure.statusCode >= 500;
+      return ReferenceMutationResult(
+        uncertain
+            ? ReferenceMutationStatus.uncertain
+            : ReferenceMutationStatus.rejected,
+        error: ReferenceEditError(
+          failure.message,
+          statusCode: failure.statusCode,
+        ),
+        mayHaveSucceeded: uncertain,
+      );
+    } catch (_) {
+      return ReferenceMutationResult(
+        context.scope.isCurrent
+            ? ReferenceMutationStatus.uncertain
+            : ReferenceMutationStatus.scopeChanged,
+        error: const ReferenceEditError(
+          'Ответ сохранения недоступен. Результат отправки неизвестен; повтор не выполнен.',
+        ),
+        mayHaveSucceeded: sent,
+      );
+    } finally {
+      if (identical(_writeLease, lease)) {
+        _writeLease = null;
+        saving = false;
+      }
+      lease.complete();
+      if (context.authorityCurrent()) {
+        _notify();
+      }
+    }
+  }
+
+  Future<ReferenceRefreshResult> refreshReferences(
+    ReferenceEditScope scope,
+  ) async {
+    final context = _referenceScopes[scope];
+    if (context == null || !scope.isCurrent) {
+      return const ReferenceRefreshResult(ReferenceRefreshStatus.scopeChanged);
+    }
+    if (offline) {
+      return const ReferenceRefreshResult(
+        ReferenceRefreshStatus.failed,
+        error: ReferenceEditError(
+          'Нет подключения. Показан сохранённый справочник.',
+        ),
+      );
+    }
+    final revision = _dataRevision;
+    final readId = ++_referenceReadId;
+    try {
+      final result = await context.source.reference();
+      if (!scope.isCurrent) {
+        return const ReferenceRefreshResult(
+          ReferenceRefreshStatus.scopeChanged,
+        );
+      }
+      if (revision != _dataRevision || readId != _referenceReadId) {
+        return const ReferenceRefreshResult(
+          ReferenceRefreshStatus.failed,
+          error: ReferenceEditError(
+            'Данные изменились во время чтения. Обновите список ещё раз.',
+          ),
+        );
+      }
+      if ([
+            'areas',
+            'equipment',
+            'materials',
+            'employees',
+            'brigades',
+            'fault_codes',
+            'time_norms',
+          ].any(
+            (key) =>
+                result[key] is! List ||
+                !(result[key] as List).every((row) => row is Json),
+          ) ||
+          !(result['areas'] as List).every(
+            (row) =>
+                row['id'] is int &&
+                row['id'] > 0 &&
+                row['name'] is String &&
+                (row['name'] as String).trim().isNotEmpty,
+          ) ||
+          !(result['equipment'] as List).every(
+            (row) => isCompleteReferenceRow(ReferenceCollection.equipment, row),
+          ) ||
+          !(result['materials'] as List).every(
+            (row) => isCompleteReferenceRow(ReferenceCollection.materials, row),
+          )) {
+        return const ReferenceRefreshResult(
+          ReferenceRefreshStatus.failed,
+          error: ReferenceEditError('Сервер вернул некорректный справочник.'),
+        );
+      }
+      ++_dataRevision;
+      reference = result;
+      await _persistSnapshot(context.session, force: true);
+      if (!scope.isCurrent) {
+        return const ReferenceRefreshResult(
+          ReferenceRefreshStatus.scopeChanged,
+        );
+      }
+      _notify();
+      return const ReferenceRefreshResult(ReferenceRefreshStatus.refreshed);
+    } on ApiException catch (failure) {
+      if (!scope.isCurrent) {
+        return const ReferenceRefreshResult(
+          ReferenceRefreshStatus.scopeChanged,
+        );
+      }
+      if (failure.statusCode == 403) {
+        _referenceDeniedSession = context.session;
+        error = 'Доступ к справочникам отозван. Войдите снова.';
+      } else if (failure.statusCode == 401) {
+        _expireSession();
+      }
+      _notify();
+      return ReferenceRefreshResult(
+        ReferenceRefreshStatus.failed,
+        error: ReferenceEditError(
+          failure.message,
+          statusCode: failure.statusCode,
+        ),
+      );
+    } catch (_) {
+      if (!scope.isCurrent) {
+        return const ReferenceRefreshResult(
+          ReferenceRefreshStatus.scopeChanged,
+        );
+      }
+      return const ReferenceRefreshResult(
+        ReferenceRefreshStatus.failed,
+        error: ReferenceEditError(
+          'Не удалось обновить список. Подтверждённое сохранение не отменено.',
+        ),
+      );
+    }
+  }
 
   bool _current(int session) => !_disposed && session == _session;
   void _notify() {
@@ -85,6 +422,8 @@ class AppController extends ChangeNotifier {
   }
 
   void _resetData() {
+    _referenceScopes.clear();
+    _referenceTickets.clear();
     user = null;
     reference = {};
     employees = [];
@@ -2358,6 +2697,19 @@ class AppController extends ChangeNotifier {
     api.close();
     super.dispose();
   }
+}
+
+class _ReferenceEditContext {
+  const _ReferenceEditContext(
+    this.session,
+    this.source,
+    this.scope,
+    this.authorityCurrent,
+  );
+  final int session;
+  final NaryadApi source;
+  final ReferenceEditScope scope;
+  final bool Function() authorityCurrent;
 }
 
 class _QueueRecoveryScope {

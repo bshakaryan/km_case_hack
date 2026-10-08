@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import 'models.dart';
 import 'order_journal.dart';
+import '../domain/reference_edit.dart';
 
 class ApiException implements Exception {
   const ApiException(
@@ -40,6 +41,8 @@ class NaryadApi {
   int _ordersReadId = 0;
   _OrdersSnapshot? _ordersSnapshot;
   String? get token => _token;
+  int get sessionEpoch => _tokenEpoch;
+  bool get isClosed => _closed;
   set token(String? value) {
     // Every assignment is an authority boundary, including A -> B -> A and
     // re-login with an identical test token. Never retain another session's list.
@@ -297,6 +300,85 @@ class NaryadApi {
   Future<Json> meData() => _object('/auth/me');
   Future<User> me() async => User.fromJson(await meData());
   Future<Json> reference() => _object('/reference');
+  Future<Json> createEquipment(Json values) =>
+      _writeReference(ReferenceCollection.equipment, values);
+  Future<Json> updateEquipment(int id, Json values) =>
+      _writeReference(ReferenceCollection.equipment, values, id: id);
+  Future<Json> createMaterial(Json values) =>
+      _writeReference(ReferenceCollection.materials, values);
+  Future<Json> updateMaterial(int id, Json values) =>
+      _writeReference(ReferenceCollection.materials, values, id: id);
+
+  Future<Json> _writeReference(
+    ReferenceCollection collection,
+    Json values, {
+    int? id,
+  }) async {
+    Json clean;
+    try {
+      if (id != null && id <= 0) {
+        throw ReferenceValidationException({'id': 'Некорректный id записи.'});
+      }
+      clean = validateReferenceValues(collection, values, create: id == null);
+    } on ReferenceValidationException catch (failure) {
+      throw ApiException(failure.message, 422);
+    }
+    final request =
+        http.Request(
+            id == null ? 'POST' : 'PATCH',
+            Uri.parse(
+              '$baseUrl/reference/${collection.name}${id == null ? '' : '/$id'}',
+            ),
+          )
+          ..followRedirects = false
+          ..headers.addAll(_headers)
+          ..headers['Content-Type'] = 'application/json; charset=utf-8'
+          ..body = jsonEncode(clean);
+    late final http.Response response;
+    try {
+      response = await _send(request);
+    } on ApiException catch (failure) {
+      if (failure.statusCode >= 300 && failure.statusCode < 400) {
+        throw ApiException(
+          'Ответ сохранения перенаправлен. Результат отправки неизвестен; повтор не выполнен.',
+          failure.statusCode,
+          requestMayHaveSucceeded: true,
+        );
+      }
+      rethrow;
+    }
+    try {
+      if (response.statusCode != (id == null ? 201 : 200)) {
+        throw const FormatException();
+      }
+      final row = jsonDecode(utf8.decode(response.bodyBytes));
+      if (!isCompleteReferenceRow(collection, row) ||
+          row is! Json ||
+          (id != null && row['id'] != id)) {
+        throw const FormatException();
+      }
+      final fields = collection == ReferenceCollection.equipment
+          ? ['name', 'inventory_number', 'area_id', 'type', 'criticality']
+          : ['name', 'unit'];
+      if (fields.any((field) => !row.containsKey(field))) {
+        throw const FormatException();
+      }
+      validateReferenceValues(collection, {
+        for (final field in fields) field: row[field],
+      }, create: true);
+      if (clean.entries.any((entry) => row[entry.key] != entry.value)) {
+        throw const FormatException();
+      }
+      return Map<String, dynamic>.unmodifiable(row);
+    } catch (_) {
+      throw ApiException(
+        'Сервер не подтвердил сохранённую запись. Результат отправки неизвестен; повтор не выполнен.',
+        response.statusCode,
+        requestMayHaveSucceeded: true,
+      );
+    }
+  }
+
   Future<List<Json>> employees() => _list('/employees');
   Future<List<Json>> orders() async {
     final uri = Uri.parse('$baseUrl/orders?limit=5000');
