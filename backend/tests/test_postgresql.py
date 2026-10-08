@@ -20,8 +20,8 @@ from test_migrations import fill_legacy, revision, snapshot
 def assert_head(engine):
     with engine.connect() as connection:
         validate_schema(connection)
-        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0006_order_versions"
-    assert set(sa.inspect(engine).get_table_names()) == set(expected_schema("0006_order_versions").tables) | {"alembic_version"}
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0007_assignment_participants"
+    assert set(sa.inspect(engine).get_table_names()) == set(expected_schema("0007_assignment_participants").tables) | {"alembic_version"}
 
 
 @pytest.mark.parametrize("legacy", ["unversioned1", "unversioned2", "versioned1", "versioned1-with-commands", "versioned2"])

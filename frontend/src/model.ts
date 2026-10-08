@@ -26,6 +26,19 @@ export type Employee = User & {
   completed_count: number;
   grade?: number;
 };
+export type AssignmentParticipant = {
+  employee_id: Id;
+  name: string;
+  is_responsible: boolean;
+  source: "live" | "legacy_snapshot";
+};
+export type AssignmentRoster = {
+  assignee_id: Id;
+  assignee_name: string;
+  brigade_id: Id | null;
+  participants?: AssignmentParticipant[];
+  participants_source?: "live" | "legacy_snapshot";
+};
 export type Order = {
   id: Id;
   version: number;
@@ -40,6 +53,8 @@ export type Order = {
   assignee_id: Id;
   assignee_name: string;
   brigade_id: Id | null;
+  participants?: AssignmentParticipant[];
+  participants_source?: "live" | "legacy_snapshot";
   master_id: Id;
   priority: string;
   status: string;
@@ -122,6 +137,8 @@ export type AssignmentHistory = {
   assignee_name: string;
   brigade_id: Id | null;
   brigade_name: string | null;
+  participants?: AssignmentParticipant[];
+  participants_source?: "live" | "legacy_snapshot";
   assigned_by_id: Id | null;
   assigned_by_name: string | null;
   assigned_at: string;

@@ -80,6 +80,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
   int? _equipmentId;
   int? _assigneeId;
   int? _brigadeId;
+  int? _responsibleId;
   bool _byBrigade = false;
   String _workType = 'unplanned';
   String _priority = 'normal';
@@ -118,6 +119,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     'equipment_id': _equipmentId,
     'assignee_id': _assigneeId,
     'brigade_id': _brigadeId,
+    'responsible_id': _responsibleId,
     'by_brigade': _byBrigade,
     'work_type': _workType,
     'priority': _priority,
@@ -200,6 +202,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
       'equipment_id',
       'assignee_id',
       'brigade_id',
+      'responsible_id',
     ]) {
       if (data[key] != null && data[key] is! int) {
         throw const FormatException('Выбор в черновике повреждён.');
@@ -262,6 +265,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
         _equipmentId = data['equipment_id'] as int?;
         _assigneeId = data['assignee_id'] as int?;
         _brigadeId = data['brigade_id'] as int?;
+        _responsibleId = data['responsible_id'] as int?;
         _byBrigade = data['by_brigade'] == true;
         _workType = data['work_type'] as String? ?? 'unplanned';
         _priority = data['priority'] as String? ?? 'normal';
@@ -699,12 +703,38 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
       if (_byBrigade) {
         _brigadeId = row['id'] as int;
         _assigneeId = null;
+        _responsibleId = null;
       } else {
         _assigneeId = row['id'] as int;
         _brigadeId = null;
+        _responsibleId = null;
       }
       _error = null;
     });
+  }
+
+  List<Json> get _eligibleParticipants => widget.controller.employees
+      .where(
+        (row) =>
+            row['brigade_id'] == _brigadeId &&
+            row['role'] == 'worker' &&
+            row['on_shift'] == true,
+      )
+      .toList();
+
+  Future<void> _chooseResponsible() async {
+    final row = await _choose(
+      title: 'Ответственный за общий результат',
+      rows: _eligibleParticipants,
+      employees: true,
+      subtitle: _employeeDetail,
+    );
+    if (mounted && row != null) {
+      _edit(() {
+        _responsibleId = row['id'] as int;
+        _error = null;
+      });
+    }
   }
 
   Future<void> _chooseDeadline() async {
@@ -792,6 +822,17 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
       return false;
     }
     final employee = _find(widget.controller.employees, _assigneeId);
+    if (_byBrigade &&
+        (_eligibleParticipants.isEmpty ||
+            (_responsibleId != null &&
+                !_eligibleParticipants.any(
+                  (row) => row['id'] == _responsibleId,
+                )))) {
+      setState(
+        () => _error = 'В бригаде нет работников на смене либо выбранный ответственный недоступен. Проверьте назначение.',
+      );
+      return false;
+    }
     if (!_byBrigade &&
         (employee == null ||
             employee['on_shift'] == false ||
@@ -850,6 +891,8 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
             'brigade_id': _brigadeId
           else
             'assignee_id': _assigneeId,
+          if (_byBrigade && _responsibleId != null)
+            'responsible_id': _responsibleId,
           'priority': _priority,
           'deadline': _deadline.toUtc().toIso8601String(),
           'comment': _comment.text.trim(),
@@ -1266,6 +1309,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
   Widget _assignment() {
     final employee = _find(widget.controller.employees, _assigneeId);
     final brigade = _find(_reference('brigades'), _brigadeId);
+    final responsible = _find(widget.controller.employees, _responsibleId);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1284,6 +1328,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
             _byBrigade = selected.first;
             _assigneeId = null;
             _brigadeId = null;
+            _responsibleId = null;
           }),
         ),
         const SizedBox(height: 16),
@@ -1297,14 +1342,28 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
               ? null
               : _employeeDetail(employee),
         ),
-        if (_byBrigade)
-          const Padding(
-            padding: EdgeInsets.only(bottom: 16),
+        if (_byBrigade) ...[
+          _choice(
+            'Ответственный за сдачу',
+            _responsibleId == null
+                ? 'Автоматический выбор сервера'
+                : '${responsible?['name'] ?? 'Выбранный работник недоступен'}',
+            _brigadeId == null ? null : _chooseResponsible,
+            detail: 'Общий наряд читают все назначенные участники; принимает и сдаёт один ответственный.',
+          ),
+          if (_responsibleId != null)
+            TextButton(
+              onPressed: () => _edit(() => _responsibleId = null),
+              child: const Text('Выбрать ответственного автоматически'),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
             child: Text(
-              'В текущей версии сервер назначит одного доступного работника бригады. Ответственный появится в выданном наряде.',
-              style: TextStyle(fontSize: 14, color: Color(0xFF536275)),
+              'Сервер зафиксирует состав работников на смене при назначении. Без выбора ответственного назначит наименее загруженного. Состав и ответственный подтверждаются после отправки.',
+              style: const TextStyle(fontSize: 14, color: Color(0xFF536275)),
             ),
           ),
+        ],
         _choice(
           'Срок исполнения *',
           _deadlineLabel(),

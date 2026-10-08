@@ -168,3 +168,42 @@ test("legacy snapshots expose uncertainty without assigning global photos or cum
   assert.ok(!html.includes("Текущее назначение"));
   assert.ok(!html.includes("Недоказанная связь"));
 });
+
+test("assignment history retains each brigade roster independently of the current order", () => {
+  const html = render({
+    participants: [
+      {
+        employee_id: 99,
+        name: "Новый участник",
+        is_responsible: false,
+        source: "live",
+      },
+    ],
+    assignment_history: [
+      {
+        ...assignment,
+        assignee_id: 1,
+        brigade_id: 7,
+        participants_source: "live",
+        participants: [
+          {
+            employee_id: 1,
+            name: "Исторический ответственный",
+            is_responsible: true,
+            source: "live",
+          },
+          {
+            employee_id: 2,
+            name: "Прежний участник",
+            is_responsible: false,
+            source: "live",
+          },
+        ],
+      },
+    ],
+    submission_attempts: [],
+  });
+  assert.match(html, /Исторический ответственный/);
+  assert.match(html, /Прежний участник/);
+  assert.doesNotMatch(html, /Новый участник/);
+});

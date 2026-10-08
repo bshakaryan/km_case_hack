@@ -32,7 +32,7 @@ def check_upgrade(engine):
     assert all(row["order_id"] is None and row["order_version"] is None for row in after["client_commands"])
     with engine.connect() as connection:
         validate_schema(connection)
-        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0006_order_versions"
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0007_assignment_participants"
     upgrade_database(engine)
     assert dump(engine) == after
     with engine.connect() as connection:

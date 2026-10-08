@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../data/app_controller.dart';
 import '../data/api.dart';
@@ -11,6 +13,7 @@ import '../widgets/order_photo.dart';
 import '../widgets/order_history.dart';
 import '../widgets/ai_job_status.dart';
 import 'completion_screen.dart';
+import 'create_order_screen.dart' show prepareOrderPhoto;
 
 const _blue = Color(0xFF173E68);
 const _red = Color(0xFFB4232D);
@@ -20,9 +23,13 @@ class OrderDetailScreen extends StatefulWidget {
     super.key,
     required this.controller,
     required this.orderId,
+    this.imagePicker,
+    this.photoPreparer,
   });
   final AppController controller;
   final int orderId;
+  final ImagePicker? imagePicker;
+  final Future<Uint8List> Function(Uint8List)? photoPreparer;
 
   @override
   State<OrderDetailScreen> createState() => _OrderDetailScreenState();
@@ -137,7 +144,127 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   bool get _master => widget.controller.user?.isMaster ?? false;
   bool get _canExecute =>
       (widget.controller.user?.isWorker ?? false) &&
-      _order?.data['assignee_id'] == widget.controller.user?.id;
+      (_order?.isResponsible(widget.controller.user?.id) ?? false);
+
+  bool _canAddPhoto(WorkOrder order) {
+    if ({'ai_review', 'closed', 'cancelled'}.contains(order.status)) {
+      return false;
+    }
+    final user = widget.controller.user;
+    return user?.isMaster == true ||
+        (user?.isWorker == true && order.hasParticipant(user?.id));
+  }
+
+  Future<void> _addPhoto(String kind) async {
+    final order = _order;
+    if (_busy || order == null || !_canAddPhoto(order)) return;
+    final controller = widget.controller;
+    final api = controller.api;
+    final ownerId = controller.user?.id;
+    // Freeze before the picker and compression; a GET cannot rebase this write.
+    final basis = controller.captureOrderBasis(order);
+    final saved = _maps(order.data['photos'])
+        .where((p) => p['kind'] == kind)
+        .length;
+    final waiting = controller.outbox
+        .where(
+          (command) =>
+              command.kind == OutboxKind.uploadPhoto &&
+              command.photoKind == kind &&
+              (command.orderId == order.id ||
+                  command.localRef == '${order.id}'),
+        )
+        .length;
+    if (saved + waiting >= 5) {
+      setState(
+        () => _error = 'Допускается до 5 фото каждого вида на наряд. Проверьте карточку и очередь.',
+      );
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final source = await showModalBottomSheet<ImageSource>(
+        context: context,
+        useSafeArea: true,
+        builder: (context) => Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(kind == 'before' ? 'Фото до ремонта' : 'Фото после ремонта'),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(context, ImageSource.camera),
+                icon: const Icon(Icons.camera_alt_outlined),
+                label: const Text('Сделать снимок'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.pop(context, ImageSource.gallery),
+                icon: const Icon(Icons.photo_library_outlined),
+                label: const Text('Выбрать из галереи'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (!mounted || source == null) return;
+      final file = await (widget.imagePicker ?? ImagePicker()).pickImage(
+        source: source,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 88,
+      );
+      if (!mounted || file == null) return;
+      final original = await file.readAsBytes();
+      if (original.length > 30 * 1024 * 1024) {
+        throw const ApiException('Выберите снимок до 30 МБ.', 413);
+      }
+      final bytes =
+          await (widget.photoPreparer?.call(original) ??
+              compute(prepareOrderPhoto, original));
+      if (!mounted) return;
+      if (!identical(controller.api, api) || controller.user?.id != ownerId) {
+        throw const ApiException(
+          'Аккаунт или сервер изменился. Фото не отправлено.',
+          401,
+        );
+      }
+      final current = controller.orders
+          .where((item) => item.id == order.id)
+          .firstOrNull;
+      if (!_canAddPhoto(current ?? order)) {
+        throw const ApiException(
+          'Вы больше не можете добавлять фото в этот наряд.',
+          403,
+        );
+      }
+      await controller.uploadPhoto(
+        order.id,
+        bytes,
+        '$kind-${DateTime.now().microsecondsSinceEpoch}.jpg',
+        kind,
+        basis: basis,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            controller.isOrderPending(order.id)
+                ? 'Фото сохранено в очереди на устройстве. Ожидает отправки.'
+                : 'Фотография подтверждена сервером.',
+          ),
+        ),
+      );
+      await _load(silent: true);
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
 
   bool _hasOtherOpenOrder(WorkOrder order) {
     final userId = widget.controller.user?.id;
@@ -180,6 +307,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     OrderWriteBasis? basis,
   }) async {
     if (_busy) return;
+    if (!_master && !_canExecute) return;
     _revision++;
     setState(() {
       _busy = true;
@@ -343,7 +471,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   Future<void> _complete() async {
     final order = _order;
-    if (order == null) return;
+    if (order == null || !_canExecute) return;
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) =>
@@ -450,7 +578,10 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   _section('Сроки и оборудование', [
                     _row('Участок', order.areaName),
                     _row('Оборудование', order.equipmentName),
-                    _row('Исполнитель', order.assigneeName),
+                    _row(
+                      order.isBrigade ? 'Ответственный' : 'Исполнитель',
+                      order.assigneeName,
+                    ),
                     _row('Выдан', _date(order.data['created_at'])),
                     _row(
                       'Срок',
@@ -478,6 +609,31 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                       ),
                     ],
                   ]),
+                  if (order.isBrigade)
+                    _section('Участники назначения', [
+                      if (order.id < 0)
+                        const Text(
+                          'Состав и ответственный пока не подтверждены сервером.',
+                        )
+                      else ...[
+                        for (final participant in order.participants)
+                          _row(
+                            participant.isResponsible
+                                ? 'Ответственный'
+                                : 'Участник',
+                            participant.name,
+                          ),
+                        if (order.participantsSource == 'legacy_snapshot')
+                          const Text(
+                            'Из прежних данных подтверждён только сохранённый исполнитель. Полный состав этой бригады неизвестен.',
+                          ),
+                        if (widget.controller.user?.isWorker == true &&
+                            !_canExecute)
+                          const Text(
+                            'Вы участвуете в общем наряде и можете добавлять фотографии. Переходы и сдачу выполняет ответственный.',
+                          ),
+                      ],
+                    ]),
                   _photos(order),
                   if (order.data['completion'] is Map) _report(order),
                   if (!order.pendingSync)
@@ -720,7 +876,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  _date(photo['created_at']),
+                                  '${photo['author_name'] ?? 'Автор не зафиксирован'} · ${_date(photo['created_at'])}',
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: Color(0xFF64748B),
@@ -736,6 +892,23 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             ],
           ],
         ),
+      if (_canAddPhoto(order)) ...[
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final kind in ['before', 'after'])
+              OutlinedButton.icon(
+                onPressed: _busy ? null : () => _addPhoto(kind),
+                icon: const Icon(Icons.add_a_photo_outlined),
+                label: Text(
+                  kind == 'before' ? 'Добавить фото до' : 'Добавить фото после',
+                ),
+              ),
+          ],
+        ),
+      ],
     ]);
   }
 

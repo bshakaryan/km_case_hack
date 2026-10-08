@@ -75,7 +75,7 @@ def validate_result(result):
 
 
 def apply_success(db, order, attempt, job, result):
-    from .services import audit, notify
+    from .services import audit, notify, participant_ids
     assessment = AIAssessment(order_id=order.id, **result)
     db.add(assessment)
     db.flush()
@@ -86,6 +86,7 @@ def apply_success(db, order, attempt, job, result):
     order.version += 1
     audit(db, order, "ai_review", attempt.author_id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
     notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
+    notify(db, participant_ids(db, order), "Статус наряда изменён", f"{order.number}: completed → ai_review", "status", order.id)
     db.add(IntegrationLog(adapter="ai_stub", operation="review", payload={"order_id": order.id, "attempt_id": attempt.id, "is_stub": True}))
     job.status = "succeeded"
     job.finished_at = utcnow()

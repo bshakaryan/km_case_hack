@@ -53,6 +53,7 @@ Json orderJson(int id) => {
   'work_type': 'unplanned',
   'area_name': 'Цех',
   'equipment_name': 'Двигатель',
+  'assignee_id': 7,
   'assignee_name': 'Исполнитель',
   'deadline': '2026-10-06T10:00:00Z',
   'is_overdue': false,

@@ -196,6 +196,23 @@ test("partial creation retains confirmed ID/version and each photo acknowledgeme
     ["uploaded", "uncertain", "queued"],
   );
   assert.equal(restored.phase, "confirmed");
+  assert.equal(restored.form.responsible_id, "");
+  assert.equal(data.form.responsible_id, undefined);
+  const brigade = recoverCreateDraft({
+    ...data,
+    assignment: "brigade",
+    form: { ...data.form, brigade_id: "7", responsible_id: "18" },
+  });
+  assert.equal(brigade.form.responsible_id, "18");
+  assert.equal(brigade.created.id, 31);
+  assert.throws(
+    () =>
+      recoverCreateDraft({
+        ...data,
+        form: { ...data.form, responsible_id: 18 },
+      }),
+    /поврежден|повреждены/,
+  );
 });
 
 test("completion restore never advances its report to a newer card or coerces raw quantity", () => {

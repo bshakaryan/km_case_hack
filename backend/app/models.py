@@ -246,6 +246,19 @@ class OrderAssignment(Base):
     source: Mapped[str] = mapped_column(String(20))
 
 
+class OrderAssignmentParticipant(Base):
+    __tablename__ = "order_assignment_participants"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "employee_id", name="uq_assignment_participant"),
+        CheckConstraint("source IN ('live','legacy_snapshot')", name="ck_assignment_participant_source"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assignment_id: Mapped[int] = mapped_column(ForeignKey("order_assignments.id"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    source: Mapped[str] = mapped_column(String(20))
+
+
 class SubmissionAttempt(Base):
     __tablename__ = "submission_attempts"
     __table_args__ = (

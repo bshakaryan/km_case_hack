@@ -32,7 +32,7 @@ from .push import StubSender, dispatch_push, env_int, get_sender
 from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPatch, Transition
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
-from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, append_assignment, append_submission, append_submission_decision, audit, aware, downtime_minutes, effective_queue_statuses, employee_dict, end_current_assignment, iso, monitor_deadlines, notify, order_dict, photo_dict, queue_positions, shift_start, waiting_orders
+from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, append_assignment, append_submission, append_submission_decision, audit, aware, current_participants, downtime_minutes, effective_queue_statuses, employee_dict, end_current_assignment, iso, monitor_deadlines, notify, order_dict, participant_ids, photo_dict, queue_positions, shift_start, waiting_orders, worker_order_access
 
 log = logging.getLogger(__name__)
 STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "completed", "ai_review", "rework", "closed", "cancelled"}
@@ -215,25 +215,41 @@ def create_app(database_url=None, seed=True, monitor=True):
         order = db.scalar(query)
         if not order:
             raise HTTPException(404, "Наряд не найден")
-        if user.role == "worker" and order.assignee_id != user.id:
-            raise HTTPException(403, "Доступны только назначенные вам наряды")
+        if user.role == "worker" and not db.scalar(select(Order.id).where(Order.id == order.id, worker_order_access(user.id))):
+            raise HTTPException(403, "Доступны только наряды вашего текущего назначения")
         return order
 
-    def resolve_assignee(db, assignee_id, brigade_id):
+    def require_responsible(user, order):
+        if user.role == "worker" and order.assignee_id != user.id:
+            raise HTTPException(403, "Действие доступно только ответственному за наряд")
+
+    def lock_roster(db):
+        # Employee inserts/moves/shift changes and assignment snapshots share
+        # this lock: locking existing members alone misses new brigade members.
+        begin_sqlite_write(db)
+        if db.bind.dialect.name == "postgresql":
+            db.execute(sql_text("SELECT pg_advisory_xact_lock(1095648841, 2)"))
+
+    def resolve_assignment(db, assignee_id, brigade_id, responsible_id=None):
+        lock_roster(db)
         if brigade_id:
-            if not db.get(Brigade, brigade_id):
+            if not db.scalar(select(Brigade).where(Brigade.id == brigade_id).with_for_update()):
                 raise HTTPException(422, "Бригада не найдена")
             workers = list(db.scalars(select(Employee).where(Employee.role == "worker", Employee.brigade_id == brigade_id, Employee.on_shift.is_(True)).order_by(Employee.id).with_for_update()))
             if not workers:
                 raise HTTPException(422, "В бригаде нет работников на смене")
+            if responsible_id is not None:
+                if responsible_id not in {worker.id for worker in workers}:
+                    raise HTTPException(422, "Ответственный должен быть работником выбранной бригады на смене")
+                return responsible_id, workers
             counts = {w.id: db.scalar(select(func.count()).select_from(Order).where(Order.assignee_id == w.id, Order.status.notin_(TERMINAL))) for w in workers}
-            return min(workers, key=lambda w: counts[w.id]).id
-        person = db.get(Employee, assignee_id)
+            return min(workers, key=lambda w: (counts[w.id], w.id)).id, workers
+        person = db.scalar(select(Employee).where(Employee.id == assignee_id).with_for_update())
         if not person or person.role != "worker":
             raise HTTPException(422, "Исполнителем должен быть рабочий")
         if not person.on_shift:
             raise HTTPException(422, "Работник вне смены")
-        return person.id
+        return person.id, [person]
 
     CLIENT_COMMAND_ID = re.compile(r"[A-Za-z0-9._:-]{8,64}")
 
@@ -322,10 +338,10 @@ def create_app(database_url=None, seed=True, monitor=True):
             from_thread.run(realtime.publish, type_, order_id)
         return JSONResponse(status_code=status, content=body)
 
-    def filtered(db, user, area_id=None, equipment_id=None, assignee_id=None, brigade_id=None, priority=None, status=None, search=None, from_date=None, to_date=None):
+    def filtered(db, user, area_id=None, equipment_id=None, assignee_id=None, brigade_id=None, priority=None, status=None, search=None, from_date=None, to_date=None, participant_access=False):
         query = select(Order)
         if user.role == "worker":
-            query = query.where(Order.assignee_id == user.id)
+            query = query.where(worker_order_access(user.id) if participant_access else Order.assignee_id == user.id)
         for key, value in [("area_id", area_id), ("equipment_id", equipment_id), ("assignee_id", assignee_id), ("brigade_id", brigade_id), ("priority", priority), ("status", status)]:
             if value is not None and value != "":
                 if key == "status":
@@ -408,7 +424,9 @@ def create_app(database_url=None, seed=True, monitor=True):
             allowed.add("pin")
         if not payload or set(payload) - allowed:
             raise HTTPException(422, "Неизвестные поля или пустое изменение")
-        existing = db.get(model, id_) if id_ else None
+        if model is Employee:
+            lock_roster(db)
+        existing = db.scalar(select(model).where(model.id == id_).with_for_update().execution_options(populate_existing=True)) if id_ else None
         if id_ and existing is None:
             raise HTTPException(404, "Запись не найдена")
         clean = {}
@@ -486,11 +504,13 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @app.get("/api/orders")
     def orders(db: DB, user: User, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, priority: str | None = None, status: str | None = None, search: str | None = Query(None, max_length=200), from_date: str | None = None, to_date: str | None = None, limit: int = Query(1000, ge=1, le=5000)):
-        query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id, priority, status, search, from_date, to_date)
+        query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id, priority, status, search, from_date, to_date, participant_access=True)
         refs = {"areas": {a.id: a for a in db.scalars(select(Area))}, "equipment": {e.id: e for e in db.scalars(select(Equipment))}, "employees": {p.id: p for p in db.scalars(select(Employee))}}
         positions = queue_positions(db)
         statuses = effective_queue_statuses(db)
-        return [order_dict(db, o, refs=refs, positions=positions, statuses=statuses) for o in db.scalars(query.order_by(Order.created_at.desc()).limit(limit))]
+        selected = list(db.scalars(query.order_by(Order.created_at.desc()).limit(limit)))
+        participants = current_participants(db, selected)
+        return [order_dict(db, o, refs=refs, positions=positions, statuses=statuses, participants=participants[o.id]) for o in selected]
 
     @app.get("/api/orders/{id_}")
     def order_detail(id_: int, db: DB, user: User):
@@ -539,7 +559,12 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.post("/api/orders", status_code=201)
     def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
         require_role(user, "master", "admin")
-        command_hash = json_hash(payload.model_dump())
+        command_payload = payload.model_dump()
+        if payload.responsible_id is None:
+            # New optional selection must not invalidate receipts produced
+            # before this field existed for otherwise identical old requests.
+            command_payload.pop("responsible_id")
+        command_hash = json_hash(command_payload)
 
         def perform():
             equipment = db.get(Equipment, payload.equipment_id)
@@ -548,7 +573,8 @@ def create_app(database_url=None, seed=True, monitor=True):
             if payload.deadline <= utcnow():
                 raise HTTPException(422, "Срок нового наряда должен быть в будущем")
             data = payload.model_dump()
-            data["assignee_id"] = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
+            data.pop("responsible_id")
+            data["assignee_id"], participants = resolve_assignment(db, payload.assignee_id, payload.brigade_id, payload.responsible_id)
             assigned = utcnow()
             if db.bind.dialect.name == "sqlite" and not db.connection().connection.driver_connection.in_transaction:
                 # sqlite3's legacy transaction mode does not BEGIN for SELECT.
@@ -570,9 +596,9 @@ def create_app(database_url=None, seed=True, monitor=True):
                         raise HTTPException(503, "Не удалось выделить номер наряда. Повторите запрос позже.", headers={"Retry-After": "1"})
                 else:
                     break
-            append_assignment(db, order, user.id)
+            append_assignment(db, order, user.id, participants)
             audit(db, order, "issue", user.id, comment=payload.comment)
-            notify(db, [order.assignee_id], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
+            notify(db, [person.id for person in participants], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
             return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return run_idempotent(db, user, request, "order_create", command_hash, 201, perform)
@@ -591,17 +617,17 @@ def create_app(database_url=None, seed=True, monitor=True):
             if "assignee_id" in changes or "brigade_id" in changes:
                 if order.status in ["in_progress", "paused", "completed", "ai_review"]:
                     raise HTTPException(409, "Переназначение доступно до начала работы или после возврата")
-                order.assignee_id = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
+                order.assignee_id, participants = resolve_assignment(db, payload.assignee_id, payload.brigade_id, payload.responsible_id)
                 order.brigade_id = payload.brigade_id
                 order.status = "issued"
                 assigned = utcnow()
                 order.assigned_at = max(assigned, aware(order.assigned_at) + timedelta(microseconds=1))
-                append_assignment(db, order, user.id)
-                notify(db, [order.assignee_id], "Наряд переназначен вам", order.number, "assigned", order.id)
+                append_assignment(db, order, user.id, participants)
+                notify(db, [person.id for person in participants], "Наряд переназначен вам", order.number, "assigned", order.id)
             if payload.deadline is not None and payload.deadline <= utcnow():
                 raise HTTPException(422, "Новый срок должен быть в будущем")
             for key, value in changes.items():
-                if key not in ["assignee_id", "brigade_id"]:
+                if key not in ["assignee_id", "brigade_id", "responsible_id"]:
                     setattr(order, key, value)
                 audit_fields.append(f"{key}={iso(value) if isinstance(value, datetime) else value}")
             order.version += 1
@@ -622,6 +648,7 @@ def create_app(database_url=None, seed=True, monitor=True):
         else:
             raise HTTPException(422, "Неизвестное действие с нарядом")
         order = get_order(db, id_, user, lock=True)
+        require_responsible(user, order)
         command_hash = json_hash(payload.model_dump())
 
         def perform():
@@ -681,7 +708,7 @@ def create_app(database_url=None, seed=True, monitor=True):
                 append_submission_decision(db, order, user.id, action, payload.score if action == "close" else None, payload.reason or payload.comment)
             audit(db, order, action, user.id, old_status, payload.reason or payload.comment)
             notice = "Наряд добавлен в очередь" if action == "queue" else "Статус наряда изменён"
-            notify(db, [order.assignee_id, order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
+            notify(db, participant_ids(db, order) + [order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
             return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
@@ -690,6 +717,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
         require_role(user, "worker")
         order = get_order(db, id_, user, lock=True)
+        require_responsible(user, order)
         command_hash = json_hash(payload.model_dump())
 
         def perform():
@@ -725,6 +753,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             order.status = "completed"
             order.version += 1
             audit(db, order, "complete", user.id, "in_progress", payload.work_done)
+            notify(db, participant_ids(db, order) + [order.master_id], "Статус наряда изменён", f"{order.number}: in_progress → completed", "status", order.id)
             order.ai_review = None
             attempt = append_submission(db, order, user.id, submission_payload, writeoffs)
             job = enqueue_job(db, attempt)

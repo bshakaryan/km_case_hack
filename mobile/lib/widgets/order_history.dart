@@ -81,6 +81,16 @@ class OrderHistory extends StatelessWidget {
           ),
           if (assignment['brigade_name'] != null)
             _text('Бригада: ${assignment['brigade_name']}'),
+          if (assignment['brigade_id'] != null) ...[
+            for (final participant in assignmentParticipants(assignment))
+              _text(
+                '${participant.isResponsible ? 'Ответственный' : 'Участник'}: ${participant.name}',
+              ),
+            if (assignment['participants_source'] != 'live')
+              _uncertainty(
+                'Полный прежний состав бригады неизвестен. Текущий справочник не восстанавливает это назначение.',
+              ),
+          ],
         ],
       ),
     );

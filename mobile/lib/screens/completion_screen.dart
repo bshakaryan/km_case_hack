@@ -60,6 +60,31 @@ class _CompletionScreenState extends State<CompletionScreen>
   String? _draftError;
   String _draftState = FormDraftState.editing;
   String? _operation;
+  Json? _assignmentSnapshot;
+
+  bool get _canComplete {
+    final user = widget.controller.user;
+    if (user?.isWorker != true || !widget.order.isResponsible(user?.id)) {
+      return false;
+    }
+    final current = widget.controller.orders
+        .where((order) => order.id == widget.order.id)
+        .firstOrNull;
+    return current == null || current.isResponsible(user?.id);
+  }
+
+  void _ensureResponsible() {
+    if (!_canComplete) {
+      throw const ApiException(
+        'Общий результат сдаёт только ответственный. Черновик сохранён.',
+        403,
+      );
+    }
+  }
+
+  void _controllerChanged() {
+    if (mounted) setState(() {});
+  }
 
   Json _draftData() => {
     'form_schema': 1,
@@ -72,6 +97,7 @@ class _CompletionScreenState extends State<CompletionScreen>
     'done': _done,
     'error': _error,
     'operation': _operation,
+    'assignment_snapshot': _assignmentSnapshot,
     'materials': _materials
         .map(
           (line) => {'material': line.material, 'quantity': line.quantity.text},
@@ -129,6 +155,8 @@ class _CompletionScreenState extends State<CompletionScreen>
           'done',
         ].any((key) => data[key] is! bool) ||
         (data['error'] != null && data['error'] is! String) ||
+        (data['assignment_snapshot'] != null &&
+            data['assignment_snapshot'] is! Map) ||
         !const {null, 'photo', 'complete'}.contains(data['operation']) ||
         data['materials'] is! List ||
         data['photos'] is! List ||
@@ -136,6 +164,35 @@ class _CompletionScreenState extends State<CompletionScreen>
       throw const FormatException(
         'Сохранённая форма повреждена. Исходный черновик оставлен без изменений.',
       );
+    }
+    final snapshot = data['assignment_snapshot'];
+    if (snapshot is Map) {
+      final participants = snapshot['participants'];
+      if (snapshot['id'] is! int ||
+          (snapshot['id'] as int) < 1 ||
+          snapshot['assignee_id'] is! int ||
+          snapshot['assignee_name'] is! String ||
+          (snapshot['brigade_id'] != null && snapshot['brigade_id'] is! int) ||
+          (participants != null && participants is! List) ||
+          !const {
+            'live',
+            'legacy_snapshot',
+          }.contains(snapshot['participants_source'])) {
+        throw const FormatException('Состав назначения в черновике повреждён.');
+      }
+      if (participants is List &&
+          participants.any(
+            (row) =>
+                row is! Map ||
+                row['employee_id'] is! int ||
+                row['name'] is! String ||
+                row['is_responsible'] is! bool ||
+                !const {'live', 'legacy_snapshot'}.contains(row['source']),
+          )) {
+        throw const FormatException(
+          'Участник назначения в черновике повреждён.',
+        );
+      }
     }
     for (final row in data['materials'] as List) {
       if (row is! Map ||
@@ -211,6 +268,9 @@ class _CompletionScreenState extends State<CompletionScreen>
         _done = data['done'] == true;
         _operation = data['operation'] as String?;
         _error = data['error'] as String?;
+        _assignmentSnapshot = data['assignment_snapshot'] is Map
+            ? Map<String, dynamic>.from(data['assignment_snapshot'] as Map)
+            : null;
         _draftState = _uncertain ? FormDraftState.uncertain : draft.state;
         // A restored draft never takes the newer order's basis.
         _basis = draft.basis ?? const OrderWriteBasis();
@@ -356,9 +416,19 @@ class _CompletionScreenState extends State<CompletionScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.controller.addListener(_controllerChanged);
     _draftApi = widget.controller.api;
     _draftOwnerId = widget.controller.user?.id;
     _basis = widget.controller.captureOrderBasis(widget.order);
+    _assignmentSnapshot = {
+      'id': widget.order.id,
+      'assignee_id': widget.order.assigneeId,
+      'assignee_name': widget.order.assigneeName,
+      'brigade_id': widget.order.data['brigade_id'],
+      if (widget.order.data.containsKey('participants'))
+        'participants': widget.order.data['participants'],
+      'participants_source': widget.order.participantsSource,
+    };
     _serverPhotos = _maps(widget.order.data['photos'])
         .where((photo) => photo['kind'] == 'after')
         .toList();
@@ -371,7 +441,11 @@ class _CompletionScreenState extends State<CompletionScreen>
     }
     _work.addListener(_changed);
     _comment.addListener(_changed);
-    unawaited(_restoreDraft());
+    if (_canComplete) {
+      unawaited(_restoreDraft());
+    } else {
+      _draftLoading = false;
+    }
   }
 
   void _changed() {
@@ -398,6 +472,7 @@ class _CompletionScreenState extends State<CompletionScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.controller.removeListener(_controllerChanged);
     _disposing = true;
     _autosaveRequested = false;
     // Capture the latest edit while text controllers still exist. The frozen
@@ -416,6 +491,7 @@ class _CompletionScreenState extends State<CompletionScreen>
 
   bool get _uploading => _photos.any((photo) => photo.uploading);
   bool get _locked =>
+      !_canComplete ||
       _draftLoading ||
       _leaving ||
       _draftSession == null ||
@@ -537,7 +613,8 @@ class _CompletionScreenState extends State<CompletionScreen>
   }
 
   Future<void> _upload(_PendingPhoto photo) async {
-    if (photo.uploading ||
+    if (!_canComplete ||
+        photo.uploading ||
         photo.uploaded ||
         photo.uncertain ||
         _sending ||
@@ -555,6 +632,7 @@ class _CompletionScreenState extends State<CompletionScreen>
       _operation = 'photo';
       if (!await _saveDraft(state: FormDraftState.submitting)) return;
       _ensureDraftContext();
+      _ensureResponsible();
       final commandId = await widget.controller.uploadPhoto(
         widget.order.id,
         photo.bytes,
@@ -694,6 +772,7 @@ class _CompletionScreenState extends State<CompletionScreen>
       _operation = 'complete';
       if (!await _saveDraft(state: FormDraftState.submitting)) return;
       _ensureDraftContext();
+      _ensureResponsible();
       final result = await widget.controller.complete(widget.order.id, {
         'work_done': _work.text.trim(),
         'fault_code_id': _faultId,
@@ -858,6 +937,17 @@ class _CompletionScreenState extends State<CompletionScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (!_canComplete) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Отчёт о выполнении')),
+        body: const Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Общий результат сдаёт только ответственный. Для участника доступны карточка и фотографии. Существующий черновик сохранён без изменений.',
+          ),
+        ),
+      );
+    }
     final faults = _maps(widget.controller.reference['fault_codes']);
     final hasPrevious = widget.order.data['completion'] is Map;
     return PopScope(
@@ -902,6 +992,24 @@ class _CompletionScreenState extends State<CompletionScreen>
                         fontWeight: FontWeight.w700,
                       ),
                     ),
+                    if (_assignmentSnapshot?['brigade_id'] != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Ответственный при открытии: ${_assignmentSnapshot?['assignee_name'] ?? 'Не зафиксирован'}',
+                      ),
+                      for (final participant in assignmentParticipants(
+                        _assignmentSnapshot!,
+                      ))
+                        Text(
+                          '${participant.isResponsible ? 'Ответственный' : 'Участник'}: ${participant.name}',
+                        ),
+                      if (_assignmentSnapshot?['participants_source'] != 'live')
+                        const Text('Полный прежний состав бригады неизвестен.'),
+                    ] else if (_assignmentSnapshot == null &&
+                        widget.order.isBrigade)
+                      const Text(
+                        'Состав назначения в этом старом черновике не зафиксирован.',
+                      ),
                     const SizedBox(height: 4),
                     Text(widget.order.equipmentName),
                     const SizedBox(height: 16),

@@ -25,11 +25,21 @@ class OverviewScreen extends StatelessWidget {
     final overdue = active.where((o) => o.isOverdue).toList();
     final master = c.user!.isMaster;
     if (c.user!.isWorker) {
-      final working = active
+      final personal = active
+          .where((o) => o.isResponsible(c.user!.id))
+          .toList();
+      final assisting = active
+          .where(
+            (o) => !o.isResponsible(c.user!.id) && o.hasParticipant(c.user!.id),
+          )
+          .toList();
+      final working = personal
           .where((o) => {'in_progress', 'paused'}.contains(o.status))
           .toList();
       final incoming =
-          active.where((o) => {'issued', 'rework'}.contains(o.status)).toList()
+          personal
+              .where((o) => {'issued', 'rework'}.contains(o.status))
+              .toList()
             ..sort(
               (a, b) => (a.priority == 'emergency' ? 0 : 1).compareTo(
                 b.priority == 'emergency' ? 0 : 1,
@@ -38,7 +48,9 @@ class OverviewScreen extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (urgent.any((o) => o.status == 'issued'))
+          if (personal.any(
+            (o) => o.priority == 'emergency' && o.status == 'issued',
+          ))
             const Padding(
               padding: EdgeInsets.only(bottom: 16),
               child: InfoPanel(
@@ -87,16 +99,39 @@ class OverviewScreen extends StatelessWidget {
               onPressed: () => onFilter('queue'),
               icon: const Icon(Icons.format_list_numbered),
               label: Text(
-                'Моя очередь к началу · ${active.where((o) => {'accepted', 'queued'}.contains(o.status)).length}',
+                'Моя очередь к началу · ${personal.where((o) => {'accepted', 'queued'}.contains(o.status)).length}',
               ),
             ),
           ),
-          SectionTitle('На проверке · ${review.length}'),
-          for (final o in review.take(3))
+          SectionTitle(
+            'На проверке · ${personal.where((o) => o.status == 'ai_review').length}',
+          ),
+          for (final o
+              in personal.where((o) => o.status == 'ai_review').take(3))
             OrderCard(order: o, onTap: () => onOrder(o.id)),
-          if (review.isEmpty)
+          if (!personal.any((o) => o.status == 'ai_review'))
             const Text(
               'Сданных работ, ожидающих приёмки, пока нет.',
+              style: TextStyle(color: muted),
+            ),
+          SectionTitle('Участие в бригаде · ${assisting.length}'),
+          if (assisting.isNotEmpty)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: InfoPanel(
+                'Вы можете читать общий наряд и добавлять фото. Ход работы и сдачу отчёта ведёт ответственный.',
+                icon: Icons.groups_outlined,
+              ),
+            ),
+          for (final o in assisting)
+            OrderCard(
+              order: o,
+              onTap: () => onOrder(o.id),
+              nextAction: 'Открыть общий наряд',
+            ),
+          if (assisting.isEmpty)
+            const Text(
+              'Нет активных нарядов, где вы участник бригады.',
               style: TextStyle(color: muted),
             ),
         ],

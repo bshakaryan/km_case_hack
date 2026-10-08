@@ -23,6 +23,18 @@ class WorkOrder {
   final Json data;
   Json toJson() => Map<String, dynamic>.from(data);
 
+  int? get assigneeId => (data['assignee_id'] as num?)?.toInt();
+  bool get isBrigade => data['brigade_id'] != null;
+  String get participantsSource =>
+      data['participants_source'] == 'live' ? 'live' : 'legacy_snapshot';
+  List<OrderParticipant> get participants => assignmentParticipants(data);
+  bool isResponsible(int? userId) =>
+      userId != null && id > 0 && assigneeId == userId;
+  bool hasParticipant(int? userId) =>
+      userId != null &&
+      id > 0 &&
+      participants.any((participant) => participant.employeeId == userId);
+
   List<Json> get assignmentHistory => _historyRows(data['assignment_history']);
   List<Json> get submissionAttempts =>
       _historyRows(data['submission_attempts']);
@@ -90,4 +102,51 @@ class WorkOrder {
   bool get isOverdue => data['is_overdue'] == true;
   double get normalHours => (data['normal_hours'] as num).toDouble();
   double? get score => (data['score'] as num?)?.toDouble();
+}
+
+/// Only the assignment snapshot can grant crew access. Current references and
+/// requested responsible_id are never treated as a confirmed assignment.
+class OrderParticipant {
+  const OrderParticipant({
+    required this.employeeId,
+    required this.name,
+    required this.isResponsible,
+    required this.source,
+  });
+
+  final int employeeId;
+  final String name;
+  final bool isResponsible;
+  final String source;
+}
+
+List<OrderParticipant> assignmentParticipants(Json assignment) {
+  if ((assignment['id'] as num?)?.toInt().isNegative == true) return [];
+  final rows = assignment['participants'];
+  if (rows is List) {
+    return rows
+        .whereType<Map>()
+        .where((row) {
+          return row['employee_id'] is int && (row['employee_id'] as int) > 0;
+        })
+        .map(
+          (row) => OrderParticipant(
+            employeeId: row['employee_id'] as int,
+            name: '${row['name'] ?? ''}',
+            isResponsible: row['is_responsible'] == true,
+            source: row['source'] == 'live' ? 'live' : 'legacy_snapshot',
+          ),
+        )
+        .toList();
+  }
+  final assigneeId = (assignment['assignee_id'] as num?)?.toInt();
+  if (assigneeId == null || assigneeId < 1) return [];
+  return [
+    OrderParticipant(
+      employeeId: assigneeId,
+      name: '${assignment['assignee_name'] ?? ''}',
+      isResponsible: true,
+      source: 'legacy_snapshot',
+    ),
+  ];
 }

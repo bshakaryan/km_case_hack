@@ -48,6 +48,8 @@ import type {
 } from "./model";
 import { Empty, ErrorBox, Loading, Priority, SectionTitle, Status } from "./ui";
 import { OrderBoard, CreateOrder, OrderDialog } from "./Orders";
+import { workerOrderGroups } from "./brigade";
+import { WorkerOrderSections } from "./WorkerOrderSections";
 import {
   AnalyticsPage,
   ReferencePage,
@@ -455,15 +457,9 @@ export default function App() {
   const unread = notices.filter((n) => !n.read).length;
   const attention = attentionCounts(orders);
   const team = shiftTeam(employees);
-  const currentWork = orders.filter((o) =>
-    ["in_progress", "paused"].includes(o.status),
-  );
-  const incoming = orders
-    .filter((o) => ["issued", "accepted", "rework"].includes(o.status))
-    .sort(
-      (a, b) =>
-        Number(b.priority === "emergency") - Number(a.priority === "emergency"),
-    );
+  const workerGroups = workerOrderGroups(orders, user?.id ?? "");
+  const currentWork = workerGroups.current;
+  const incoming = workerGroups.incoming;
   function openCreate(context: CreateContext = {}) {
     setCreateContext(context);
     setCreate(true);
@@ -833,6 +829,11 @@ export default function App() {
                         </div>
                       </section>
                     )}
+                    <WorkerOrderSections
+                      queue={workerGroups.queue}
+                      assisting={workerGroups.assisting}
+                      onSelect={setSelected}
+                    />
                   </>
                 ) : (
                   <>

@@ -39,6 +39,8 @@ class _CreateController extends AppController {
         'id': 6,
         'name': 'Иван Тестовый',
         'specialty': 'Слесарь',
+        'role': 'worker',
+        'brigade_id': 3,
         'on_shift': true,
         'status': 'free',
         'current_order': null,
@@ -201,6 +203,84 @@ Future<void> _fillTask(WidgetTester tester) async {
 }
 
 void main() {
+  for (final explicitResponsible in [false, true]) {
+    testWidgets(
+      'Brigade draft restores ${explicitResponsible ? 'chosen' : 'legacy automatic'} responsible',
+      (tester) async {
+        final controller = _CreateController();
+        addTearDown(controller.dispose);
+        final session = await controller.openFormDraft(FormDraftKind.create);
+        await session.save(
+          FormDraft(
+            kind: FormDraftKind.create,
+            data: _savedDraftData({
+              'title': 'Бригадный ремонт',
+              'description': 'Проверить насос всей бригадой.',
+              'area_id': 1,
+              'equipment_id': 8,
+              'step': 1,
+              'by_brigade': true,
+              'brigade_id': 3,
+              if (explicitResponsible) 'responsible_id': 6,
+            }),
+          ),
+        );
+        await _open(tester, controller);
+        expect(find.text('Ответственный за сдачу'), findsOneWidget);
+        expect(
+          find.text(
+            explicitResponsible
+                ? 'Иван Тестовый'
+                : 'Автоматический выбор сервера',
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.widgetWithText(FilledButton, 'Выдать наряд'));
+        await tester.pumpAndSettle();
+        final payload = controller.submissions.single;
+        expect(payload['brigade_id'], 3);
+        expect(payload.containsKey('assignee_id'), false);
+        expect(payload.containsKey('responsible_id'), explicitResponsible);
+        if (explicitResponsible) expect(payload['responsible_id'], 6);
+      },
+    );
+  }
+
+  testWidgets(
+    'Selecting a brigade responsible persists the choice before sending',
+    (tester) async {
+      final store = MemoryLocalStore();
+      final controller = _CreateController(store: store);
+      addTearDown(controller.dispose);
+      final session = await controller.openFormDraft(FormDraftKind.create);
+      await session.save(
+        FormDraft(
+          kind: FormDraftKind.create,
+          data: _savedDraftData({
+            'title': 'Бригадный ремонт',
+            'description': 'Проверить насос всей бригадой.',
+            'area_id': 1,
+            'equipment_id': 8,
+            'step': 1,
+            'by_brigade': true,
+            'brigade_id': 3,
+          }),
+        ),
+      );
+      await _open(tester, controller);
+      await tester.ensureVisible(find.text('Ответственный за сдачу'));
+      await tester.tap(find.text('Ответственный за сдачу'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Иван Тестовый'));
+      await tester.pumpAndSettle();
+      final saved = await store.getFormDraft(
+        localScopeKey(controller.api.baseUrl, 1, 'draft:create:new'),
+      );
+      expect(FormDraft.fromJson(saved!).data['responsible_id'], 6);
+      expect(controller.submissions, isEmpty);
+    },
+  );
+
   testWidgets(
     'Retrying a rejected photo never repeats creation or confirmed photos',
     (tester) async {

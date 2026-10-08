@@ -198,6 +198,9 @@ def test_manager_cannot_use_master_key_to_create(client, master, worker):
 
 def legacy_json_hash(schema, payload):
     normalized = schema.model_validate(payload).model_dump()
+    if schema is OrderCreate:
+        # Emulate the frozen pre-D04 request shape, before responsible_id.
+        normalized.pop("responsible_id", None)
     encoded = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

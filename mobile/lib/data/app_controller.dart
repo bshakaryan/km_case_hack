@@ -1661,6 +1661,9 @@ class AppController extends ChangeNotifier {
       'equipment_name': nameFrom('equipment', data['equipment_id']),
       'assignee_id': data['assignee_id'],
       'assignee_name': assigneeName(data['assignee_id']),
+      'brigade_id': data['brigade_id'],
+      // Requested responsible and current roster are not a server receipt.
+      'participants': <Json>[],
       'priority': data['priority'] ?? 'normal',
       'status': 'issued',
       'comment': data['comment'] ?? '',
@@ -1729,6 +1732,16 @@ class AppController extends ChangeNotifier {
     double? score,
     OrderWriteBasis? basis,
   }) async {
+    if (const {
+      'accept',
+      'queue',
+      'reject',
+      'start',
+      'pause',
+      'resume',
+    }.contains(action)) {
+      _requireResponsibleForKnownOrder(id);
+    }
     final result = await _save(
       kind: OutboxKind.transition,
       payload: {'action': action, 'reason': reason, 'score': score},
@@ -1762,6 +1775,7 @@ class AppController extends ChangeNotifier {
     Json data, {
     OrderWriteBasis? basis,
   }) async {
+    _requireResponsibleForKnownOrder(id);
     final result = await _save(
       kind: OutboxKind.complete,
       payload: data,
@@ -1780,6 +1794,18 @@ class AppController extends ChangeNotifier {
       },
     );
     return result as WorkOrder;
+  }
+
+  void _requireResponsibleForKnownOrder(int id) {
+    final current = orders.where((order) => order.id == id).firstOrNull;
+    if (user?.isWorker == true &&
+        current != null &&
+        !current.isResponsible(user!.id)) {
+      throw const ApiException(
+        'Действие доступно только ответственному за наряд.',
+        403,
+      );
+    }
   }
 
   // This gateway has no client-command key: never enqueue or replay its POST.

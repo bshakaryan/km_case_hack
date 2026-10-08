@@ -4,8 +4,8 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from sqlalchemy import select
-from .models import AIReviewJob, Area, Brigade, Employee, Equipment, IntegrationLog, Material, MaterialWriteoff, Notification, Order, OrderAssignment, OrderEvent, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
+from sqlalchemy import func, or_, select
+from .models import AIReviewJob, Area, Brigade, Employee, Equipment, IntegrationLog, Material, MaterialWriteoff, Notification, Order, OrderAssignment, OrderAssignmentParticipant, OrderEvent, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
 from .ai_jobs import job_dict
 from .push import enqueue_push
 
@@ -86,7 +86,70 @@ def effective_queue_statuses(db):
     return overrides
 
 
-def order_dict(db, order, detail=False, refs=None, positions=None, statuses=None, user=None):
+def worker_order_access(employee_id):
+    """Only the latest immutable roster grants access, even after close.
+
+    The known responsible also supports manually inserted legacy ORM orders
+    without a history/roster. Historical membership never grants current access.
+    """
+    latest_sequence = select(func.max(OrderAssignment.sequence)).where(
+        OrderAssignment.order_id == Order.id).correlate(Order).scalar_subquery()
+    member = select(OrderAssignmentParticipant.id).join(OrderAssignment,
+        OrderAssignment.id == OrderAssignmentParticipant.assignment_id).where(
+        OrderAssignment.order_id == Order.id,
+        OrderAssignment.sequence == latest_sequence,
+        OrderAssignment.assignee_id == Order.assignee_id,
+        OrderAssignment.brigade_id.is_not_distinct_from(Order.brigade_id),
+        OrderAssignment.assigned_at == Order.assigned_at,
+        OrderAssignmentParticipant.employee_id == employee_id).exists()
+    return or_(Order.assignee_id == employee_id, member)
+
+
+def participant_dicts(db, assignment, rows=None, fallback_assignee=None):
+    assignee_id = assignment.assignee_id if assignment else fallback_assignee
+    rows = list(rows) if rows is not None else list(db.scalars(select(OrderAssignmentParticipant)
+        .where(OrderAssignmentParticipant.assignment_id == assignment.id)
+        .order_by(OrderAssignmentParticipant.employee_id))) if assignment else []
+    if not rows:
+        employee = db.get(Employee, assignee_id)
+        return [{"employee_id": assignee_id, "name": employee.name,
+            "is_responsible": True, "source": "legacy_snapshot"}]
+    return [{"employee_id": row.employee_id, "name": row.name,
+        "is_responsible": row.employee_id == assignee_id, "source": row.source}
+        for row in rows]
+
+
+def current_participants(db, orders):
+    """Two batch queries for a list, rather than two queries per order."""
+    if not orders:
+        return {}
+    latest = {}
+    for assignment in db.scalars(select(OrderAssignment).where(
+        OrderAssignment.order_id.in_([order.id for order in orders])).order_by(OrderAssignment.sequence)):
+        latest[assignment.order_id] = assignment
+    for order in orders:
+        row = latest.get(order.id)
+        if row and (row.assignee_id != order.assignee_id or row.brigade_id != order.brigade_id
+            or aware(row.assigned_at) != aware(order.assigned_at)):
+            # Direct legacy ORM writes can lack a matching history entry; never
+            # let an inconsistent old roster grant or display invented access.
+            latest.pop(order.id)
+    grouped = defaultdict(list)
+    if latest:
+        for row in db.scalars(select(OrderAssignmentParticipant).where(
+            OrderAssignmentParticipant.assignment_id.in_([item.id for item in latest.values()]))
+            .order_by(OrderAssignmentParticipant.employee_id)):
+            grouped[row.assignment_id].append(row)
+    return {order.id: participant_dicts(db, latest.get(order.id),
+        grouped.get(latest[order.id].id, []) if order.id in latest else [], order.assignee_id)
+        for order in orders}
+
+
+def participant_ids(db, order):
+    return [row["employee_id"] for row in current_participants(db, [order])[order.id]]
+
+
+def order_dict(db, order, detail=False, refs=None, positions=None, statuses=None, user=None, participants=None):
     refs = refs or {}
     area = refs.get("areas", {}).get(order.area_id) or db.get(Area, order.area_id)
     equipment = refs.get("equipment", {}).get(order.equipment_id) or db.get(Equipment, order.equipment_id)
@@ -104,6 +167,8 @@ def order_dict(db, order, detail=False, refs=None, positions=None, statuses=None
     else:
         result["queue_position"] = None
     result.update(area_name=area.name, equipment_name=equipment.name, assignee_name=employee.name, is_overdue=order.status not in EXECUTION_FINISHED and aware(order.deadline) < utcnow())
+    result["participants"] = participants if participants is not None else current_participants(db, [order])[order.id]
+    result["participants_source"] = "live" if all(row["source"] == "live" for row in result["participants"]) else "legacy_snapshot"
     if detail:
         result["events"] = [{"id": event.id, "action": event.action, "from_status": event.from_status, "to_status": event.to_status, "actor_name": db.get(Employee, event.actor_id).name, "created_at": iso(event.created_at), "comment": event.comment} for event in db.scalars(select(OrderEvent).where(OrderEvent.order_id == order.id).order_by(OrderEvent.created_at, OrderEvent.id))]
         result["photos"] = [photo_dict(db, p) for p in db.scalars(select(Photo).where(Photo.order_id == order.id).order_by(Photo.id))]
@@ -120,7 +185,7 @@ def end_current_assignment(db, order, ended_at):
         latest.ended_at = ended_at
 
 
-def append_assignment(db, order, actor_id):
+def append_assignment(db, order, actor_id, participants=None):
     """Caller holds the order lock, or has just inserted the new order."""
     latest = db.scalar(select(OrderAssignment).where(OrderAssignment.order_id == order.id).order_by(OrderAssignment.sequence.desc()).limit(1))
     if latest is not None and latest.ended_at is None:
@@ -129,6 +194,12 @@ def append_assignment(db, order, actor_id):
         assignee_id=order.assignee_id, brigade_id=order.brigade_id, assigned_at=order.assigned_at,
         assigned_by_id=actor_id, source="live")
     db.add(assignment)
+    db.flush()
+    # Production callers provide the roster locked and resolved in the same
+    # transaction. Conservative singleton for direct legacy/helper callers.
+    participants = participants if participants is not None else [db.get(Employee, order.assignee_id)]
+    db.add_all([OrderAssignmentParticipant(assignment_id=assignment.id,
+        employee_id=person.id, name=person.name, source="live") for person in participants])
     db.flush()
     return assignment
 
@@ -159,12 +230,20 @@ def order_history(db, order_id, user=None, status=None):
         row = db.get(model, id_) if id_ is not None else None
         return row.name if row else None
 
+    assignment_rows = list(db.scalars(select(OrderAssignment).where(OrderAssignment.order_id == order_id).order_by(OrderAssignment.sequence)))
+    rosters = defaultdict(list)
+    if assignment_rows:
+        for row in db.scalars(select(OrderAssignmentParticipant).where(
+            OrderAssignmentParticipant.assignment_id.in_([item.id for item in assignment_rows])).order_by(OrderAssignmentParticipant.employee_id)):
+            rosters[row.assignment_id].append(row)
     assignments = [{"id": row.id, "number": row.sequence, "source": row.source,
         "assignee_id": row.assignee_id, "assignee_name": name(Employee, row.assignee_id),
         "brigade_id": row.brigade_id, "brigade_name": name(Brigade, row.brigade_id),
         "assigned_by_id": row.assigned_by_id, "assigned_by_name": name(Employee, row.assigned_by_id),
-        "assigned_at": iso(row.assigned_at), "ended_at": iso(row.ended_at)}
-        for row in db.scalars(select(OrderAssignment).where(OrderAssignment.order_id == order_id).order_by(OrderAssignment.sequence))]
+        "assigned_at": iso(row.assigned_at), "ended_at": iso(row.ended_at),
+        "participants": participant_dicts(db, row, rosters[row.id]),
+        "participants_source": "live" if rosters[row.id] and all(item.source == "live" for item in rosters[row.id]) else "legacy_snapshot"}
+        for row in assignment_rows]
     attempts = []
     rows = list(db.scalars(select(SubmissionAttempt).where(SubmissionAttempt.order_id == order_id).order_by(SubmissionAttempt.sequence)))
     for row in rows:

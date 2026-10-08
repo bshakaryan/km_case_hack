@@ -27,7 +27,7 @@ def without_versions(state):
     return {name: [{key: value for key, value in row.items()
         if not (name == "orders" and key == "version")
         and not (name == "client_commands" and key in {"order_id", "order_version"})} for row in rows]
-        for name, rows in state.items()}
+        for name, rows in state.items() if name != "order_assignment_participants"}
 
 
 def check_preservation(engine):

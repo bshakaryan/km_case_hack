@@ -35,7 +35,10 @@ class _OrdersScreenState extends State<OrdersScreen> {
         'all' => true,
         'active' => !terminal(o),
         'history' => terminal(o),
-        'queue' => {'accepted', 'queued'}.contains(o.status),
+        'queue' =>
+          {'accepted', 'queued'}.contains(o.status) &&
+              (!widget.controller.user!.isWorker ||
+                  o.isResponsible(widget.controller.user!.id)),
         'emergency' => o.priority == 'emergency' && !terminal(o),
         'overdue' => o.isOverdue,
         _ => o.status == filter,
@@ -44,7 +47,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
           (widget.assigneeId == null ||
               o.data['assignee_id'] == widget.assigneeId) &&
           (area == null || o.data['area_id'] == area) &&
-          '${o.number} ${o.title} ${o.description} ${o.equipmentName} ${o.assigneeName}'
+          '${o.number} ${o.title} ${o.description} ${o.equipmentName} ${o.assigneeName} ${o.participants.map((p) => p.name).join(' ')}'
               .toLowerCase()
               .contains(query.toLowerCase());
     }).toList();

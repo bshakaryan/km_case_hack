@@ -22,6 +22,7 @@ class OrderCreate(Payload):
     equipment_id: int = Field(gt=0)
     assignee_id: int | None = Field(default=None, gt=0)
     brigade_id: int | None = Field(default=None, gt=0)
+    responsible_id: int | None = Field(default=None, gt=0)
     priority: Priority = "normal"
     deadline: datetime
     normal_hours: float = Field(default=2, gt=0, le=1000)
@@ -38,6 +39,8 @@ class OrderCreate(Payload):
     def assignment(self):
         if bool(self.assignee_id) == bool(self.brigade_id):
             raise ValueError("Укажите одного исполнителя или одну бригаду")
+        if "responsible_id" in self.model_fields_set and self.brigade_id is None:
+            raise ValueError("Ответственный выбирается только вместе с бригадой")
         return self
 
 
@@ -45,6 +48,7 @@ class OrderPatch(Payload):
     description: str | None = Field(default=None, min_length=1, max_length=5000)
     assignee_id: int | None = Field(default=None, gt=0)
     brigade_id: int | None = Field(default=None, gt=0)
+    responsible_id: int | None = Field(default=None, gt=0)
     priority: Priority | None = None
     deadline: datetime | None = None
     comment: str | None = Field(default=None, max_length=3000)
@@ -60,6 +64,8 @@ class OrderPatch(Payload):
     def assignment(self):
         if self.assignee_id and self.brigade_id:
             raise ValueError("Укажите исполнителя или бригаду")
+        if "responsible_id" in self.model_fields_set and "brigade_id" not in self.model_fields_set:
+            raise ValueError("Изменение ответственного требует явного назначения бригады")
         if not self.model_fields_set:
             raise ValueError("Нет изменений")
         if any(getattr(self, key) is None for key in self.model_fields_set):

@@ -3,6 +3,7 @@ import { formatDate, number } from "./model";
 import type { OrderDetail, RefItem, SubmissionAttempt } from "./model";
 import { Photo } from "./ui";
 import { AiJobStatus, showAiReview } from "./AiReviewJob";
+import { AssignmentParticipants } from "./AssignmentParticipants";
 
 function AttemptPhotos({ photos }: { photos: SubmissionAttempt["photos"] }) {
   const [open, setOpen] = useState(false);
@@ -84,6 +85,7 @@ export function OrderHistory({
                   {assignment.brigade_name &&
                     ` · Бригада: ${assignment.brigade_name}`}
                 </p>
+                <AssignmentParticipants assignment={assignment} />
               </article>
             ))}
           </section>

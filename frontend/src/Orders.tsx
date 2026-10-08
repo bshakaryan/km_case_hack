@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { OrderHistory } from "./OrderHistory";
+import { AssignmentParticipants } from "./AssignmentParticipants";
+import {
+  assignmentEditChanges,
+  brigadeWorkers,
+  workerOrderPermissions,
+} from "./brigade";
 import { draftFieldSetter, FormDraftNotice, useFormDraft } from "./FormDraft";
 import {
   recoverPhase,
@@ -215,6 +221,7 @@ export function OrderBoard({
               o.description,
               o.equipment_name,
               o.assignee_name,
+              ...(o.participants?.map((member) => member.name) ?? []),
               o.area_name,
             ].some((v) => v?.toLocaleLowerCase().includes(q))
           )
@@ -636,6 +643,9 @@ export function OrderBoard({
                         </span>
                         {o.assignee_name || "Не назначен"}
                       </div>
+                      {o.brigade_id != null && (
+                        <small>Ответственный · бригадный наряд</small>
+                      )}
                     </td>
                     <td>
                       <Priority value={o.priority} />
@@ -725,10 +735,22 @@ function OrderCard({
       </div>
       <div className="card-substatus">
         <Status value={o.status} />
+        {o.brigade_id != null && (
+          <span className="outlined-tag">
+            <Users size={13} /> Бригадный
+          </span>
+        )}
         {o.is_overdue && <span className="overdue">Просрочен</span>}
       </div>
       <div className="order-card-bottom">
-        <span className="card-assignee">
+        <span
+          className="card-assignee"
+          title={
+            o.brigade_id != null
+              ? `Ответственный: ${o.assignee_name}`
+              : o.assignee_name
+          }
+        >
           <span className="avatar tiny-avatar">
             {initials(o.assignee_name || "?")}
           </span>
@@ -759,6 +781,7 @@ type CreateFormFields = {
   equipment_id: string;
   assignee_id: string;
   brigade_id: string;
+  responsible_id: string;
   priority: string;
   deadline: string;
   normal_hours: string;
@@ -803,6 +826,8 @@ export function recoverCreateDraft(stored: CreateFormDraft) {
     ) ||
     ![1, 2].includes(stored.step) ||
     !["employee", "brigade"].includes(stored.assignment) ||
+    (stored.form.responsible_id !== undefined &&
+      typeof stored.form.responsible_id !== "string") ||
     typeof stored.creationPhotoConflict !== "boolean" ||
     (stored.created !== null &&
       (!stored.created ||
@@ -817,6 +842,7 @@ export function recoverCreateDraft(stored: CreateFormDraft) {
     );
   return {
     ...stored,
+    form: { ...stored.form, responsible_id: stored.form.responsible_id ?? "" },
     phase: recoverPhase(stored.phase),
     photos: recoverPhotos(stored.photos),
   };
@@ -928,6 +954,7 @@ export function CreateOrder({
       assignee_id:
         initialAssigneeId === undefined ? "" : String(initialAssigneeId),
       brigade_id: "",
+      responsible_id: "",
       priority: "normal",
       deadline: defaultDeadline(),
       normal_hours: "2",
@@ -964,11 +991,13 @@ export function CreateOrder({
   const selectedEmployee = employees.find(
     (person) => String(person.id) === form.assignee_id,
   );
+  const eligibleBrigadeWorkers = brigadeWorkers(employees, form.brigade_id);
   const update = (key: string, value: string) =>
     setForm((current) => ({
       ...current,
       [key]: value,
       ...(key === "area_id" ? { equipment_id: "" } : {}),
+      ...(key === "brigade_id" ? { responsible_id: "" } : {}),
     }));
   const close = () => {
     if (requestLock.current || busy) return;
@@ -1145,7 +1174,23 @@ export function CreateOrder({
             throw new Error(
               "Выбранный исполнитель недоступен на смене. Выберите другого сотрудника.",
             );
-        } else if (!form.brigade_id) throw new Error("Выберите бригаду.");
+        } else {
+          if (!form.brigade_id) throw new Error("Выберите бригаду.");
+          const fresh = await api<Employee[]>("/employees");
+          if (!sessionValid()) return;
+          const eligible = brigadeWorkers(fresh, form.brigade_id);
+          if (!eligible.length)
+            throw new Error("В выбранной бригаде нет работников на смене.");
+          if (
+            form.responsible_id &&
+            !eligible.some(
+              (person) => String(person.id) === form.responsible_id,
+            )
+          )
+            throw new Error(
+              "Ответственный больше не входит в состав бригады на смене. Выберите его заново.",
+            );
+        }
         await draft.write((current) => ({ ...current, phase: "submitting" }));
         if (!sessionValid()) return;
         creating = true;
@@ -1159,6 +1204,10 @@ export function CreateOrder({
             assignment === "employee" ? idValue(form.assignee_id) : undefined,
           brigade_id:
             assignment === "brigade" ? idValue(form.brigade_id) : undefined,
+          responsible_id:
+            assignment === "brigade" && form.responsible_id
+              ? idValue(form.responsible_id)
+              : undefined,
           normal_hours: Number(form.normal_hours),
           deadline: deadline.toISOString(),
         });
@@ -1482,10 +1531,50 @@ export function CreateOrder({
                   </div>
                 )}
                 {assignment === "brigade" && (
-                  <p className="field-hint">
-                    Сервер выберет одного работника бригады на смене. Совместное
-                    исполнение всей бригадой пока не реализовано.
-                  </p>
+                  <>
+                    <label>
+                      Ответственный за общий результат
+                      <select
+                        value={form.responsible_id}
+                        onChange={(event) =>
+                          update("responsible_id", event.target.value)
+                        }
+                      >
+                        <option value="">
+                          Автоматически · наименее загруженный
+                        </option>
+                        {eligibleBrigadeWorkers.map((person) => (
+                          <option key={person.id} value={person.id}>
+                            {person.name}
+                          </option>
+                        ))}
+                        {form.responsible_id &&
+                          !eligibleBrigadeWorkers.some(
+                            (person) =>
+                              String(person.id) === form.responsible_id,
+                          ) && (
+                            <option value={form.responsible_id} disabled>
+                              Прежний выбор недоступен
+                            </option>
+                          )}
+                      </select>
+                    </label>
+                    <p className="field-hint">
+                      При выдаче сервер зафиксирует работников бригады на смене.
+                      Все участники смогут открыть наряд и добавить фото;
+                      назначением и сдачей общего результата управляет
+                      ответственный.
+                    </p>
+                    {form.brigade_id && (
+                      <p className="field-hint">
+                        Сейчас на смене:{" "}
+                        {eligibleBrigadeWorkers
+                          .map((person) => person.name)
+                          .join(", ") || "нет работников"}
+                        . Окончательный состав определяется при выдаче.
+                      </p>
+                    )}
+                  </>
                 )}
                 <div className="form-grid">
                   <label>
@@ -1741,7 +1830,11 @@ export function OrderDialog({
       setMode("complete");
   }, [draft.ready, draft.restored]);
   const [edit, setEdit] = useState({
+    assignment: "employee",
     assignee_id: "",
+    brigade_id: "",
+    responsible_id: "",
+    renew_assignment: false,
     priority: "",
     deadline: "",
     comment: "",
@@ -1766,12 +1859,13 @@ export function OrderDialog({
     };
   }, [id, version]);
   const manager = ["master", "admin"].includes(user.role);
-  const worker =
-    user.role === "worker" && String(user.id) === String(order?.assignee_id);
+  const permissions = order ? workerOrderPermissions(order, user) : null;
+  const worker = permissions?.responsible ?? false;
+  const assistant = !!permissions?.participant && !worker;
   const canAct = manager || worker;
   const terminal = order && ["closed", "cancelled"].includes(order.status);
   const canUpload =
-    canAct &&
+    (manager || permissions?.canUpload) &&
     order &&
     !["ai_review", "completed", "closed", "cancelled"].includes(order.status);
   const canReassign =
@@ -1798,6 +1892,7 @@ export function OrderDialog({
       !order ||
       mutationLock.current ||
       writeBlocked ||
+      (nextMode === "complete" && !worker) ||
       (nextMode === "complete" && completionConfirmed)
     )
       return;
@@ -1918,6 +2013,8 @@ export function OrderDialog({
   }
   async function execute(actionName: string) {
     if (mutationLock.current || !order || writeBlocked) return;
+    if (["close", "rework", "cancel"].includes(actionName) ? !manager : !worker)
+      return;
     if (actionName === "close" && !score) {
       setError("Выберите итоговую оценку качества.");
       return;
@@ -1977,7 +2074,13 @@ export function OrderDialog({
     } else void execute(name);
   }
   async function upload(file: File, kind: string, existing?: DraftPhoto) {
-    if (mutationLock.current || photoUncertain || writeBlocked || !order)
+    if (
+      mutationLock.current ||
+      photoUncertain ||
+      writeBlocked ||
+      !order ||
+      !canUpload
+    )
       return;
     const requestedVersion =
       existing?.expectedVersion ??
@@ -2098,6 +2201,7 @@ export function OrderDialog({
       completionConfirmed ||
       writeBlocked ||
       !order ||
+      !worker ||
       draft.data.photos.some((photo) => photo.state !== "uploaded")
     )
       return;
@@ -2198,7 +2302,7 @@ export function OrderDialog({
   }
   async function submitEdit(e: FormEvent) {
     e.preventDefault();
-    if (mutationLock.current || writeBlocked) return;
+    if (mutationLock.current || writeBlocked || !manager) return;
     mutationLock.current = true;
     revision.current++;
     setBusy(true);
@@ -2206,8 +2310,19 @@ export function OrderDialog({
     try {
       if (!order) return;
       const changes: Record<string, unknown> = {};
-      if (edit.assignee_id !== String(order.assignee_id))
-        changes.assignee_id = idValue(edit.assignee_id);
+      if (canReassign) {
+        for (const [key, value] of Object.entries(
+          assignmentEditChanges(order, edit),
+        )) {
+          if (!value)
+            throw new Error(
+              edit.assignment === "brigade"
+                ? "Выберите бригаду."
+                : "Выберите исполнителя.",
+            );
+          changes[key] = idValue(String(value));
+        }
+      }
       if (edit.priority !== order.priority) changes.priority = edit.priority;
       if (edit.comment !== (order.comment || ""))
         changes.comment = edit.comment;
@@ -2245,7 +2360,11 @@ export function OrderDialog({
   function startEdit() {
     if (!order || mutationLock.current || writeBlocked) return;
     setEdit({
+      assignment: order.brigade_id == null ? "employee" : "brigade",
       assignee_id: String(order.assignee_id),
+      brigade_id: order.brigade_id == null ? "" : String(order.brigade_id),
+      responsible_id: String(order.assignee_id),
+      renew_assignment: false,
       priority: order.priority,
       deadline: new Date(new Date(order.deadline).getTime() + 5 * 3600000)
         .toISOString()
@@ -2420,7 +2539,9 @@ export function OrderDialog({
                   <div>
                     <small>
                       <UserRound size={14} />
-                      Исполнитель
+                      {order.brigade_id != null
+                        ? "Ответственный"
+                        : "Исполнитель"}
                     </small>
                     <strong>{order.assignee_name}</strong>
                     <span>
@@ -2453,6 +2574,14 @@ export function OrderDialog({
                     </span>
                   </div>
                 </div>
+                <AssignmentParticipants assignment={order} />
+                {assistant && (
+                  <p className="field-hint" role="status">
+                    Вы участвуете в общем наряде. Можно просмотреть ход работ и
+                    добавить фото; ответственный управляет очередью, статусом и
+                    сдаёт общий результат.
+                  </p>
+                )}
                 <div className="detail-timing">
                   <span>
                     Начало:{" "}
@@ -2499,30 +2628,144 @@ export function OrderDialog({
                       <Pencil size={17} />
                       Изменить назначение
                     </h3>
-                    <label>
-                      Исполнитель
-                      <select
-                        required
-                        disabled={!canReassign}
-                        value={edit.assignee_id}
-                        onChange={(e) =>
-                          setEdit({ ...edit, assignee_id: e.target.value })
-                        }
-                      >
-                        {r.employees
-                          .filter((e) => e.role === "worker")
-                          .map((e) => (
-                            <option
-                              key={e.id}
-                              value={e.id}
-                              disabled={e.on_shift === false}
+                    <fieldset disabled={!canReassign}>
+                      <div className="segmented assignment-toggle">
+                        <button
+                          type="button"
+                          className={
+                            edit.assignment === "employee" ? "active" : ""
+                          }
+                          onClick={() =>
+                            setEdit({ ...edit, assignment: "employee" })
+                          }
+                        >
+                          <UserRound size={16} /> Сотрудник
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            edit.assignment === "brigade" ? "active" : ""
+                          }
+                          onClick={() =>
+                            setEdit({ ...edit, assignment: "brigade" })
+                          }
+                        >
+                          <Users size={16} /> Бригада
+                        </button>
+                      </div>
+                      <label>
+                        {edit.assignment === "employee"
+                          ? "Исполнитель"
+                          : "Бригада"}
+                        <select
+                          required
+                          value={
+                            edit.assignment === "employee"
+                              ? edit.assignee_id
+                              : edit.brigade_id
+                          }
+                          onChange={(e) =>
+                            setEdit(
+                              edit.assignment === "employee"
+                                ? { ...edit, assignee_id: e.target.value }
+                                : {
+                                    ...edit,
+                                    brigade_id: e.target.value,
+                                    responsible_id: "",
+                                  },
+                            )
+                          }
+                        >
+                          <option value="">
+                            Выберите{" "}
+                            {edit.assignment === "employee"
+                              ? "сотрудника"
+                              : "бригаду"}
+                          </option>
+                          {edit.assignment === "employee"
+                            ? r.employees
+                                .filter((e) => e.role === "worker")
+                                .map((e) => (
+                                  <option
+                                    key={e.id}
+                                    value={e.id}
+                                    disabled={e.on_shift === false}
+                                  >
+                                    {e.name} · {e.specialty}
+                                    {e.on_shift === false ? " · вне смены" : ""}
+                                  </option>
+                                ))
+                            : r.brigades.map((brigade) => (
+                                <option key={brigade.id} value={brigade.id}>
+                                  {brigade.name}
+                                </option>
+                              ))}
+                        </select>
+                      </label>
+                      {edit.assignment === "brigade" && (
+                        <>
+                          <label>
+                            Ответственный за общий результат
+                            <select
+                              value={edit.responsible_id}
+                              onChange={(event) =>
+                                setEdit({
+                                  ...edit,
+                                  responsible_id: event.target.value,
+                                })
+                              }
                             >
-                              {e.name} · {e.specialty}
-                              {e.on_shift === false ? " · вне смены" : ""}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
+                              <option value="">
+                                Автоматически · наименее загруженный
+                              </option>
+                              {brigadeWorkers(r.employees, edit.brigade_id).map(
+                                (employee) => (
+                                  <option key={employee.id} value={employee.id}>
+                                    {employee.name}
+                                  </option>
+                                ),
+                              )}
+                              {edit.responsible_id &&
+                                !brigadeWorkers(
+                                  r.employees,
+                                  edit.brigade_id,
+                                ).some(
+                                  (person) =>
+                                    String(person.id) === edit.responsible_id,
+                                ) && (
+                                  <option value={edit.responsible_id} disabled>
+                                    {order.assignee_name} · прежний
+                                    ответственный недоступен
+                                  </option>
+                                )}
+                            </select>
+                          </label>
+                          <p className="field-hint">
+                            Смена бригады или ответственного создаёт новое
+                            назначение с текущим составом работников на смене.
+                            Прежний состав остаётся в истории.
+                          </p>
+                        </>
+                      )}
+                      <label className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={edit.renew_assignment}
+                          onChange={(event) =>
+                            setEdit({
+                              ...edit,
+                              renew_assignment: event.target.checked,
+                            })
+                          }
+                        />
+                        Повторно назначить с текущим составом
+                      </label>
+                    </fieldset>
+                    {!canReassign && (
+                      <p className="field-hint">
+                        В текущем статусе состав и ответственного менять нельзя.
+                      </p>
+                    )}
                     <div className="form-grid">
                       <label>
                         Приоритет
@@ -2752,6 +2995,7 @@ export function OrderDialog({
                   >
                     <fieldset
                       disabled={
+                        !worker ||
                         busy ||
                         draftBlocked ||
                         completionUncertain ||
@@ -2762,6 +3006,12 @@ export function OrderDialog({
                         <FileCheck2 size={18} />
                         Завершение работы
                       </h3>
+                      {!worker && (
+                        <p className="field-hint">
+                          Сдавать общий результат может только ответственный.
+                          Сохранённый черновик остаётся в этом браузере.
+                        </p>
+                      )}
                       <label>
                         Выполненные работы <b>*</b>
                         <textarea
@@ -2966,6 +3216,7 @@ export function OrderDialog({
                         <button
                           className="button primary"
                           disabled={
+                            !worker ||
                             busy ||
                             writeBlocked ||
                             completionConfirmed ||
