@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import os
 from collections import defaultdict
@@ -6,13 +5,12 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from sqlalchemy import func, or_, select
-from .models import AIReviewJob, Area, Brigade, Employee, Equipment, FaultCode, IntegrationLog, Material, MaterialWriteoff, Notification, Order, OrderAssignment, OrderAssignmentParticipant, OrderEvent, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
-from .ai_jobs import job_dict
+from .models import Area, Brigade, Employee, Equipment, Material, MaterialWriteoff, Notification, Order, OrderAssignment, OrderAssignmentParticipant, OrderEvent, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
 from .push import enqueue_push
 
 LOG = logging.getLogger(__name__)
 TERMINAL = {"closed", "cancelled"}
-EXECUTION_FINISHED = TERMINAL | {"completed", "ai_review"}
+EXECUTION_FINISHED = TERMINAL | {"completed"}
 QUEUE_PRIORITIES = {"emergency": 0, "high": 1, "normal": 2, "planned": 3}
 
 
@@ -174,9 +172,7 @@ def order_dict(db, order, detail=False, refs=None, positions=None, statuses=None
         result["events"] = [{"id": event.id, "action": event.action, "from_status": event.from_status, "to_status": event.to_status, "actor_name": db.get(Employee, event.actor_id).name, "created_at": iso(event.created_at), "comment": event.comment} for event in db.scalars(select(OrderEvent).where(OrderEvent.order_id == order.id).order_by(OrderEvent.created_at, OrderEvent.id))]
         result["photos"] = [photo_dict(db, p) for p in db.scalars(select(Photo).where(Photo.order_id == order.id).order_by(Photo.id))]
         result["completion"] = order.completion
-        result["ai_review"] = order.ai_review
-        result["assignment_history"], result["submission_attempts"] = order_history(db, order.id, user=user, status=order.status)
-        result["ai_review_job"] = result["submission_attempts"][-1]["ai_job"] if result["submission_attempts"] else None
+        result["assignment_history"], result["submission_attempts"] = order_history(db, order.id)
     return result
 
 
@@ -205,21 +201,14 @@ def append_assignment(db, order, actor_id, participants=None):
     return assignment
 
 
-def append_submission(db, order, author_id, payload, writeoffs, assessment=None):
-    """Freeze this report before aggregate materials or master scores change."""
+def append_submission(db, order, author_id, payload, writeoffs):
+    """Freeze the submitted report and its photo/material links."""
     latest = db.scalar(select(SubmissionAttempt).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
     assignment = db.scalar(select(OrderAssignment).where(OrderAssignment.order_id == order.id).order_by(OrderAssignment.sequence.desc()).limit(1))
     attempt = SubmissionAttempt(order_id=order.id, sequence=latest.sequence + 1 if latest else 1,
         assignment_id=assignment.id, submitted_at=order.completed_at, author_id=author_id,
-        payload=deepcopy(payload), ai_review=deepcopy(order.ai_review), assessment_id=assessment.id if assessment else None, source="live")
+        payload=deepcopy(payload), source="live")
     photos = list(db.scalars(select(Photo).where(Photo.order_id == order.id).order_by(Photo.id)))
-    attempt.ai_input = {
-        "order": {key: getattr(order, key) for key in ("id", "number", "title", "description", "work_type", "area_id", "equipment_id", "assignee_id", "brigade_id", "master_id", "priority", "status", "normal_hours")},
-        "submission_order_version": order.version, "assignment_id": assignment.id, "sequence": attempt.sequence,
-        "fault_codes": [{"id": row.id, "code": row.code, "name": row.name} for row in db.scalars(select(FaultCode).order_by(FaultCode.id))],
-        "photos": [{"id": row.id, "kind": row.kind, "sha256": hashlib.sha256(row.data).hexdigest()} for row in photos],
-    }
-    attempt.ai_input["order"].update({key: iso(getattr(order, key)) for key in ("deadline", "created_at", "started_at", "completed_at")})
     db.add(attempt)
     db.flush()
     db.add_all([SubmissionPhoto(attempt_id=attempt.id, photo_id=row.id) for row in photos])
@@ -234,7 +223,7 @@ def append_submission_decision(db, order, actor_id, action, score, comment):
             comment=comment, created_at=order.closed_at if action == "close" else utcnow()))
 
 
-def order_history(db, order_id, user=None, status=None):
+def order_history(db, order_id):
     def name(model, id_):
         row = db.get(model, id_) if id_ is not None else None
         return row.name if row else None
@@ -256,8 +245,6 @@ def order_history(db, order_id, user=None, status=None):
     attempts = []
     rows = list(db.scalars(select(SubmissionAttempt).where(SubmissionAttempt.order_id == order_id).order_by(SubmissionAttempt.sequence)))
     for row in rows:
-        job = db.scalar(select(AIReviewJob).where(AIReviewJob.attempt_id == row.id))
-        retry_allowed = bool(job and job.status == "failed" and row.id == rows[-1].id and status == "completed" and row.ai_review is None and row.assessment_id is None and user and user.role in {"master", "admin"})
         material_snapshots = {m["material_id"]: m for m in (row.payload or {}).get("materials", [])}
         materials = []
         for writeoff in db.scalars(select(MaterialWriteoff).join(SubmissionWriteoff, SubmissionWriteoff.writeoff_id == MaterialWriteoff.id).where(SubmissionWriteoff.attempt_id == row.id).order_by(MaterialWriteoff.id)):
@@ -273,7 +260,7 @@ def order_history(db, order_id, user=None, status=None):
         attempts.append({"id": row.id, "number": row.sequence, "source": row.source,
             "assignment_id": row.assignment_id, "submitted_at": iso(row.submitted_at),
             "author_id": row.author_id, "author_name": name(Employee, row.author_id),
-            "assessment_id": row.assessment_id, "completion": row.payload, "ai_review": row.ai_review, "ai_job": job_dict(job, retry_allowed),
+            "completion": row.payload,
             "photos": [photo_dict(db, photo) for photo in db.scalars(select(Photo).join(SubmissionPhoto, SubmissionPhoto.photo_id == Photo.id).where(SubmissionPhoto.attempt_id == row.id).order_by(Photo.id))],
             "materials": materials, "decisions": decisions})
     return assignments, attempts
@@ -322,17 +309,6 @@ def monitor_deadlines(db, now=None):
             added += notify(db, [order.assignee_id, order.master_id], f"Наряд не принят {acceptance_minutes} минут", detail, "unaccepted", order.id, f"unaccepted:{order.id}:{order.assignee_id}:{iso(order.assigned_at)}")
     db.commit()
     return added
-
-
-class AIReviewStub:
-    @staticmethod
-    def review(db, order):
-        photos = list(db.scalars(select(Photo).where(Photo.order_id == order.id)))
-        has_pair = {p.kind for p in photos} == {"before", "after"}
-        score = 4.5 if has_pair else 4.0
-        result = {"verdict": "passed" if has_pair else "needs_attention", "score": score, "explanation": "Заглушка ИИ: проверена только полнота отчёта и наличие фотографий. Содержимое изображений не анализируется. Решение о приёмке принимает мастер.", "is_stub": True, "master_score": None}
-        db.add(IntegrationLog(adapter="ai_stub", operation="review", payload={"order_id": order.id, "is_stub": True, "photo_count": len(photos)}))
-        return result
 
 
 def shift_start(now=None):

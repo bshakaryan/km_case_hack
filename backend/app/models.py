@@ -75,7 +75,7 @@ class TimeNorm(Base):
 class Order(Base):
     __tablename__ = "orders"
     __table_args__ = (
-        CheckConstraint("status IN ('issued','accepted','queued','rejected','in_progress','paused','completed','ai_review','rework','closed','cancelled')", name="ck_order_status"),
+        CheckConstraint("status IN ('issued','accepted','queued','rejected','in_progress','paused','completed','rework','closed','cancelled')", name="ck_order_status"),
         CheckConstraint("priority IN ('emergency','high','normal','planned')", name="ck_order_priority"),
         CheckConstraint("work_type IN ('planned','unplanned')", name="ck_order_work_type"),
         CheckConstraint("normal_hours > 0", name="ck_order_hours"),
@@ -106,7 +106,6 @@ class Order(Base):
     downtime_minutes: Mapped[float] = mapped_column(Float, default=0)
     score: Mapped[float | None] = mapped_column(Float)
     completion: Mapped[dict | None] = mapped_column(JSON)
-    ai_review: Mapped[dict | None] = mapped_column(JSON)
 
 
 class OrderEvent(Base):
@@ -217,18 +216,6 @@ class PushTask(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class AIAssessment(Base):
-    __tablename__ = "ai_assessments"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
-    verdict: Mapped[str] = mapped_column(String(40))
-    score: Mapped[float | None] = mapped_column(Float)
-    explanation: Mapped[str] = mapped_column(Text)
-    is_stub: Mapped[bool] = mapped_column(Boolean, default=True)
-    master_score: Mapped[float | None] = mapped_column(Float)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class OrderAssignment(Base):
     __tablename__ = "order_assignments"
     __table_args__ = (
@@ -273,9 +260,6 @@ class SubmissionAttempt(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     author_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
     payload: Mapped[dict] = mapped_column(JSON)
-    ai_input: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
-    ai_review: Mapped[dict | None] = mapped_column(JSON)
-    assessment_id: Mapped[int | None] = mapped_column(ForeignKey("ai_assessments.id"))
     source: Mapped[str] = mapped_column(String(20))
 
 
@@ -308,27 +292,3 @@ class SubmissionDecision(Base):
     score: Mapped[float | None] = mapped_column(Float)
     comment: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class AIReviewJob(Base):
-    __tablename__ = "ai_review_jobs"
-    __table_args__ = (
-        UniqueConstraint("attempt_id", name="uq_ai_review_job_attempt"),
-        CheckConstraint("status IN ('pending','running','succeeded','failed','superseded')", name="ck_ai_review_job_status"),
-        CheckConstraint("attempts >= 0", name="ck_ai_review_job_attempts"),
-        CheckConstraint("max_attempts > 0", name="ck_ai_review_job_max_attempts"),
-        Index("ix_ai_review_jobs_status_next", "status", "next_attempt_at"),
-        Index("ix_ai_review_jobs_status_lease", "status", "lease_expires_at"),
-    )
-    id: Mapped[int] = mapped_column(primary_key=True)
-    attempt_id: Mapped[int] = mapped_column(ForeignKey("submission_attempts.id"))
-    status: Mapped[str] = mapped_column(String(20), default="pending")
-    provider: Mapped[str] = mapped_column(String(40), default="stub")
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
-    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
-    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    lease_token: Mapped[str | None] = mapped_column(String(64))
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_error_code: Mapped[str | None] = mapped_column(String(80))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -20,21 +20,6 @@ import {
   OrderVersionNotice,
 } from "./OrderVersion";
 import {
-  AiJobStatus,
-  AiPhotoCheck,
-  AiReportChecks,
-  aiReviewExplanation,
-  aiReviewNote,
-  aiReviewScoreLabel,
-  aiReviewSource,
-  aiReviewTitle,
-  aiReviewVerdict,
-  applyAiReviewJob,
-  canRetryAiReview,
-  requestAiReviewRetry,
-  showAiReview,
-} from "./AiReviewJob";
-import {
   completionValidationIssues,
   periodInputDate,
   withinCreatedPeriod,
@@ -71,7 +56,6 @@ import {
   Search,
   Send,
   SlidersHorizontal,
-  Sparkles,
   Trash2,
   Upload,
   UserRound,
@@ -157,7 +141,7 @@ export function OrderBoard({
   compact?: boolean;
   initialSearch?: string;
   initialFocus?:
-    "all" | "emergency" | "overdue" | "issued" | "ai_review" | "rejected";
+    "all" | "emergency" | "overdue" | "issued" | "completed" | "rejected";
   initialAssignee?: Id;
   initialEquipment?: Id;
   initialArea?: Id;
@@ -217,7 +201,7 @@ export function OrderBoard({
           if (focus === "overdue" && !o.is_overdue) return false;
           if (focus === "emergency" && o.priority !== "emergency") return false;
           if (
-            ["issued", "ai_review", "rejected"].includes(focus) &&
+            ["issued", "completed", "rejected"].includes(focus) &&
             o.status !== focus
           )
             return false;
@@ -284,9 +268,9 @@ export function OrderBoard({
     },
     {
       id: "review",
-      title: "На проверке",
+      title: "Ожидают приёмки",
       color: "violet",
-      statuses: ["completed", "ai_review"],
+      statuses: ["completed"],
     },
     {
       id: "rework",
@@ -388,7 +372,7 @@ export function OrderBoard({
             ["emergency", "Аварийные"],
             ["overdue", "Просроченные"],
             ["issued", "Не приняты"],
-            ["ai_review", "На приёмку"],
+            ["completed", "На приёмку"],
             ["rejected", "Отказы"],
           ] as const
         ).map(([value, label]) => (
@@ -1785,7 +1769,6 @@ export function OrderDialog({
   const [score, setScore] = useState("");
   const [completionValidationError, setCompletionValidationError] =
     useState("");
-  const [aiRetryUncertain, setAiRetryUncertain] = useState(false);
   const [formVersion, setFormVersion] = useState<number | null>(null);
   const [versionConflict, setVersionConflict] = useState(false);
   const [writeUncertain, setWriteUncertain] = useState(false);
@@ -1861,7 +1844,6 @@ export function OrderDialog({
         if (valid && requestRevision === revision.current) {
           setOrder(o);
           setError("");
-          setAiRetryUncertain(false);
         }
       })
       .catch((e) => {
@@ -1880,13 +1862,12 @@ export function OrderDialog({
   const canUpload =
     (manager || permissions?.canUpload) &&
     order &&
-    !["ai_review", "completed", "closed", "cancelled"].includes(order.status);
+    !["completed", "closed", "cancelled"].includes(order.status);
   const canReassign =
     order &&
     ![
       "in_progress",
       "paused",
-      "ai_review",
       "completed",
       "closed",
       "cancelled",
@@ -1944,7 +1925,6 @@ export function OrderDialog({
       setFormVersion(null);
       setVersionConflict(false);
       setWriteUncertain(false);
-      setAiRetryUncertain(false);
       setReason("");
       setScore("");
       setError("");
@@ -1977,7 +1957,6 @@ export function OrderDialog({
     try {
       const latest = await api<OrderDetail>(`/orders/${id}`);
       setOrder(latest);
-      setAiRetryUncertain(false);
       setError(
         completionUncertain || photoUncertain
           ? "Карточка обновлена. Сравните отчёт, материалы и фото с черновиком. Неизвестная отправка остаётся заблокированной; удалить черновик можно только явным действием."
@@ -1986,41 +1965,6 @@ export function OrderDialog({
     } catch (failure) {
       setError((failure as Error).message);
     } finally {
-      setBusy(false);
-    }
-  }
-  async function retryAiReview() {
-    if (
-      mutationLock.current ||
-      !order ||
-      !canRetryAiReview(order, user.role) ||
-      writeBlocked ||
-      aiRetryUncertain
-    )
-      return;
-    mutationLock.current = true;
-    revision.current++;
-    setBusy(true);
-    setError("");
-    try {
-      const response = await requestAiReviewRetry(
-        id,
-        order.ai_review_job!.attempt_id,
-        order.version,
-      );
-      setOrder((current) =>
-        current ? applyAiReviewJob(current, response) : current,
-      );
-      notify("Проверка поставлена в очередь. Отчёт сохранён.");
-      onChange();
-    } catch (failure) {
-      handleVersionFailure(failure);
-      setAiRetryUncertain(
-        !(failure instanceof ApiError) || failure.requestMayHaveSucceeded,
-      );
-      setError((failure as Error).message);
-    } finally {
-      mutationLock.current = false;
       setBusy(false);
     }
   }
@@ -2976,56 +2920,10 @@ export function OrderDialog({
                     </ul>
                   )}
                 </div>
-                <AiJobStatus
-                  job={order.ai_review_job}
-                  busy={busy}
-                  uncertain={aiRetryUncertain}
-                  onRetry={
-                    canRetryAiReview(order, user.role) && !writeBlocked
-                      ? () => void retryAiReview()
-                      : undefined
-                  }
-                />
-                {order.ai_review && showAiReview(order.ai_review_job) && (
-                  <section className="ai-review">
-                    <div>
-                      <Sparkles size={18} />
-                      <h3>
-                        {aiReviewTitle(order.ai_review, order.ai_review_job)}
-                      </h3>
-                      {order.ai_review.is_stub && (
-                        <span className="stub-tag">
-                          {order.ai_review_job?.provider === "ai_service" || order.ai_review.bridge_version != null
-                            ? "РЕКОМЕНДАЦИЯ"
-                            : "СТАРЫЙ РЕЗУЛЬТАТ"}
-                        </span>
-                      )}
-                    </div>
-                    <div className="review-verdict">
-                      <strong>
-                        {aiReviewVerdict(order.ai_review)}
-                      </strong>
-                      <span>
-                        {aiReviewScoreLabel(order.ai_review.score, order.ai_review)}
-                      </span>
-                    </div>
-                    <p>{aiReviewExplanation(order.ai_review, order.ai_review_job)}</p>
-                    {aiReviewSource(order.ai_review) && (
-                      <p className="muted">{aiReviewSource(order.ai_review)}</p>
-                    )}
-                    <AiReportChecks
-                      checks={order.ai_review.report_checks}
-                      isOpenAi={order.ai_review.photo_check?.method === "openai_vision"}
-                    />
-                    <AiPhotoCheck check={order.ai_review.photo_check} />
-                    <small>
-                      {aiReviewNote(order.ai_review, order.ai_review_job)}
-                    </small>
-                    {order.score !== null && (
-                      <strong className="final-score">
-                        Оценка мастера: {order.score} / 5
-                      </strong>
-                    )}
+                {order.status === "completed" && (
+                  <section className="manual-acceptance-note">
+                    <strong>Передано на приёмку мастеру</strong>
+                    <p>Отчёт и фотографии сохранены. Итоговое решение принимает мастер.</p>
                   </section>
                 )}
                 {mode === "complete" && (
@@ -3376,7 +3274,8 @@ export function OrderDialog({
                             pause: "Работа приостановлена",
                             resume: "Работа продолжена",
                             complete: "Отчёт отправлен",
-                            ai_review: "Отчёт проверен",
+                            awaiting_acceptance: "Передано на приёмку",
+                            manual_acceptance: "Решение мастера обновлено",
                             rework: "Возвращён на доработку",
                             close: "Принят мастером",
                             cancel: "Отменён",
@@ -3461,7 +3360,7 @@ export function OrderDialog({
                   Завершить работу
                 </button>
               )}
-              {manager && order.status === "ai_review" && (
+              {manager && order.status === "completed" && (
                 <>
                   <button
                     className="button secondary"

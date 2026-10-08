@@ -4,7 +4,6 @@ import '../data/app_controller.dart';
 import '../data/models.dart';
 import '../ui.dart' as app_ui;
 import 'order_photo.dart';
-import 'ai_job_status.dart';
 
 /// Detail-only snapshots supplied by the server; current editing stays separate.
 class OrderHistory extends StatelessWidget {
@@ -101,7 +100,6 @@ class OrderHistory extends StatelessWidget {
     final report = _map(attempt['completion']);
     final materials = _rows(attempt['materials']);
     final photos = _rows(attempt['photos']);
-    final review = _map(attempt['ai_review']);
     final decisions = _rows(attempt['decisions']);
     final fault = _rows(controller.reference['fault_codes'])
         .where((row) => row['id'] == report['fault_code_id'])
@@ -181,25 +179,6 @@ class OrderHistory extends StatelessWidget {
                 _text(
                   '${photo['kind'] == 'before' ? 'До ремонта' : 'После ремонта'} · ${photo['author_name'] ?? 'Автор не зафиксирован'} · ${_date(photo['created_at'])}',
                 ),
-              ],
-              AiJobStatus(
-                job: attempt['ai_job'] is Map ? _map(attempt['ai_job']) : null,
-              ),
-              if (review.isNotEmpty &&
-                  showAttemptAiReview(attempt['ai_job'])) ...[
-                _heading(aiReviewTitle(review, job: attempt['ai_job'])),
-                _text(aiReviewVerdict(review)),
-                _text(aiReviewScoreLabel(review['score'], review: review)),
-                if (aiReviewSource(review) != null)
-                  _text(aiReviewSource(review)!),
-                _text(aiReviewExplanation(review, job: attempt['ai_job'])),
-                AiReportChecks(
-                  checks: review['report_checks'],
-                  isOpenAi: review['photo_check'] is Map &&
-                      (review['photo_check'] as Map)['method'] == 'openai_vision',
-                ),
-                AiPhotoCheck(check: review['photo_check']),
-                _text(aiReviewNote(review, job: attempt['ai_job'])),
               ],
               _heading('Решения мастера'),
               if (decisions.isEmpty)

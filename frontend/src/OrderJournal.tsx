@@ -237,7 +237,7 @@ export function OrderJournal({
               overdue: "Просроченные",
               emergency: "Аварийные",
               issued: "Не приняты",
-              ai_review: "На приёмку",
+              completed: "На приёмку",
               rejected: "Отказы",
             }).map(([value, label]) => (
               <option key={value} value={value}>

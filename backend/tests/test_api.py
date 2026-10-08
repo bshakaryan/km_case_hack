@@ -2,7 +2,7 @@ import io
 from datetime import timedelta
 from PIL import Image
 from sqlalchemy import func, select
-from app.models import AIAssessment, AuthSession, Employee, IntegrationLog, MaterialWriteoff, Notification, Order, OrderEvent, PushTask, utcnow
+from app.models import AuthSession, Employee, IntegrationLog, MaterialWriteoff, Notification, Order, OrderEvent, PushTask, utcnow
 from app.services import monitor_deadlines
 from conftest import auth_headers
 
@@ -23,8 +23,8 @@ def photo_bytes():
 def test_seed_and_authentication(client, master):
     health = client.get("/api/health").json()
     assert health["database"] == "connected"
-    expected_ai = "ai_service" if client.app.state.ai_review_mode == "queued_service" else client.app.state.ai_review_mode
-    assert health["ai"] == expected_ai and health["native"] in {"disabled", "fcm"}
+    assert "ai" not in health and health["native"] in {"disabled", "fcm"}
+    assert "ai" not in client.get("/api/integrations", headers=auth_headers(client)).json()
     assert client.get("/api/orders").status_code == 401
     assert client.post("/api/auth/login", json={"login": "master", "pin": "0000"}).status_code == 401
     reference = client.get("/api/reference", headers=master).json()
@@ -39,7 +39,7 @@ def test_seed_and_authentication(client, master):
         assert db.get(Employee, 1).pin_hash.startswith("pbkdf2_sha256$")
         assert db.scalar(select(AuthSession.token_hash)) != master["Authorization"][7:]
         assert db.scalar(select(func.count()).select_from(MaterialWriteoff)) >= 540
-        assert db.scalar(select(func.count()).select_from(AIAssessment)) >= 540
+        assert db.scalar(select(func.count()).select_from(IntegrationLog).where(IntegrationLog.adapter == "module_archive")) == 0
 
 
 def test_full_lifecycle_requires_master_decision(client, master, worker):
@@ -53,16 +53,16 @@ def test_full_lifecycle_requires_master_decision(client, master, worker):
     assert client.post(path + "/transition", json={"action": "resume"}, headers=worker).json()["status"] == "in_progress"
     completed = client.post(path + "/complete", json={"work_done": "Заменен узел и проверен под нагрузкой", "fault_code_id": 1, "materials": [{"material_id": 1, "quantity": 2}]}, headers=worker)
     assert completed.status_code == 200, completed.text
-    assert completed.json()["status"] == "ai_review"
-    assert completed.json()["ai_review"]["is_stub"] is True
+    assert completed.json()["status"] == "completed"
+    assert "ai_review" not in completed.json()
     assert completed.json()["score"] is None
     assert client.post(path + "/transition", json={"action": "close", "score": 5}, headers=worker).status_code == 403
     assert client.post(path + "/transition", json={"action": "close"}, headers=master).status_code == 422
     closed = client.post(path + "/transition", json={"action": "close", "score": 4.5}, headers=master).json()
     assert closed["status"] == "closed"
     assert closed["score"] == 4.5
-    assert closed["ai_review"]["master_score"] == 4.5
-    assert len(closed["events"]) >= 8
+    assert "ai_review" not in closed
+    assert len(closed["events"]) >= 7
     assert client.patch(path, json={"priority": "high"}, headers=master).status_code == 409
 
 
@@ -178,8 +178,8 @@ def test_unplanned_photos_and_upload_validation(client, master, worker):
     assert client.post(path + "/complete", json=completion, headers=worker).status_code == 422
     assert client.post(path + "/photos", data={"kind": "after"}, files={"file": ("after.png", photo_bytes(), "image/png")}, headers=worker).status_code == 201
     result = client.post(path + "/complete", json=completion, headers=worker).json()
-    assert result["status"] == "ai_review"
-    assert result["ai_review"]["verdict"] == "passed"
+    assert result["status"] == "completed"
+    assert "ai_review" not in result
     assert client.post(path + "/transition", json={"action": "rework", "reason": "Проверить затяжку"}, headers=master).json()["status"] == "rework"
 
 
@@ -212,7 +212,7 @@ def test_deadline_monitor_thresholds_deduplication_and_finished_exclusion(client
         normal.assigned_at = now - timedelta(minutes=4)
         normal.deadline = now - timedelta(minutes=2)
         finished = db.get(Order, third["id"])
-        finished.status = "ai_review"
+        finished.status = "completed"
         finished.deadline = now - timedelta(hours=1)
         db.commit()
         assert monitor_deadlines(db, now) > 0

@@ -163,7 +163,7 @@ def test_frozen_names_roster_photo_author_and_reassignment_revoke_access(brigade
         assert db.scalar(sa.select(sa.func.count()).select_from(Photo)) == 1
 
 
-def test_leadership_change_blocks_successful_command_replay_and_keeps_ai_read(brigade_client):
+def test_leadership_change_blocks_successful_command_replay(brigade_client):
     client = brigade_client
     order = create(client, brigade_id=1, responsible_id=5)
     path = f"/api/orders/{order['id']}"
@@ -173,8 +173,7 @@ def test_leadership_change_blocks_successful_command_replay_and_keeps_ai_read(br
     finished = client.post(path + "/complete", json=report(), headers=complete_headers)
     assert finished.status_code == 200, finished.text
     attempt_id = finished.json()["submission_attempts"][-1]["id"]
-    assert client.get(path + f"/submissions/{attempt_id}/ai-review", headers=headers(6)).status_code == 200
-    assert client.get(path + f"/submissions/{attempt_id}/ai-review", headers=headers(9)).status_code == 403
+    assert client.get(path + f"/submissions/{attempt_id}/ai-review", headers=headers(6)).status_code == 404
     act(client, order["id"], "rework", employee_id=1, reason="Synthetic recheck")
     changed = client.patch(path, json={"brigade_id": 1, "responsible_id": 6}, headers=headers(1))
     assert changed.status_code == 200, changed.text
@@ -182,7 +181,7 @@ def test_leadership_change_blocks_successful_command_replay_and_keeps_ai_read(br
     assert client.post(path + "/complete", json=report(), headers=complete_headers).status_code == 403
     assert client.post(path + "/transition", json={"action": "accept"},
         headers=headers(5, **{"X-Client-Command-Id": "crew-accept-first-001"})).status_code == 403
-    assert client.get(path + f"/submissions/{attempt_id}/ai-review", headers=headers(5)).status_code == 200
+    assert client.get(path + f"/submissions/{attempt_id}/ai-review", headers=headers(5)).status_code == 404
     with client.app.state.sessions() as db:
         assert db.scalar(sa.select(sa.func.count()).select_from(ClientCommand)) == 2
         assert db.scalar(sa.select(Order.status).where(Order.id == order["id"])) == "issued"

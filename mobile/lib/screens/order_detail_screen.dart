@@ -12,7 +12,6 @@ import '../domain/navigation_scope.dart';
 import '../ui.dart' as app_ui;
 import '../widgets/order_photo.dart';
 import '../widgets/order_history.dart';
-import '../widgets/ai_job_status.dart';
 import 'completion_screen.dart';
 import 'order_journal_screen.dart';
 import 'create_order_screen.dart' show prepareOrderPhoto;
@@ -45,7 +44,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   bool _loading = true;
   bool _busy = false;
   bool _fetching = false;
-  bool _aiRetryUncertain = false;
   int _revision = 0;
   DateTime? _updatedAt;
   Timer? _timer;
@@ -191,7 +189,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         _updatedAt = DateTime.now();
         _detailRead = true;
         _accessDenied = false;
-        if (!widget.controller.offline) _aiRetryUncertain = false;
       });
     } catch (error) {
       if (_current && revision == _revision) {
@@ -211,49 +208,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     }
   }
 
-  Future<void> _retryAiReview() async {
-    final order = _order;
-    if (!_canWrite ||
-        _writeBusy ||
-        _aiRetryUncertain ||
-        order == null ||
-        !order.canRetryAiReview) {
-      return;
-    }
-    _revision++;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      final updated = await widget.controller.retryAiReview(
-        order.id,
-        (order.aiReviewJob!['attempt_id'] as num).toInt(),
-        basis: OrderWriteBasis(expectedVersion: order.version),
-      );
-      if (!mounted || !_scope.isCurrent) return;
-      setState(() {
-        _order = updated;
-        _updatedAt = DateTime.now();
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Проверка поставлена в очередь. Отчёт сохранён.'),
-        ),
-      );
-    } catch (failure) {
-      if (mounted && _scope.isCurrent) {
-        setState(() {
-          _error = failure.toString();
-          _aiRetryUncertain =
-              failure is! ApiException || failure.requestMayHaveSucceeded;
-        });
-      }
-    } finally {
-      if (_current) setState(() => _busy = false);
-    }
-  }
-
   bool get _master =>
       _scope.isCurrent && (widget.controller.user?.isMaster ?? false);
   bool get _canExecute =>
@@ -263,7 +217,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   bool _canAddPhoto(WorkOrder order) {
     if (!_canWrite) return false;
-    if ({'ai_review', 'closed', 'cancelled'}.contains(order.status)) {
+    if ({'completed', 'closed', 'cancelled'}.contains(order.status)) {
       return false;
     }
     final user = widget.controller.user;
@@ -772,20 +726,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                     ]),
                   _photos(order),
                   if (order.data['completion'] is Map) _report(order),
-                  if (!order.pendingSync)
-                    AiJobStatus(
-                      job: order.aiReviewJob,
-                      onRetry: _master && order.canRetryAiReview
-                          ? _retryAiReview
-                          : null,
-                      busy: _busy,
-                      uncertain: _aiRetryUncertain,
-                      offline: widget.controller.offline,
-                    ),
-                  if (order.data['ai_review'] is Map &&
-                      order.showAiReview &&
-                      !order.pendingSync)
-                    _review(order),
                   OrderHistory(order: order, controller: widget.controller),
                   _history(order),
                   if (_updatedAt != null)
@@ -884,7 +824,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               : 'Внеплановый ремонт',
           style: const TextStyle(color: Color(0xFF64748B)),
         ),
-        if ({'completed', 'ai_review'}.contains(order.status)) ...[
+        if (order.status == 'completed') ...[
           const Divider(height: 28),
           Text(
             order.pendingSync || widget.controller.isOrderPending(order.id)
@@ -1209,38 +1149,6 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     ]);
   }
 
-  Widget _review(WorkOrder order) {
-    final review = Map<String, dynamic>.from(order.data['ai_review'] as Map);
-    return _section(aiReviewTitle(review, job: order.aiReviewJob), [
-      Text(
-        aiReviewVerdict(review),
-        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-      ),
-      const SizedBox(height: 8),
-      Text(aiReviewScoreLabel(review['score'], review: review)),
-      const SizedBox(height: 8),
-      if (aiReviewSource(review) != null) ...[
-        Text(aiReviewSource(review)!),
-        const SizedBox(height: 8),
-      ],
-      Text(
-        aiReviewExplanation(review, job: order.aiReviewJob),
-        style: const TextStyle(height: 1.4),
-      ),
-      AiReportChecks(
-        checks: review['report_checks'],
-        isOpenAi: review['photo_check'] is Map &&
-            (review['photo_check'] as Map)['method'] == 'openai_vision',
-      ),
-      AiPhotoCheck(check: review['photo_check']),
-      const Divider(height: 24),
-      Text(
-        aiReviewNote(review, job: order.aiReviewJob),
-        style: const TextStyle(fontSize: 14, color: Color(0xFF64748B)),
-      ),
-    ]);
-  }
-
   Widget _history(WorkOrder order) {
     final events = _maps(order.data['events']).reversed.toList();
     return _section('История наряда', [
@@ -1291,12 +1199,11 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   Widget? _actions(WorkOrder order) {
     if (!_canWrite ||
-        (!_canExecute && !(_master && order.status == 'ai_review')) ||
+        (!_canExecute && !(_master && order.status == 'completed')) ||
         {
           'closed',
           'cancelled',
           'rejected',
-          'completed',
         }.contains(order.status)) {
       return null;
     }
@@ -1308,7 +1215,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final startBlocked =
         _hasOtherExecutingOrder(order) ||
         (queuePosition != null && queuePosition > 1);
-    if (order.status == 'ai_review') {
+    if (order.status == 'completed') {
       if (!_master) return null;
       primary = 'Принять работу';
       action = _closeOrder;
@@ -1485,7 +1392,8 @@ String _event(String value) =>
       'pause': 'Работа приостановлена',
       'resume': 'Работа продолжена',
       'complete': 'Отчёт отправлен',
-      'ai_review': 'Отчёт проверен',
+      'awaiting_acceptance': 'Передано на приёмку',
+      'manual_acceptance': 'Решение мастера обновлено',
       'close': 'Работа принята мастером',
       'rework': 'Возвращён на доработку',
       'cancel': 'Наряд отменён',

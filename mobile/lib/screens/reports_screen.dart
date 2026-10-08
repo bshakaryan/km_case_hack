@@ -177,7 +177,7 @@ class ReportsScreen extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         const InfoPanel(
-          'Сигналы строятся детерминированными правилами по выбранным данным; это не вывод генеративного ИИ. Проверяйте исходные наряды.',
+          'Сигналы строятся по агрегатам выбранных данных. Проверяйте исходные наряды.',
           icon: Icons.science_outlined,
         ),
       ],

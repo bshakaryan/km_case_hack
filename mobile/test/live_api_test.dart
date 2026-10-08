@@ -8,13 +8,12 @@ import 'package:image/image.dart' as img;
 import 'package:naryad_ai/data/api.dart';
 import 'package:naryad_ai/data/models.dart';
 
-import 'support/ai_review_wait.dart';
 
 const liveUrl = String.fromEnvironment('LIVE_API_URL');
 
 void main() {
   test(
-    'real Dart API: two roles, photos, completion, review and permissions',
+    'real Dart API: two roles, photos, manual acceptance and permissions',
     () async {
       final master = NaryadApi(liveUrl);
       final worker = NaryadApi(liveUrl);
@@ -137,11 +136,10 @@ void main() {
         );
 
         final acknowledged = await worker.complete(created.id, completion);
-        expect(acknowledged.status, anyOf('completed', 'ai_review'));
-        final submitted = await waitForAiReview(worker, created.id);
-        expect(submitted.status, 'ai_review');
-        expect((submitted.data['ai_review'] as Json)['is_stub'], isTrue);
-        expect((submitted.data['ai_review'] as Json)['verdict'], 'passed');
+        expect(acknowledged.status, 'completed');
+        final submitted = await worker.order(created.id);
+        expect(submitted.status, 'completed');
+        expect(submitted.data.containsKey('ai_review'), isFalse);
         final usages =
             ((submitted.data['completion'] as Json)['materials'] as List)
                 .cast<Json>();
@@ -173,7 +171,6 @@ void main() {
             'photo',
             'photo',
             'complete',
-            'ai_review',
             'close',
           ]),
         );

@@ -3,10 +3,10 @@
 //   --dart-define=API_BASE_URL=http://10.0.2.2:8000 \
 //   --dart-define=BRIDGE_TITLE=<same unique title as the web coordinator>
 //
-// The coordinator creates an unplanned order for worker2, requests rework after
-// BRIDGE_FIRST, then closes BRIDGE_REWORK with score 5. WEB milestones mean the
+// The coordinator creates an unplanned order for worker2, manually requests
+// rework after BRIDGE_FIRST, then manually closes BRIDGE_REWORK with score 5. WEB milestones mean the
 // external web API client; they do not claim browser UI coverage. Leave each
-// ai_review state visible for 10 seconds so the mobile UI can observe it.
+// completed state visible for 10 seconds so the mobile UI can observe it.
 // All worker lifecycle writes use real UI. Only synthetic photo preparation /
 // upload and negative permission probes use the real API directly. There are
 // no HTTP or platform mocks. Native camera / gallery selection is NOT tested.
@@ -31,7 +31,6 @@ import 'package:naryad_ai/screens/order_detail_screen.dart';
 import 'package:naryad_ai/screens/workspace_screen.dart';
 import 'package:naryad_ai/widgets/order_photo.dart';
 
-import '../test/support/ai_review_wait.dart';
 
 const _title = String.fromEnvironment('BRIDGE_TITLE');
 const _baseUrl = String.fromEnvironment(
@@ -254,13 +253,14 @@ void main() {
         _step('PHOTOS_AND_PERMISSIONS_OK', {'orderId': orderId});
 
         await _submitReport(tester, fault, material, _firstReport, '2');
-        var submitted = await waitForAiReview(controller.api, order.id);
+        var submitted = await controller.api.order(order.id);
         expect(
           (submitted.data['completion'] as Json)['work_done'],
           _firstReport,
         );
         expect(_materialTotal(submitted, material['id']), 2);
-        expect((submitted.data['ai_review'] as Json)['is_stub'], isTrue);
+        expect(submitted.status, 'completed');
+        expect(submitted.data.containsKey('ai_review'), isFalse);
         await expectLater(
           controller.api.transition(order.id, 'close', score: 5),
           throwsA(_httpStatus(403)),
@@ -295,7 +295,7 @@ void main() {
           '1',
           rework: true,
         );
-        submitted = await waitForAiReview(controller.api, order.id);
+        submitted = await controller.api.order(order.id);
         expect(
           (submitted.data['completion'] as Json)['work_done'],
           _secondReport,
@@ -364,11 +364,9 @@ void main() {
             'photo',
             'photo',
             'complete',
-            'ai_review',
             'rework',
             'start',
             'complete',
-            'ai_review',
             'close',
           ]),
         );

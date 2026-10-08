@@ -28,7 +28,7 @@ export function withinCreatedPeriod(
 }
 
 export type BoardFocus =
-  "all" | "emergency" | "overdue" | "issued" | "ai_review" | "rejected";
+  "all" | "emergency" | "overdue" | "issued" | "completed" | "rejected";
 export const isActive = (order: Order) =>
   !["closed", "cancelled"].includes(order.status);
 
@@ -38,7 +38,7 @@ export function attentionCounts(orders: Order[]) {
     emergency: active.filter((order) => order.priority === "emergency").length,
     overdue: active.filter((order) => order.is_overdue).length,
     issued: active.filter((order) => order.status === "issued").length,
-    ai_review: active.filter((order) => order.status === "ai_review").length,
+    completed: active.filter((order) => order.status === "completed").length,
     rejected: active.filter((order) => order.status === "rejected").length,
   };
 }

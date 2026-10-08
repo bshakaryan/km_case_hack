@@ -718,12 +718,7 @@ class _CompletionScreenState extends State<CompletionScreen>
                 .toList(),
       );
       if (_uncertain && _operation == 'complete') {
-        if ({
-          'ai_review',
-          'closed',
-          'rework',
-          'completed',
-        }.contains(fresh.status)) {
+        if ({'closed', 'rework', 'completed'}.contains(fresh.status)) {
           setState(() => _done = true);
           setState(
             () => _error = 'На сервере уже есть сданный отчёт. Откройте карточку и проверьте результат. Повторная отправка отключена.',
@@ -820,7 +815,7 @@ class _CompletionScreenState extends State<CompletionScreen>
         return;
       }
       if (!mounted) return;
-      if (result.status != 'ai_review' && result.status != 'completed') {
+      if (result.status != 'completed') {
         setState(() {
           _done = true;
           _error = 'Сервер обработал отчёт. Откройте карточку, чтобы проверить текущее состояние.';

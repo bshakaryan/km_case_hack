@@ -20,7 +20,7 @@ Json summary() => {
   'number': 'HISTORY-9',
   'title': 'Проверить насос',
   'description': 'Осмотреть насос',
-  'status': 'ai_review',
+  'status': 'completed',
   'priority': 'normal',
   'work_type': 'planned',
   'assignee_id': 7,
@@ -80,14 +80,6 @@ Json attempt(int number, {bool legacy = false}) => {
             'created_at': '2026-10-01T10:30:00Z',
           },
         ],
-  'ai_review': legacy
-      ? null
-      : {
-          'verdict': 'needs_attention',
-          'score': 4,
-          'explanation': 'Оценка попытки $number',
-          'is_stub': true,
-        },
   'decisions': legacy
       ? <Json>[]
       : [
@@ -281,7 +273,7 @@ void main() {
   });
 
   testWidgets(
-    'collapsed history opens separate immutable attempts and private photos',
+    'collapsed history opens separate immutable attempts, decisions and private photos',
     (tester) async {
       final controller = PhotoController()
         ..reference = {
@@ -310,7 +302,6 @@ void main() {
       for (final text in [
         'Самостоятельный отчёт 1',
         'Дополнительная деталь 1 · 1 шт',
-        'Историческая формальная проверка',
         'Решение по попытке 1',
         'Возвращено на доработку',
         'Шифр неисправности: F-01 · Утечка',
@@ -367,143 +358,4 @@ void main() {
     },
   );
 
-  testWidgets(
-    'service uncertainty and rules provenance preserve a separate final master score',
-    (tester) async {
-      final controller = PhotoController();
-      addTearDown(controller.dispose);
-      final serviceAttempt = {
-        ...attempt(2),
-        'photos': <Json>[],
-        'ai_job': {'status': 'succeeded', 'provider': 'ai_service'},
-        'ai_review': {
-          'verdict': 'needs_attention',
-          'score': null,
-          'is_stub': true,
-          'source_verdict': 'needs_master_review',
-          'llm_used': false,
-          'is_recommendation': true,
-          'explanation': '<script>Текст рекомендации</script>',
-        },
-      };
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SingleChildScrollView(
-              child: OrderHistory(
-                order: WorkOrder.fromJson({
-                  ...detail(),
-                  'status': 'closed',
-                  'score': 5,
-                  'submission_attempts': [serviceAttempt],
-                }),
-                controller: controller,
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.tap(find.text('Сдачи и назначения'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Сдача №2'));
-      await tester.pumpAndSettle();
-      expect(find.text('Локальная проверка сдачи'), findsOneWidget);
-      expect(find.text('Оценка не определена'), findsOneWidget);
-      expect(find.text('Нужна проверка мастером'), findsOneWidget);
-      expect(find.text('Принято мастером · 5 / 5'), findsOneWidget);
-      expect(find.text('<script>Текст рекомендации</script>'), findsOneWidget);
-      expect(
-        find.textContaining('языковая модель не использовалась'),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('Содержимое снимков не анализируется'),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Предварительная оценка:'), findsNothing);
-      expect(find.text('Принято с замечаниями'), findsNothing);
-      expect(controller.reads, isEmpty);
-      expect(tester.takeException(), isNull);
-    },
-  );
-
-  testWidgets(
-    'submission photo warnings stay separate from the final master decision',
-    (tester) async {
-      final controller = PhotoController();
-      addTearDown(controller.dispose);
-      final serviceAttempt = {
-        ...attempt(2),
-        'photos': <Json>[],
-        'ai_job': {'status': 'succeeded', 'provider': 'ai_service'},
-        'ai_review': {
-          'verdict': 'needs_attention',
-          'score': null,
-          'is_stub': true,
-          'source_verdict': 'needs_master_review',
-          'llm_used': false,
-          'is_recommendation': true,
-          'bridge_version': 2,
-          'explanation': 'Технические признаки требуют осмотра',
-          'photo_check': {
-            'status': 'checked',
-            'method': 'local_cv',
-            'scope': 'submission_selected_pair',
-            'before_id': 80,
-            'after_id': 90,
-            'duplicate_before': true,
-            'exact_duplicate_groups': [
-              [80, 90],
-            ],
-            'equipment_status': 'different',
-            'model_available': true,
-            'capture_time_status': 'unknown',
-            'repair_status': 'unknown',
-            'history_status': 'not_checked',
-          },
-        },
-      };
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SingleChildScrollView(
-              child: OrderHistory(
-                order: WorkOrder.fromJson({
-                  ...detail(),
-                  'status': 'closed',
-                  'score': 5,
-                  'submission_attempts': [serviceAttempt],
-                }),
-                controller: controller,
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.tap(find.text('Сдачи и назначения'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Сдача №2'));
-      await tester.pumpAndSettle();
-      expect(find.text('Результат проверки фото'), findsOneWidget);
-      expect(find.textContaining('до №80; после №90'), findsOneWidget);
-      expect(
-        find.textContaining('признаки повтора фото до ремонта'),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining(
-          'Возможно, на выбранных снимках разное оборудование',
-        ),
-        findsOneWidget,
-      );
-      expect(find.text('Оценка не определена'), findsOneWidget);
-      expect(find.text('Принято мастером · 5 / 5'), findsOneWidget);
-      expect(
-        find.textContaining('Содержимое снимков не анализируется'),
-        findsNothing,
-      );
-      expect(find.textContaining('Предварительная оценка:'), findsNothing);
-      expect(tester.takeException(), isNull);
-    },
-  );
 }

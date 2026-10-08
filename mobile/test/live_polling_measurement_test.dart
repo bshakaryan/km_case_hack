@@ -679,7 +679,6 @@ Future<void> _liveMeasurement(
         'profile_owner_matches',
         'latest_overview_deadline_matches_edit',
         'latest_detail_description_matches_edit',
-        'detail_ai_review_job_is_null',
         'all_other_tables_empty',
         'reopened_payloads_and_timestamps_match_before_close',
         'reopened_payloads_and_timestamps_match_last_successful_sql',

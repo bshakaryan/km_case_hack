@@ -259,7 +259,6 @@ void main() {
           {'id': 7},
         ],
         'submission_attempts': [],
-        'ai_review_job': null,
       }),
     ];
     final order = app.orders.single;

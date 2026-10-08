@@ -29,7 +29,7 @@ export function workerOrderPermissions(order: Order, user: User) {
     participant,
     canUpload:
       participant &&
-      !["ai_review", "completed", "closed", "cancelled"].includes(order.status),
+      !["completed", "closed", "cancelled"].includes(order.status),
   };
 }
 

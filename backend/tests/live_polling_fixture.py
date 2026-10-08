@@ -199,7 +199,7 @@ def serve(args):
     api = urlsplit(api_url)
     database_url = str(URL.create("sqlite", database=str(database)))
     os.environ.update({"DATABASE_URL": database_url, "PUSH_ENABLED": "false",
-                       "SEED_DEMO": "false", "AI_REVIEW_MODE": "queued_stub"})
+                       "SEED_DEMO": "false"})
     import uvicorn
     from app.main import create_app
 

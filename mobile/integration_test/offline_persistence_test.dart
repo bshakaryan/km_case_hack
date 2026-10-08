@@ -27,7 +27,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
-import '../test/support/ai_review_wait.dart';
 
 const _run = String.fromEnvironment('OFFLINE_RUN');
 const _baseUrl = String.fromEnvironment(
@@ -317,8 +316,8 @@ void main() {
               }
             },
           );
-          final submitted = await waitForAiReview(controller.api, orderId);
-          expect(submitted.status, 'ai_review');
+          final submitted = await controller.api.order(orderId);
+          expect(submitted.status, 'completed');
           expect(
             _maps(submitted.data['events'])
                 .where((event) => event['action'] == 'complete'),

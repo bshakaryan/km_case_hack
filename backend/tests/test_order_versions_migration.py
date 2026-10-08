@@ -1,48 +1,63 @@
-"""Filled upgrades retain all prior data and do not invent old receipts."""
-from datetime import datetime, timezone
-
+"""Order versions and retired data remain safe across filled upgrades."""
 import pytest
 import sqlalchemy as sa
 from alembic import command
 
 from app.db import make_engine
 from app.migrations import alembic_config, expected_schema, upgrade_database, validate_schema
-from test_ai_jobs_migration import fill_previous_revision
-from test_migrations import revision
-from test_order_history_migration import dump, without_versions
+from test_migrations import fill_legacy, revision, snapshot
 
 
 def filled_previous(engine):
-    fill_previous_revision(engine)
+    revision(engine, "0002_client_commands")
+    fill_legacy(engine, True)
     revision(engine, "0005_ai_review_jobs")
-    now = datetime.now(timezone.utc)
-    with engine.begin() as connection:
-        connection.execute(expected_schema("0005_ai_review_jobs").tables["ai_review_jobs"].insert(), {
-            "attempt_id": 1, "status": "failed", "provider": "stub", "attempts": 3, "max_attempts": 3,
-            "next_attempt_at": now, "created_at": now, "finished_at": now, "last_error_code": "provider_error"})
+
+
+def comparable(state):
+    result = {name: [dict(row) for row in rows] for name, rows in state.items()}
+    result["integration_logs"] = [
+        {key: value for key, value in row.items()
+            if not (row["adapter"] == "module_archive" and key == "id")}
+        for row in result["integration_logs"]
+    ]
+    return result
 
 
 def check_upgrade(engine):
     filled_previous(engine)
-    before = dump(engine)
+    before = snapshot(engine)
     upgrade_database(engine)
-    after = dump(engine)
-    assert without_versions(after) == before
-    assert all(row["version"] == 1 for row in after["orders"])
-    assert all(row["order_id"] is None and row["order_version"] is None for row in after["client_commands"])
+    after = snapshot(engine)
+    with engine.connect() as connection:
+        assert connection.scalar(sa.text("SELECT version FROM orders WHERE id=1")) == 1
+    with engine.connect() as connection:
+        assert connection.scalar(sa.text(
+            "SELECT COUNT(*) FROM client_commands WHERE order_id IS NOT NULL OR order_version IS NOT NULL"
+        )) == 0
+    assert after["orders"][0]["status"] == "completed"
+    assert "ai_review" not in after["orders"][0]
+    assert {"ai_assessments", "ai_review_jobs"}.isdisjoint(after)
+    assert {"orders", "submission_attempts", "ai_assessments", "client_commands"} <= {
+        row["payload"]["source_table"] for row in after["integration_logs"]
+        if row["adapter"] == "module_archive"
+    }
+    assert after["orders"][0]["completion"] == before["orders"][0]["completion"]
     with engine.connect() as connection:
         validate_schema(connection)
-        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0008_ai_attempt_input"
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0009_remove_ai_modules"
     upgrade_database(engine)
-    assert dump(engine) == after
+    assert snapshot(engine) == after
     with engine.connect() as connection:
         command.downgrade(alembic_config(connection), "0005_ai_review_jobs")
-    assert dump(engine) == before
+    restored = snapshot(engine)
+    assert restored == before
+    assert restored["orders"][0]["status"] == "ai_review"
     upgrade_database(engine)
-    assert dump(engine) == after
+    assert comparable(snapshot(engine)) == comparable(after)
 
 
-def test_sqlite_versions_upgrade_preserves_reports_jobs_and_unknown_receipts(tmp_path):
+def test_sqlite_versions_upgrade_archives_retired_records_and_preserves_receipts(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'versions-upgrade.sqlite'}")
     try:
         check_upgrade(engine)
@@ -50,7 +65,7 @@ def test_sqlite_versions_upgrade_preserves_reports_jobs_and_unknown_receipts(tmp
         engine.dispose()
 
 
-def test_postgresql_versions_upgrade_preserves_reports_jobs_and_unknown_receipts(pg_database):
+def test_postgresql_versions_upgrade_archives_retired_records_and_preserves_receipts(pg_database):
     check_upgrade(pg_database.engine)
 
 

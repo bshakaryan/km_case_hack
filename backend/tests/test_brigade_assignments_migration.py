@@ -30,7 +30,7 @@ def check_upgrade(engine):
         connection.execute(schema.tables["orders"].update().where(schema.tables["orders"].c.id == 1)
             .values(assignee_id=5, assigned_at=now, status="closed", closed_at=now + timedelta(hours=1)))
     before = dump(engine)
-    upgrade_database(engine)
+    revision(engine, "0008_ai_attempt_input")
     after = dump(engine)
     assert all(row["ai_input"] is None for row in after["submission_attempts"])
     assert {name: [{key: value for key, value in row.items()
@@ -47,14 +47,14 @@ def check_upgrade(engine):
     with engine.connect() as connection:
         validate_schema(connection)
         assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0008_ai_attempt_input"
-    upgrade_database(engine)
+    revision(engine, "0008_ai_attempt_input")
     with engine.begin() as connection:
         seed_legacy_history(connection)
     assert dump(engine) == after
     with engine.connect() as connection:
         command.downgrade(alembic_config(connection), "0006_order_versions")
     assert dump(engine) == before
-    upgrade_database(engine)
+    revision(engine, "0008_ai_attempt_input")
     assert dump(engine) == after
 
 

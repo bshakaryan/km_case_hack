@@ -48,7 +48,6 @@ Future<void> _liveScenario() async {
     'submission_attempts',
     'material_writeoffs',
     'complete_events',
-    'ai_review_jobs',
     'complete_receipts',
   ]) {
     expect(baseline[key], 0, reason: 'Fixture baseline must be fresh: $key');

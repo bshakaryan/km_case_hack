@@ -216,20 +216,6 @@ void _replaceTokenEpoch(NaryadApi api, String boundary) {
   api.token = token;
 }
 
-Json _failedAiOrder() => {
-  ..._orderJson(12),
-  'status': 'completed',
-  'ai_review_job': {
-    'id': 8,
-    'attempt_id': 2,
-    'status': 'failed',
-    'retry_allowed': true,
-  },
-  'submission_attempts': [
-    {'id': 2, 'number': 1, 'ai_review': null, 'assessment_id': null},
-  ],
-};
-
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() {
@@ -294,74 +280,6 @@ void main() {
       },
     );
 
-    test(
-      'late AI retry ACK cannot install a pending job after $boundary',
-      () async {
-        final started = Completer<void>();
-        final reply = Completer<http.Response>();
-        final requests = <http.Request>[];
-        final source = NaryadApi(
-          'http://retry.test',
-          client: MockClient((request) async {
-            requests.add(request);
-            expect(request.method, 'POST');
-            expect(
-              request.url.path,
-              '/api/orders/12/submissions/2/ai-review/retry',
-            );
-            started.complete();
-            return reply.future;
-          }),
-        )..token = 'current-session';
-        final store = MemoryLocalStore();
-        final current = _failedAiOrder();
-        final stamp = DateTime.utc(2026, 10, 8, 6);
-        final key = localScopeKey(
-          source.baseUrl,
-          _owner.id,
-          SnapshotKeys.orders,
-        );
-        await store.putSnapshot(key, [current], updatedAt: stamp);
-        final controller = AppController(api: source, localStore: store)
-          ..user = _owner
-          ..orders = [WorkOrder.fromJson(current)];
-        addTearDown(controller.dispose);
-        final retry = controller.retryAiReview(12, 2);
-        final rejected = expectLater(
-          retry,
-          throwsA(
-            isA<ApiException>().having(
-              (failure) => failure.requestMayHaveSucceeded,
-              'uncertain old retry ACK',
-              true,
-            ),
-          ),
-        );
-        await started.future;
-        _replaceTokenEpoch(source, boundary);
-        controller.error = 'Сообщение нового контекста';
-        reply.complete(
-          _jsonResponse({
-            'attempt_id': 2,
-            'order_version': 5,
-            'ai_review': null,
-            'job': {'id': 8, 'attempt_id': 2, 'status': 'pending'},
-          }),
-        );
-        await rejected;
-
-        expect(controller.user, same(_owner));
-        expect(controller.orders.single.toJson(), current);
-        expect(controller.orders.single.aiReviewJob?['status'], 'failed');
-        expect(controller.orders.single.version, 4);
-        expect(controller.error, 'Сообщение нового контекста');
-        expect((await store.getSnapshot(key))!.data, [current]);
-        expect((await store.getSnapshot(key))!.updatedAt, stamp);
-        expect(await store.outbox(), isEmpty);
-        expect(requests, hasLength(1));
-        expect(requests.single.headers['x-expected-order-version'], '4');
-      },
-    );
   }
 
   test(

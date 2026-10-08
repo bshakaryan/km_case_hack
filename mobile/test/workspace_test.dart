@@ -155,7 +155,7 @@ void main() {
     (tester) async {
       final c = TestController()
         ..user = const User(id: 1, name: 'Мастер демо', role: 'master')
-        ..orders = [order('ai_review')];
+        ..orders = [order('completed')];
       addTearDown(c.dispose);
       await tester.pumpWidget(NaryadApp(controller: c));
       await tester.tap(find.text('Ожидают приёмки'));

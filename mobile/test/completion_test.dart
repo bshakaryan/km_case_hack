@@ -118,7 +118,7 @@ class _Controller extends AppController {
     }
     return WorkOrder.fromJson({
       ...order.data,
-      'status': 'ai_review',
+      'status': 'completed',
       'completion': data,
     });
   }
@@ -524,7 +524,7 @@ void main() {
 
   testWidgets('Only the master sees acceptance actions', (tester) async {
     for (final role in ['worker', 'master']) {
-      final controller = _Controller(_order(status: 'ai_review'), role: role);
+      final controller = _Controller(_order(status: 'completed'), role: role);
       await tester.pumpWidget(
         MaterialApp(
           theme: appTheme(),

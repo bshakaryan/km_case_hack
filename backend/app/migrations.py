@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 BACKEND = Path(__file__).resolve().parents[1]
-REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push", "0004_order_history", "0005_ai_review_jobs", "0006_order_versions", "0007_assignment_participants", "0008_ai_attempt_input")
+REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push", "0004_order_history", "0005_ai_review_jobs", "0006_order_versions", "0007_assignment_participants", "0008_ai_attempt_input", "0009_remove_ai_modules")
 
 
 class SchemaCompatibilityError(RuntimeError):
@@ -90,13 +90,33 @@ def expected_schema(revision):
     if revision in REVISIONS[8:]:
         ai_input = ScriptDirectory.from_config(alembic_config()).get_revision("0008_ai_attempt_input").module
         ai_input.schema(metadata)
+    if revision in REVISIONS[9:]:
+        cleanup = ScriptDirectory.from_config(alembic_config()).get_revision("0009_remove_ai_modules").module
+        cleanup.schema(metadata)
     return metadata
 
 
 def seed_legacy_history(connection):
-    """Use the same frozen snapshot rules for historical demonstration data."""
-    history = ScriptDirectory.from_config(alembic_config()).get_revision("0004_order_history").module
-    history.backfill_legacy(connection)
+    """Backfill current demo rows without depending on retired schema fields."""
+    metadata = sa.MetaData()
+    orders = sa.Table("orders", metadata, autoload_with=connection)
+    assignments = sa.Table("order_assignments", metadata, autoload_with=connection)
+    attempts = sa.Table("submission_attempts", metadata, autoload_with=connection)
+    known_assignments = set(connection.execute(sa.select(assignments.c.order_id)).scalars())
+    known_attempts = set(connection.execute(sa.select(attempts.c.order_id)).scalars())
+    columns = [orders.c.id, orders.c.assignee_id, orders.c.brigade_id, orders.c.assigned_at,
+        orders.c.completed_at, orders.c.completion]
+    for row in connection.execute(sa.select(*columns)).mappings():
+        if row["id"] not in known_assignments:
+            connection.execute(assignments.insert(), {
+                "order_id": row["id"], "sequence": 1, "assignee_id": row["assignee_id"],
+                "brigade_id": row["brigade_id"], "assigned_at": row["assigned_at"],
+                "ended_at": None, "assigned_by_id": None, "source": "legacy_snapshot"})
+        if row["completion"] is not None and row["id"] not in known_attempts:
+            connection.execute(attempts.insert(), {
+                "order_id": row["id"], "sequence": 1, "assignment_id": None,
+                "submitted_at": row["completed_at"], "author_id": None,
+                "payload": row["completion"], "source": "legacy_snapshot"})
     participants = ScriptDirectory.from_config(alembic_config()).get_revision("0007_assignment_participants").module
     participants.backfill_legacy(connection)
 

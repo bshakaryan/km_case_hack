@@ -47,6 +47,8 @@ def fill_legacy(engine, has_commands):
                 "brigade_id": 1, "master_id": 1, "priority": "normal", "status": "issued", "deadline": created + timedelta(days=1),
                 "created_at": created, "started_at": None, "completed_at": None, "closed_at": None, "comment": "Preserve",
                 "normal_hours": 2, "downtime_minutes": 0, "score": None, "completion": {"work_done": "Keep", "materials": []}, "ai_review": None})
+        connection.execute(schema.tables["orders"].update().where(schema.tables["orders"].c.id == 1).values(
+            status="ai_review", completed_at=created, ai_review={"score": 4.5, "is_stub": True, "explanation": "Archived legacy result"}))
         event_specs = [
             (1, 10, "assignee_id=6"), (1, 40, "assignee_id=6; comment=renewed"),
             (1, 50, "comment=not assignment; assignee_id=6"),
@@ -58,6 +60,8 @@ def fill_legacy(engine, has_commands):
             "action": "edit", "from_status": "issued", "to_status": "issued", "actor_id": 1,
             "created_at": created + timedelta(minutes=minutes), "comment": comment}
             for index, (order_id, minutes, comment) in enumerate(event_specs)])
+        connection.execute(schema.tables["order_events"].insert(), {"id": 199, "order_id": 1, "action": "ai_review",
+            "from_status": "completed", "to_status": "ai_review", "actor_id": 1, "created_at": created, "comment": "Legacy automated event"})
         connection.execute(schema.tables["photos"].insert(), {"id": 31, "order_id": 1, "kind": "after", "data": b"preserved-synthetic-photo", "author_id": 6, "created_at": created})
         connection.execute(schema.tables["material_writeoffs"].insert(), {"id": 41, "order_id": 1, "material_id": 1, "quantity": 2, "author_id": 6, "created_at": created})
         connection.execute(schema.tables["notifications"].insert(), {"id": 51, "employee_id": 6, "title": "Keep", "message": "Keep notification", "kind": "assigned", "order_id": 1, "created_at": created, "read": True, "dedupe_key": "keep-notification"})
@@ -66,7 +70,7 @@ def fill_legacy(engine, has_commands):
             "explanation": "Keep assessment", "is_stub": True, "master_score": None, "created_at": created})
         if has_commands:
             connection.execute(schema.tables["client_commands"].insert(), {"id": 71, "employee_id": 6, "client_id": "kept-command-0001",
-                "kind": "complete", "request_hash": "b" * 64, "response_status": 200, "response_body": {"id": 1, "status": "ai_review", "nested": {"keep": True}}, "created_at": created})
+                "kind": "complete", "request_hash": "b" * 64, "response_status": 200, "response_body": {"id": 1, "status": "ai_review", "events": [{"action": "ai_review_retry", "to_status": "ai_review"}], "nested": {"keep": True}}, "created_at": created})
     return created.replace(tzinfo=None)
 
 
@@ -84,12 +88,25 @@ def test_filled_legacy_upgrade_preserves_data_and_backfills_current_assignment(t
     before = snapshot(engine)
     upgrade_database(engine)
     after = snapshot(engine)
-    assert {name: rows for name, rows in after.items() if name in before} == before
-    schema = expected_schema("0008_ai_attempt_input")
+    unchanged = {name: rows for name, rows in before.items() if name not in {"orders", "order_events", "integration_logs", "client_commands", "ai_assessments"}}
+    assert {name: after[name] for name in unchanged} == unchanged
+    assert after["orders"][0]["status"] == "completed"
+    assert "ai_review" not in after["orders"][0]
+    assert "ai_review" not in after["submission_attempts"][0]
+    archive = [row for row in after["integration_logs"] if row["adapter"] == "module_archive"]
+    archived_sources = {row["payload"]["source_table"] for row in archive}
+    assert {"orders", "submission_attempts", "ai_assessments", "order_events"} <= archived_sources
+    if has_commands:
+        assert "client_commands" in archived_sources
+        command_row = next(row for row in after["client_commands"] if row["id"] == 71)
+        assert command_row["response_body"] == {"id": 1, "status": "completed", "events": [{"action": "manual_acceptance", "to_status": "completed"}], "nested": {"keep": True}}
+    event = next(row for row in after["order_events"] if row["id"] == 199)
+    assert (event["action"], event["from_status"], event["to_status"]) == ("awaiting_acceptance", "completed", "completed")
+    schema = expected_schema("0009_remove_ai_modules")
     with engine.connect() as connection:
         assigned = dict(connection.execute(sa.select(schema.tables["orders"].c.id, schema.tables["orders"].c.assigned_at)).all())
         assert assigned == {1: created + timedelta(minutes=40), 2: created, 3: created, 4: created + timedelta(minutes=30), 5: created}
-        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0008_ai_attempt_input"
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0009_remove_ai_modules"
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
         assert not connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     upgrade_database(engine)
@@ -200,10 +217,23 @@ def test_assignment_migration_downgrade_and_upgrade_preserve_filled_database(tmp
     with engine.connect() as connection:
         command.downgrade(alembic_config(connection), "0002_client_commands")
     removed = {"device_tokens", "push_tasks", "order_assignments", "order_assignment_participants", "submission_attempts", "submission_photos", "submission_writeoffs", "submission_decisions", "ai_review_jobs"}
-    assert snapshot(engine) == {name: rows for name, rows in before.items() if name not in removed}
+    restored = snapshot(engine)
+    assert not (set(restored) & removed)
+    assert restored["orders"][0]["status"] == "ai_review"
+    assert restored["orders"][0]["ai_review"]["score"] == 4.5
+    assert restored["ai_assessments"][0]["id"] == 81
+    assert next(row for row in restored["order_events"] if row["id"] == 199)["action"] == "ai_review"
+    assert next(row for row in restored["client_commands"] if row["id"] == 71)["response_body"]["status"] == "ai_review"
+    assert len(restored["integration_logs"]) == 1
+    assert restored["integration_logs"][0]["id"] == 61 and restored["integration_logs"][0]["payload"] == {"sent": False}
     assert "assigned_at" not in {column["name"] for column in sa.inspect(engine).get_columns("orders")}
     upgrade_database(engine)
-    assert snapshot(engine) == before
+    upgraded = snapshot(engine)
+    for state in (before, upgraded):
+        state["integration_logs"] = [{key: value for key, value in row.items()
+            if not (row["adapter"] == "module_archive" and key == "id")}
+            for row in state["integration_logs"]]
+    assert upgraded == before
     engine.dispose()
 
 

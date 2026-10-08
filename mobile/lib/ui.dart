@@ -18,7 +18,6 @@ const statuses = <String, String>{
   'in_progress': 'В работе',
   'paused': 'Приостановлен',
   'completed': 'Исполнено',
-  'ai_review': 'Проверка ИИ',
   'rework': 'На доработку',
   'closed': 'Закрыт',
   'cancelled': 'Отменён',

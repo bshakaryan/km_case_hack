@@ -355,7 +355,6 @@ class SnapshotSqliteObserver {
         for (final field in [
           'assignment_history',
           'submission_attempts',
-          'ai_review_job',
         ])
           field: detail?.containsKey(field) == true,
       },
@@ -363,9 +362,6 @@ class SnapshotSqliteObserver {
           (detail?['assignment_history'] as List?)?.length,
       'detail_submission_attempts_count':
           (detail?['submission_attempts'] as List?)?.length,
-      'detail_ai_review_job_is_null':
-          detail?.containsKey('ai_review_job') == true &&
-          detail?['ai_review_job'] == null,
       'other_table_counts': tables,
       'all_other_tables_empty': tables.values.every((count) => count == 0),
       'active_puts_after_drain': activePuts,

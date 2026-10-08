@@ -315,7 +315,7 @@ void main() {
     ) async {
       final controller = _Controller(role: role)
         ..orders = [
-          _order(status: role == 'manager' ? 'in_progress' : 'ai_review'),
+          _order(status: role == 'manager' ? 'in_progress' : 'completed'),
         ];
       addTearDown(controller.dispose);
       await tester.pumpWidget(

@@ -564,19 +564,6 @@ class NaryadApi {
     expectedVersion: expectedVersion,
   );
 
-  Future<Json> attemptAiReview(int orderId, int attemptId) =>
-      _object('/orders/$orderId/submissions/$attemptId/ai-review');
-  Future<Json> retryAiReview(
-    int orderId,
-    int attemptId, {
-    int? expectedVersion,
-  }) => _object(
-    '/orders/$orderId/submissions/$attemptId/ai-review/retry',
-    method: 'POST',
-    body: <String, dynamic>{},
-    expectedVersion: expectedVersion,
-  );
-
   Future<Json> uploadPhoto(
     int id,
     Uint8List bytes,

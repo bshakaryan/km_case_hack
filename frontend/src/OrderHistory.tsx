@@ -2,18 +2,6 @@ import { useState } from "react";
 import { formatDate, number } from "./model";
 import type { OrderDetail, RefItem, SubmissionAttempt } from "./model";
 import { Photo } from "./ui";
-import {
-  AiJobStatus,
-  AiPhotoCheck,
-  AiReportChecks,
-  aiReviewExplanation,
-  aiReviewNote,
-  aiReviewScoreLabel,
-  aiReviewSource,
-  aiReviewTitle,
-  aiReviewVerdict,
-  showAiReview,
-} from "./AiReviewJob";
 import { AssignmentParticipants } from "./AssignmentParticipants";
 
 function AttemptPhotos({ photos }: { photos: SubmissionAttempt["photos"] }) {
@@ -192,32 +180,6 @@ export function OrderHistory({
                     </p>
                   )}
                   <AttemptPhotos photos={attempt.photos} />
-                  <AiJobStatus job={attempt.ai_job} />
-                  {attempt.ai_review && showAiReview(attempt.ai_job) && (
-                    <section className="history-assessment">
-                      <h5>
-                        {aiReviewTitle(attempt.ai_review, attempt.ai_job)}
-                      </h5>
-                      <p>
-                        {aiReviewVerdict(attempt.ai_review)} ·{" "}
-                        {aiReviewScoreLabel(attempt.ai_review.score, attempt.ai_review)}
-                      </p>
-                      {aiReviewSource(attempt.ai_review) && (
-                        <p className="muted">
-                          {aiReviewSource(attempt.ai_review)}
-                        </p>
-                      )}
-                      <p>{aiReviewExplanation(attempt.ai_review, attempt.ai_job)}</p>
-                      <AiReportChecks
-                        checks={attempt.ai_review.report_checks}
-                        isOpenAi={attempt.ai_review.photo_check?.method === "openai_vision"}
-                      />
-                      <AiPhotoCheck check={attempt.ai_review.photo_check} />
-                      <p className="muted">
-                        {aiReviewNote(attempt.ai_review, attempt.ai_job)}
-                      </p>
-                    </section>
-                  )}
                   <h5>Решения мастера</h5>
                   {attempt.decisions.length ? (
                     attempt.decisions.map((decision) => (

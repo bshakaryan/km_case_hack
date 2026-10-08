@@ -241,7 +241,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
               ))}
             </div>
             <p>
-              ПИН 1234 · Учебные данные. При настроенном ключе выбранные фото сдачи отправляются в OpenAI Vision; решение принимает мастер.
+              ПИН 1234 · Учебные данные. Сдачу проверяет и принимает мастер.
             </p>
           </div>
         </div>
@@ -904,7 +904,7 @@ export default function App() {
                           tone: "warning",
                         },
                         {
-                          focus: "ai_review" as const,
+                          focus: "completed" as const,
                           title: "На приёмке",
                           hint: "Проверить отчёт и результат",
                           icon: ClipboardCheck,
@@ -1143,7 +1143,7 @@ export default function App() {
         </main>
         <footer className="main-footer">
           <span>НарядAI · Костанайские минералы</span>
-          <span>Демо · учебные данные · локальная проверка сдачи</span>
+          <span>Демо · учебные данные · ручная приёмка мастером</span>
         </footer>
       </div>
       {create && (

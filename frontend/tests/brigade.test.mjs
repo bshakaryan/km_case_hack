@@ -83,7 +83,7 @@ test("snapshot participants can upload, while only the responsible worker contro
     participant: false,
     canUpload: false,
   });
-  for (const status of ["ai_review", "completed", "closed", "cancelled"])
+  for (const status of ["completed", "closed", "cancelled"])
     assert.equal(
       workerOrderPermissions(order({ status }), { id: 2, role: "worker" })
         .canUpload,

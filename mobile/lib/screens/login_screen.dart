@@ -188,7 +188,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 16),
                   const InfoPanel(
-                    'Демо: master или worker2 · ПИН 1234.\nПри настроенном ключе выбранные фото сдачи отправляются в OpenAI Vision; решение принимает мастер.',
+                    'Демо: master или worker2 · ПИН 1234.\nСдачу проверяет и принимает мастер.',
                     icon: Icons.science_outlined,
                   ),
                 ],

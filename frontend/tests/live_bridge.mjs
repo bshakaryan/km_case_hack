@@ -108,7 +108,7 @@ try {
   const first = await waitOrder(
     "first report",
     (detail) =>
-      detail.status === "ai_review" &&
+      detail.status === "completed" &&
       detail.completion?.work_done.startsWith("BRIDGE_FIRST:"),
   );
   assert.equal(first.completion.materials.length, 1);
@@ -134,7 +134,7 @@ try {
   const second = await waitOrder(
     "revised report",
     (detail) =>
-      detail.status === "ai_review" &&
+      detail.status === "completed" &&
       detail.completion?.work_done.startsWith("BRIDGE_REWORK:") &&
       detail.events.filter((event) => event.action === "complete").length === 2,
   );

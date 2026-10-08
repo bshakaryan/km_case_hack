@@ -44,7 +44,6 @@ import {
   Search,
   ShieldCheck,
   Smartphone,
-  Sparkles,
   Star,
   Timer,
   TrendingUp,
@@ -931,7 +930,7 @@ export function AnalyticsPage({
                 <section className="insights-section">
                   <SectionTitle
                     title="Сигналы по данным"
-                    caption="Проверяемые агрегаты и детерминированные правила по выбранной выборке; это не вывод генеративного ИИ."
+                    caption="Агрегаты и расчёты по данным выбранной выборки."
                   />
                   <div className="insights-grid">
                     {data.insights.map((ins, i) => (
@@ -958,8 +957,8 @@ export function AnalyticsPage({
                     ))}
                   </div>
                 </section>
-                <div className="ai-summary">
-                  <Sparkles size={20} />
+                <div className="data-summary">
+                  <Activity size={20} />
                   <div>
                     <strong>
                       Сводка по данным
@@ -1635,22 +1634,15 @@ export function IntegrationsPage() {
               <span className="eyebrow">СОСТОЯНИЕ СИСТЕМЫ</span>
               <h2>Что работает сейчас</h2>
               <p>
-                Веб-панель и Flutter работают с общим API и базой. Фото новой
-                сдачи проверяет OpenAI Vision при настроенном ключе; связанные
-                снимки передаются внешнему API. Состояние push зависит от
-                настроек окружения.
+                Веб-панель и Flutter работают с общим API и базой. Отчёт и
+                фотографии сдачи рассматривает мастер; автоматической проверки
+                изображений нет. Push зависит от настроек окружения.
               </p>
             </div>
             <span className="outlined-tag">СЕРВЕРНАЯ ИНТЕГРАЦИЯ</span>
           </div>
           <div className="integration-grid">
             {[
-              {
-                key: "ai",
-                title: "Проверка сдачи",
-                icon: Sparkles,
-                subtitle: "OPENAI VISION",
-              },
               {
                 key: "native",
                 title: "Push на устройства",
@@ -1694,16 +1686,6 @@ export function IntegrationsPage() {
                     <span>Статус</span>
                     <code>{integration?.status}</code>
                   </div>
-                  {key === "ai" && (
-                    <div className="integration-note">
-                      <Info size={15} />
-                      <span>
-                        Локальные правила и CV дают только рекомендацию. Внешний
-                        LLM/vision не вызывается; числовую оценку и решение
-                        выставляет мастер.
-                      </span>
-                    </div>
-                  )}
                   {key === "native" && (
                     <div className="integration-note">
                       <Info size={15} />

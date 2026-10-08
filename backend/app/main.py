@@ -24,21 +24,19 @@ from sqlalchemy import delete, func, or_, select, text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .db import make_engine, session_factory
+from .db import begin_sqlite_write, make_engine, session_factory
 from .conditional_response import conditional_json_response
-from .ai_jobs import FormalStub, begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
-from .ai_adapter import AttemptServiceAdapter
 from .migrations import upgrade_database
-from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
-from .push import StubSender, dispatch_push, env_int, get_sender
+from .models import Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
+from .push import DisabledSender, dispatch_push, env_int, get_sender
 from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPage, OrderPatch, Transition
 from .order_paging import after_cursor, apply_scope, broad_search, decode_cursor, encode_cursor, fingerprint, order_tuple, sort_columns
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
-from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, append_assignment, append_submission, append_submission_decision, audit, aware, current_participants, downtime_minutes, effective_queue_statuses, employee_dict, end_current_assignment, iso, monitor_deadlines, notify, order_dict, participant_ids, photo_dict, queue_positions, shift_start, waiting_orders, worker_order_access
+from .services import EXECUTION_FINISHED, TERMINAL, analytics, append_assignment, append_submission, append_submission_decision, audit, aware, current_participants, downtime_minutes, effective_queue_statuses, employee_dict, end_current_assignment, iso, monitor_deadlines, notify, order_dict, participant_ids, photo_dict, queue_positions, shift_start, waiting_orders, worker_order_access
 
 log = logging.getLogger(__name__)
-STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "completed", "ai_review", "rework", "closed", "cancelled"}
+STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "completed", "rework", "closed", "cancelled"}
 PRIORITY = {"emergency", "high", "normal", "planned"}
 WS_AUTH_RECHECK_SECONDS = 30
 ORDER_NUMBER_ATTEMPTS = 5
@@ -89,32 +87,12 @@ class Realtime:
 
 
 def create_app(database_url=None, seed=True, monitor=True):
-    ai_mode = os.getenv("AI_REVIEW_MODE", "queued_stub").strip()
-    if ai_mode not in {"queued_stub", "inline_stub", "queued_service"}:
-        raise ValueError("AI_REVIEW_MODE must be queued_stub, inline_stub or queued_service")
-    ai_providers = {"stub": FormalStub()}
-    if ai_mode == "queued_service":
-        ai_providers["ai_service"] = AttemptServiceAdapter.from_env()
     engine = make_engine(database_url)
     sessions = session_factory(engine)
     realtime = Realtime()
     attempts = defaultdict(deque)
     # One sender instance keeps the OAuth2 access token cached across dispatches.
     push_sender = get_sender()
-
-    async def ai_loop():
-        while True:
-            try:
-                changed_orders = await asyncio.to_thread(dispatch_ai_jobs, sessions, providers=ai_providers)
-                for order_id in changed_orders:
-                    await realtime.publish("orders.updated", order_id)
-                    await realtime.publish("notifications.updated")
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # No provider exception text or submitted data enters logs.
-                log.warning("AI job dispatch unavailable; retrying")
-            await asyncio.sleep(1)
 
     def run_monitor():
         with sessions() as db:
@@ -153,13 +131,8 @@ def create_app(database_url=None, seed=True, monitor=True):
             with sessions() as db:
                 seed_database(db)
         task = asyncio.create_task(deadline_loop()) if monitor else None
-        push_task = asyncio.create_task(push_loop()) if monitor and not isinstance(push_sender, StubSender) else None
-        ai_task = asyncio.create_task(ai_loop()) if monitor and ai_mode != "inline_stub" else None
+        push_task = asyncio.create_task(push_loop()) if monitor and not isinstance(push_sender, DisabledSender) else None
         yield
-        if ai_task:
-            ai_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await ai_task
         if push_task:
             push_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -177,9 +150,6 @@ def create_app(database_url=None, seed=True, monitor=True):
     app.state.engine = engine
     app.state.sessions = sessions
     app.state.realtime = realtime
-    app.state.ai_review_mode = ai_mode
-    app.state.ai_vision_configured = os.getenv("AI_VISION_CONFIGURED", "false").strip().lower() == "true"
-    app.state.run_ai_jobs = lambda provider=None, limit=10: dispatch_ai_jobs(sessions, provider=provider, limit=limit, providers=ai_providers)
     app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id", "X-Expected-Order-Version", "X-Previous-Client-Command-Id", "If-None-Match"], expose_headers=["ETag"])
 
     def get_db():
@@ -380,9 +350,8 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.get("/health")
     def health(db: DB):
         db.execute(sql_text("SELECT 1"))
-        ai = "ai_service" if app.state.ai_review_mode == "queued_service" else app.state.ai_review_mode
-        native = "fcm" if not isinstance(get_sender(), StubSender) else "disabled"
-        return {"status": "ok", "database": "connected", "ai": ai, "native": native}
+        native = "fcm" if not isinstance(get_sender(), DisabledSender) else "disabled"
+        return {"status": "ok", "database": "connected", "native": native}
 
     @app.post("/api/auth/login")
     def login(payload: Login, request: Request, db: DB):
@@ -540,7 +509,7 @@ def create_app(database_url=None, seed=True, monitor=True):
         search: str | None = Query(None, max_length=200),
         from_date: str | None = None, to_date: str | None = None,
         scope: Literal["all", "active", "closed"] = "all",
-        focus: Literal["all", "overdue", "emergency", "issued", "ai_review", "rejected"] = "all",
+        focus: Literal["all", "overdue", "emergency", "issued", "completed", "rejected"] = "all",
         sort: Literal["newest", "deadline", "priority"] = "newest",
         limit: int = Query(100, ge=1, le=200), cursor: str | None = Query(None, max_length=4096)):
         require_role(user, "master", "worker", "manager", "admin")
@@ -596,46 +565,6 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.get("/api/orders/{id_}")
     def order_detail(id_: int, db: DB, user: User):
         return order_dict(db, get_order(db, id_, user), detail=True, user=user)
-
-    def submission_for_order(db, order, attempt_id):
-        attempt = db.get(SubmissionAttempt, attempt_id)
-        if attempt is None or attempt.order_id != order.id:
-            raise HTTPException(404, "Попытка сдачи не найдена")
-        return attempt
-
-    @app.get("/api/orders/{id_}/submissions/{attempt_id}/ai-review")
-    def get_ai_review(id_: int, attempt_id: int, db: DB, user: User):
-        order = get_order(db, id_, user)
-        attempt = submission_for_order(db, order, attempt_id)
-        job = db.scalar(select(AIReviewJob).where(AIReviewJob.attempt_id == attempt.id))
-        latest = db.scalar(select(SubmissionAttempt.id).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
-        retry_allowed = bool(user.role in {"master", "admin"} and job and job.status == "failed" and latest == attempt.id and order.status == "completed" and attempt.ai_review is None and attempt.assessment_id is None)
-        return {"attempt_id": attempt.id, "order_version": order.version, "ai_review": attempt.ai_review, "job": job_dict(job, retry_allowed)}
-
-    @app.post("/api/orders/{id_}/submissions/{attempt_id}/ai-review/retry")
-    def retry_ai_review(id_: int, attempt_id: int, db: DB, user: User, request: Request):
-        require_role(user, "master", "admin")
-        begin_sqlite_write(db)
-        order = get_order(db, id_, user, lock=True)
-        attempt = submission_for_order(db, order, attempt_id)
-        job = db.scalar(select(AIReviewJob).where(AIReviewJob.attempt_id == attempt.id).with_for_update())
-        def perform():
-            check_order_version(db, user, request, order)
-            latest = db.scalar(select(SubmissionAttempt.id).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
-            if job is None or job.status != "failed" or order.status != "completed" or latest != attempt.id or attempt.ai_review is not None or attempt.assessment_id is not None:
-                raise HTTPException(409, "Повтор доступен только для последней неудачной проверки завершённой работы")
-            job.status = "pending"
-            job.attempts = 0
-            job.next_attempt_at = utcnow()
-            job.finished_at = None
-            job.last_error_code = None
-            job.lease_token = None
-            job.lease_expires_at = None
-            order.version += 1
-            audit(db, order, "ai_review_retry", user.id, order.status, "Повтор проверки конкретной сдачи")
-            db.flush()
-            return {"attempt_id": attempt.id, "order_version": order.version, "ai_review": None, "job": job_dict(job)}, [("orders.updated", order.id)]
-        return run_idempotent(db, user, request, "ai_review_retry", request_hash(str(attempt_id)), 200, perform, order_id=id_)
 
     @app.post("/api/orders", status_code=201)
     def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
@@ -696,7 +625,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             old_status = order.status
             audit_fields = []
             if "assignee_id" in changes or "brigade_id" in changes:
-                if order.status in ["in_progress", "paused", "completed", "ai_review"]:
+                if order.status in ["in_progress", "paused", "completed"]:
                     raise HTTPException(409, "Переназначение доступно до начала работы или после возврата")
                 order.assignee_id, participants = resolve_assignment(db, payload.assignee_id, payload.brigade_id, payload.responsible_id)
                 order.brigade_id = payload.brigade_id
@@ -738,7 +667,7 @@ def create_app(database_url=None, seed=True, monitor=True):
                 return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id)]
             if action in ["reject", "pause", "rework", "cancel"] and not payload.reason:
                 raise HTTPException(422, "Укажите причину действия")
-            transitions = {"accept": ({"issued", "rework"}, "accepted"), "queue": ({"issued", "rework", "accepted"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"ai_review"}, "closed"), "rework": ({"ai_review"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
+            transitions = {"accept": ({"issued", "rework"}, "accepted"), "queue": ({"issued", "rework", "accepted"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"completed"}, "closed"), "rework": ({"completed"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
             allowed, target = transitions[action]
             if order.status not in allowed:
                 raise HTTPException(409, f"Действие {action} недоступно для статуса {order.status}")
@@ -774,10 +703,6 @@ def create_app(database_url=None, seed=True, monitor=True):
                     raise HTTPException(422, "Мастер должен поставить итоговую оценку от 1 до 5")
                 order.score = payload.score
                 order.closed_at = utcnow()
-                order.ai_review = {**(order.ai_review or {}), "master_score": payload.score}
-                assessment = db.scalar(select(AIAssessment).where(AIAssessment.order_id == order.id).order_by(AIAssessment.id.desc()).limit(1))
-                if assessment:
-                    assessment.master_score = payload.score
             if action == "rework":
                 order.completed_at = None
                 order.score = None
@@ -835,11 +760,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             order.version += 1
             audit(db, order, "complete", user.id, "in_progress", payload.work_done)
             notify(db, participant_ids(db, order) + [order.master_id], "Статус наряда изменён", f"{order.number}: in_progress → completed", "status", order.id)
-            order.ai_review = None
-            attempt = append_submission(db, order, user.id, submission_payload, writeoffs)
-            job = enqueue_job(db, attempt, "ai_service" if ai_mode == "queued_service" else "stub")
-            if ai_mode == "inline_stub":
-                run_inline(db, order, attempt, job)
+            append_submission(db, order, user.id, submission_payload, writeoffs)
             return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
         return run_idempotent(db, user, request, "complete", command_hash, 200, perform, order_id=id_)
@@ -869,7 +790,7 @@ def create_app(database_url=None, seed=True, monitor=True):
 
         def perform():
             check_order_version(db, user, request, order)
-            if order.status in TERMINAL or order.status == "ai_review":
+            if order.status in TERMINAL or order.status == "completed":
                 raise HTTPException(409, "Фотографии нельзя менять после сдачи или закрытия наряда")
             count = db.scalar(select(func.count()).select_from(Photo).where(Photo.order_id == id_, Photo.kind == kind))
             if count >= 5:
@@ -995,19 +916,11 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.get("/api/integrations")
     def integrations(user: User):
         require_role(user, "master", "manager", "admin")
-        if isinstance(get_sender(), StubSender):
+        if isinstance(get_sender(), DisabledSender):
             native = {"mode": "disabled", "status": "not_configured", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
         else:
             native = {"mode": "fcm", "status": "configured", "description": "Firebase Cloud Messaging (HTTP v1) настроен для Android. Успешная доставка зависит от регистрации устройства и ответа FCM."}
-        if app.state.ai_review_mode == "queued_service":
-            status = "configured" if app.state.ai_vision_configured else "not_configured"
-            description = ("OpenAI Vision настроен для проверки выбранных фото сдачи. Внешнему API передаются только связанные фото, без отчёта и идентификаторов сотрудников; результат — рекомендация, окончательное решение принимает мастер. Фактический вызов зависит от действительности ключа и доступа к модели."
-                           if app.state.ai_vision_configured else
-                           "OpenAI Vision не настроен: добавьте OPENAI_API_KEY в игнорируемый корневой .env. AI_SERVICE_TOKEN — отдельный внутренний токен backend → ai-review. Без ключа новые проверки фото не выполняются; итоговое решение принимает мастер.")
-            ai = {"mode": "openai_vision", "status": status, "description": description}
-        else:
-            ai = {"mode": app.state.ai_review_mode, "status": "fallback", "description": "Включён совместимый тестовый stub-режим проверки сдачи. Для реальной проверки фото задайте AI_REVIEW_MODE=queued_service и OPENAI_API_KEY в игнорируемом корневом .env; итоговое решение принимает мастер."}
-        return {"ai": ai, "native": native, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
+        return {"native": native, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
 
     @app.websocket("/api/ws")
     @app.websocket("/ws")

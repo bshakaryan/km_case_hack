@@ -45,21 +45,11 @@ class PushSender(Protocol):
     def send(self, token: str, message: dict) -> SendResult: ...
 
 
-class StubSender:
-    """Never contacts a network provider; records an integration trace instead."""
-
-    is_stub = True
-
-    def __init__(self, db=None):
-        self.db = db
-
-    def bind(self, db):
-        self.db = db
+class DisabledSender:
+    """Explicitly represent push as unavailable; never simulate delivery."""
 
     def send(self, token: str, message: dict) -> SendResult:
-        if self.db is not None:
-            self.db.add(IntegrationLog(adapter="fcm", operation="push_not_sent", payload={"token_fingerprint": token_fingerprint(token), "kind": (message.get("data") or {}).get("kind"), "is_stub": True}))
-        return SendResult(ok=True, invalid_token=False, provider_message_id=None, error=None)
+        return SendResult(ok=False, error="push_not_configured")
 
 
 class FcmSender:
@@ -125,7 +115,7 @@ class FcmSender:
 
 def get_sender():
     if not env_flag("PUSH_ENABLED"):
-        return StubSender()
+        return DisabledSender()
     project_id = os.getenv("FIREBASE_PROJECT_ID", "km-case-hack")
     inline = (os.getenv("FIREBASE_CREDENTIALS_JSON") or "").strip()
     if inline:
@@ -138,7 +128,7 @@ def get_sender():
     credentials_path = os.getenv("FIREBASE_CREDENTIALS") or ""
     if credentials_path and os.path.isfile(credentials_path):
         return FcmSender(project_id, credentials_path=credentials_path)
-    return StubSender()
+    return DisabledSender()
 
 
 def build_message(notification, order=None, token=""):
@@ -183,9 +173,8 @@ def enqueue_push(db, notification, order=None):
 
 def dispatch_push(db, sender=None) -> int:
     sender = sender if sender is not None else get_sender()
-    if isinstance(sender, StubSender):
-        sender.bind(db)
-    is_stub = bool(getattr(sender, "is_stub", False))
+    if isinstance(sender, DisabledSender):
+        return 0
     max_attempts = env_int("PUSH_MAX_ATTEMPTS", 8)
     tasks = list(db.scalars(select(PushTask).where(PushTask.status == "pending", PushTask.next_attempt_at <= utcnow()).order_by(PushTask.id)))
     sent = 0
@@ -212,20 +201,17 @@ def dispatch_push(db, sender=None) -> int:
                 task.sent_at = utcnow()
                 task.provider_message_id = result.provider_message_id
                 task.last_error = None
-                if not is_stub:
-                    db.add(IntegrationLog(adapter="fcm", operation="push_sent", payload={"task_id": task.id, "employee_id": task.employee_id, "kind": task.kind, "order_id": task.order_id, "token_fingerprint": token_fingerprint(device.token), "attempts": task.attempts, "provider_message_id": result.provider_message_id}))
+                db.add(IntegrationLog(adapter="fcm", operation="push_sent", payload={"task_id": task.id, "employee_id": task.employee_id, "kind": task.kind, "order_id": task.order_id, "token_fingerprint": token_fingerprint(device.token), "attempts": task.attempts, "provider_message_id": result.provider_message_id}))
                 sent += 1
                 finished = "sent"
                 break
             if result.invalid_token:
                 device.revoked_at = utcnow()
-                if not is_stub:
-                    db.add(IntegrationLog(adapter="fcm", operation="push_failed", payload={"task_id": task.id, "employee_id": task.employee_id, "kind": task.kind, "order_id": task.order_id, "token_fingerprint": token_fingerprint(device.token), "attempts": task.attempts, "error": result.error or "invalid_token"}))
+                db.add(IntegrationLog(adapter="fcm", operation="push_failed", payload={"task_id": task.id, "employee_id": task.employee_id, "kind": task.kind, "order_id": task.order_id, "token_fingerprint": token_fingerprint(device.token), "attempts": task.attempts, "error": result.error or "invalid_token"}))
                 continue
             task.attempts += 1
             task.last_error = result.error or "transient_error"
-            if not is_stub:
-                db.add(IntegrationLog(adapter="fcm", operation="push_failed", payload={"task_id": task.id, "employee_id": task.employee_id, "kind": task.kind, "order_id": task.order_id, "token_fingerprint": token_fingerprint(device.token), "attempts": task.attempts, "error": task.last_error}))
+            db.add(IntegrationLog(adapter="fcm", operation="push_failed", payload={"task_id": task.id, "employee_id": task.employee_id, "kind": task.kind, "order_id": task.order_id, "token_fingerprint": token_fingerprint(device.token), "attempts": task.attempts, "error": task.last_error}))
             if task.attempts < max_attempts:
                 task.next_attempt_at = utcnow() + timedelta(seconds=min(2 ** task.attempts, 3600))
             else:

@@ -49,7 +49,7 @@ def check_preservation(engine):
         connection.execute(orders.update().where(orders.c.id == 4).values(completion=None))
         connection.execute(orders.update().where(orders.c.id == 5).values(status="closed"))
     before = dump(engine)
-    upgrade_database(engine)
+    revision(engine, "0008_ai_attempt_input")
     after = dump(engine)
     assert without_versions({name: rows for name, rows in after.items() if name not in HISTORY | {"ai_review_jobs"}}) == before
     assert not after["ai_review_jobs"]
@@ -74,14 +74,14 @@ def check_preservation(engine):
         assert attempt["author_id"] is None and attempt["assignment_id"] is None and attempt["assessment_id"] is None
     assert attempts[2]["submitted_at"] is None
     assert not after["submission_photos"] and not after["submission_writeoffs"] and not after["submission_decisions"]
-    upgrade_database(engine)
+    revision(engine, "0008_ai_attempt_input")
     with engine.begin() as connection:
         seed_legacy_history(connection)
     assert dump(engine) == after
     with engine.connect() as connection:
         command.downgrade(alembic_config(connection), "0003_push")
     assert dump(engine) == before
-    upgrade_database(engine)
+    revision(engine, "0008_ai_attempt_input")
     assert dump(engine) == after
 
 
@@ -108,7 +108,7 @@ def test_seed_adds_conservative_snapshots_once(tmp_path):
         assert len(state["submission_attempts"]) == sum(order["completion"] is not None for order in state["orders"])
         assert all(row["source"] == "legacy_snapshot" for row in state["order_assignments"] + state["submission_attempts"])
         assert not state["submission_photos"] and not state["submission_writeoffs"]
-        assert not state["ai_review_jobs"]
+        assert "ai_review_jobs" not in state
         with session_factory(engine)() as db:
             seed_database(db)
         assert dump(engine) == state
@@ -121,8 +121,8 @@ def test_live_attempt_requires_known_assignment_author_and_timestamp(tmp_path):
     try:
         revision(engine, "0002_client_commands")
         fill_legacy(engine, True)
-        upgrade_database(engine)
-        attempts = expected_schema("0004_order_history").tables["submission_attempts"]
+        revision(engine, "0008_ai_attempt_input")
+        attempts = expected_schema("0008_ai_attempt_input").tables["submission_attempts"]
         with pytest.raises(sa.exc.IntegrityError):
             with engine.begin() as connection:
                 connection.execute(attempts.insert(), {"order_id": 1, "sequence": 2, "source": "live", "payload": {},

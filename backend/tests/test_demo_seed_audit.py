@@ -133,17 +133,17 @@ def test_audit_uses_actual_isolated_sqlite_rows_and_preserves_known_gaps(baselin
     assert actual_linked_writeoffs == report["material_photo"]["linked_writeoffs"] == 0
     assert actual_attempts == report["table_counts"]["submission_attempts"] == 541
     assert len(actual_foreign_keys) == report["foreign_key_check_count"] == 0
-    assert revision == report["schema_revision"] == "0008_ai_attempt_input"
+    assert revision == report["schema_revision"] == "0009_remove_ai_modules"
     assert oldest.replace(tzinfo=timezone.utc).isoformat() == report["calendar"]["min_created_utc"]
     assert report["calendar"]["rolling_three_calendar_months_oldest_gap_seconds"] > 0
     # Missing history remains visible in a baseline; successful tool execution
     # must never turn it into an all-clear or a native-generator acceptance.
-    assert report["findings"]["invalid_domain_transition"]["count"] == 42
-    assert report["findings"]["latest_complete_summary_time_mismatch"]["count"] == 42
+    assert "invalid_domain_transition" not in report["findings"]
+    assert "latest_complete_summary_time_mismatch" not in report["findings"]
     assert report["findings"]["terminal_assignment_not_ended"]["count"] == 540
     assert report["findings"]["completion_count_attempt_count_mismatch"]["count"] == 43
     assert report["history"]["completion_count_mismatch_shapes"] == {
-        "2_complete_events_1_attempts_closed": 42, "0_complete_events_1_attempts_ai_review": 1}
+        "2_complete_events_1_attempts_closed": 42, "0_complete_events_1_attempts_completed": 1}
     assert report["history"]["attempts_with_known_author_assignment"] == 0
     assert report["history"]["assignment_sources"] == {"legacy_snapshot": 556}
     assert report["second_seed"]["unchanged"] is True

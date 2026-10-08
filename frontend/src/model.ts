@@ -71,7 +71,6 @@ export type Order = {
   score: number | null;
 };
 export type OrderDetail = Order & {
-  ai_review_job?: AiReviewJob | null;
   assignment_history?: AssignmentHistory[];
   submission_attempts?: SubmissionAttempt[];
   events: {
@@ -101,86 +100,6 @@ export type OrderDetail = Order & {
       unit: string;
     }[];
   } | null;
-  ai_review: {
-    verdict: string;
-    score: number | null;
-    explanation: string;
-    is_stub: boolean;
-    master_score?: number | null;
-    source_verdict?:
-      | "accepted"
-      | "accepted_with_remarks"
-      | "needs_rework"
-      | "needs_master_review";
-    llm_used?: boolean;
-    is_recommendation?: true;
-    bridge_version?: 1 | 2;
-    photo_check?: SubmissionPhotoCheck;
-    report_checks?: SubmissionReportChecks;
-  } | null;
-};
-export type SubmissionPhotoCheck = {
-  status: "checked" | "unavailable" | "no_after";
-  method: "openai_vision" | "local_cv";
-  scope: "submission_selected_pair";
-  before_id: number | null;
-  after_id: number | null;
-  vision?: {
-    same_equipment: boolean | null;
-    defect_resolved: boolean | null;
-    quality: "excellent" | "good" | "mixed" | "poor" | "critical" | "unknown";
-    confidence: number;
-    issues: string[];
-    explanation: string;
-    visual_criteria?: {
-      cleanliness: VisualCriterion;
-      fasteners: VisualCriterion;
-      guards: VisualCriterion;
-      leakage: VisualCriterion;
-    } | null;
-  } | null;
-  duplicate_before?: boolean | null;
-  exact_duplicate_groups?: number[][];
-  equipment_status?: "different" | "unknown";
-  model_available?: boolean;
-  capture_time_status?: "unknown";
-  repair_status?: "unknown";
-  history_status?: "not_checked";
-};
-export type VisualCriterion = {
-  status: "no_visible_issue" | "issue_visible" | "not_assessable";
-  observation: string;
-};
-export type SubmissionReportChecks = {
-  work_description: "present" | "missing";
-  fault_code: "present" | "missing";
-  fault_code_vs_problem: "match" | "mismatch" | "unknown";
-  work_vs_fault_code: "match" | "mismatch" | "unknown";
-  materials_vs_norm: "within_norm" | "issue" | "missing" | "unknown";
-  time_vs_norm: "within_norm" | "over_norm" | "unknown";
-  deadline: "on_time" | "late" | "unknown";
-  after_photo: "present" | "missing";
-  after_photo_required: boolean;
-};
-export type AiReviewJob = {
-  id: Id;
-  attempt_id: Id;
-  status: "pending" | "running" | "succeeded" | "failed" | "superseded";
-  provider: "stub" | "ai_service";
-  attempts: number;
-  max_attempts: number;
-  next_attempt_at: string | null;
-  lease_expires_at: string | null;
-  last_error_code: string | null;
-  created_at: string;
-  finished_at: string | null;
-  retry_allowed: boolean;
-};
-export type AttemptAiReview = {
-  attempt_id: Id;
-  order_version: number;
-  ai_review: OrderDetail["ai_review"];
-  job: AiReviewJob | null;
 };
 export type AssignmentHistory = {
   id: Id;
@@ -198,7 +117,6 @@ export type AssignmentHistory = {
   ended_at: string | null;
 };
 export type SubmissionAttempt = {
-  ai_job?: AiReviewJob | null;
   id: Id;
   number: number;
   source: "live" | "legacy_snapshot";
@@ -206,7 +124,6 @@ export type SubmissionAttempt = {
   submitted_at: string | null;
   author_id: Id | null;
   author_name: string | null;
-  assessment_id: Id | null;
   completion: {
     work_done?: string;
     fault_code_id?: Id | null;
@@ -229,7 +146,6 @@ export type SubmissionAttempt = {
     author_name: string | null;
     created_at: string;
   }[];
-  ai_review: OrderDetail["ai_review"];
   decisions: {
     id: Id;
     actor_id: Id;
@@ -304,7 +220,6 @@ export const statusNames: Record<string, string> = {
   in_progress: "В работе",
   paused: "Приостановлен",
   completed: "Исполнено",
-  ai_review: "Проверка ИИ",
   rework: "На доработку",
   closed: "Закрыт",
   cancelled: "Отменён",

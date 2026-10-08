@@ -4,8 +4,7 @@ from datetime import timedelta
 import pytest
 import sqlalchemy as sa
 
-from app import ai_jobs as jobs
-from app.models import AIReviewJob, ClientCommand, MaterialWriteoff, Order, OrderEvent, Photo, utcnow
+from app.models import ClientCommand, MaterialWriteoff, Order, OrderEvent, Photo, utcnow
 from test_idempotency import photo_bytes
 from test_order_history import MASTER, WORKER, detail, history_client as sqlite_fixture, new_order
 from test_postgresql import pg_client as postgres_fixture, parallel_requests
@@ -13,7 +12,6 @@ from test_postgresql import pg_client as postgres_fixture, parallel_requests
 
 @pytest.fixture
 def version_client(request, tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_REVIEW_MODE", "queued_stub")
     if getattr(request, "param", None) == "postgresql":
         yield from postgres_fixture.__wrapped__(request.getfixturevalue("pg_database"), monkeypatch)
     else:
@@ -45,7 +43,7 @@ def worker_chain(client):
     return id_
 
 
-def test_chain_receipts_photo_complete_ai_and_old_successful_replay(version_client):
+def test_chain_receipts_photo_complete_and_old_successful_replay(version_client):
     client = version_client
     id_ = worker_chain(client)
     path = f"/api/orders/{id_}"
@@ -56,10 +54,7 @@ def test_chain_receipts_photo_complete_ai_and_old_successful_replay(version_clie
     headers = basis(WORKER, previous="version-photo-001", key="version-complete-001")
     cached = assert_ok(client.post(path + "/complete", headers=headers, json=report))
     assert cached["version"] == 5 and cached["status"] == "completed"
-    claim = jobs.claim_job(client.app.state.sessions)
-    assert detail(client, id_)["version"] == 6
-    assert jobs.finish_job(client.app.state.sessions, claim, jobs.FormalStub().review(claim["snapshot"]))
-    assert detail(client, id_)["version"] == 7
+    assert detail(client, id_)["version"] == 5
     assert assert_ok(client.post(path + "/complete", headers=headers, json=report)) == cached
     changed_basis = basis(WORKER, version=7, key="version-complete-001")
     assert client.post(path + "/complete", headers=changed_basis, json=report).status_code == 409
@@ -157,35 +152,18 @@ def test_photo_replay_keeps_old_receipt_but_fresh_stale_photo_is_rejected(versio
         assert receipt.order_version == 2
 
 
-def test_failed_job_retry_and_human_close_require_current_version(version_client):
+@pytest.mark.parametrize("decision,fields", [("close", {"score": 4}), ("rework", {"reason": "Check the repair again"})])
+def test_manual_acceptance_requires_current_version(version_client, decision, fields):
     client = version_client
     id_ = worker_chain(client)
     path = f"/api/orders/{id_}"
     report = {"work_done": "Checked the synthetic equipment and repaired the part", "fault_code_id": 1}
-    completed = assert_ok(client.post(path + "/complete", headers=basis(WORKER, version=3, key="failed-ai-complete-001"), json=report))
+    completed = assert_ok(client.post(path + "/complete", headers=basis(WORKER, version=3, key="manual-complete-001"), json=report))
     assert completed["version"] == 4
-    attempt_id = completed["submission_attempts"][-1]["id"]
-    gateway = path + f"/submissions/{attempt_id}/ai-review"
-    for attempt in range(3):
-        with client.app.state.sessions() as db:
-            db.scalar(sa.select(AIReviewJob)).next_attempt_at = utcnow() - timedelta(seconds=1)
-            db.commit()
-        claim = jobs.claim_job(client.app.state.sessions)
-        assert jobs.finish_job(client.app.state.sessions, claim, error_code="provider_error")
-        assert detail(client, id_)["version"] == 6 + 2 * attempt
-    failed = assert_ok(client.get(gateway, headers=MASTER))
-    assert failed["order_version"] == 10 and failed["job"]["status"] == "failed"
-    stale = client.post(gateway + "/retry", headers=basis(MASTER, version=9, key="failed-ai-retry-001"))
+    stale = transition(client, id_, decision, basis(MASTER, version=3, key="stale-manual-decision-001"), **fields)
     assert stale.status_code == 409 and stale.json()["detail"]["code"] == "order_version_conflict"
-    headers = basis(MASTER, version=10, key="failed-ai-retry-001")
-    cached = assert_ok(client.post(gateway + "/retry", headers=headers))
-    assert cached["order_version"] == 11
-    client.app.state.run_ai_jobs()
-    assert detail(client, id_)["version"] == 13
-    assert assert_ok(client.post(gateway + "/retry", headers=headers)) == cached
-    assert transition(client, id_, "close", basis(MASTER, version=11), score=4).status_code == 409
-    closed = assert_ok(transition(client, id_, "close", basis(MASTER, version=13), score=4))
-    assert closed["version"] == 14 and closed["status"] == "closed"
+    accepted = assert_ok(transition(client, id_, decision, basis(MASTER, version=4, key="master-manual-decision-001"), **fields))
+    assert accepted["version"] == 5 and accepted["status"] == ("closed" if decision == "close" else "rework")
 
 
 def test_header_validation_noop_and_cors(version_client):

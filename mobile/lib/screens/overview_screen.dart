@@ -21,7 +21,7 @@ class OverviewScreen extends StatelessWidget {
     final c = controller;
     final active = c.orders.where((o) => !terminal(o)).toList();
     final urgent = active.where((o) => o.priority == 'emergency').toList();
-    final review = active.where((o) => o.status == 'ai_review').toList();
+    final review = active.where((o) => o.status == 'completed').toList();
     final overdue = active.where((o) => o.isOverdue).toList();
     final master = c.user!.isMaster;
     if (c.user!.isWorker) {
@@ -104,12 +104,12 @@ class OverviewScreen extends StatelessWidget {
             ),
           ),
           SectionTitle(
-            'На проверке · ${personal.where((o) => o.status == 'ai_review').length}',
+            'Ожидают решения мастера · ${personal.where((o) => o.status == 'completed').length}',
           ),
           for (final o
-              in personal.where((o) => o.status == 'ai_review').take(3))
+              in personal.where((o) => o.status == 'completed').take(3))
             OrderCard(order: o, onTap: () => onOrder(o.id)),
-          if (!personal.any((o) => o.status == 'ai_review'))
+          if (!personal.any((o) => o.status == 'completed'))
             const Text(
               'Сданных работ, ожидающих приёмки, пока нет.',
               style: TextStyle(color: muted),
@@ -172,7 +172,7 @@ class OverviewScreen extends StatelessWidget {
           count: review.length,
           color: navy,
           icon: Icons.fact_check_outlined,
-          onTap: () => onFilter('ai_review'),
+          onTap: () => onFilter('completed'),
         ),
         _AttentionTile(
           title: 'Ещё не приняты',

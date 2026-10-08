@@ -2,7 +2,7 @@
 
 This is an explicitly invoked CLI, not a pytest test or an application route.
 Prepare BEFORE starting create_app(database_url=..., seed=False, monitor=False)
-with AI_REVIEW_MODE=queued_stub and PUSH_ENABLED=false. The Flutter test creates,
+with PUSH_ENABLED=false. The Flutter test creates,
 accepts, starts and photographs the order through HTTP, then loses the first
 completion response and replays the persisted command with its original basis.
 
@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.migrations import upgrade_database
 from app.models import (
-    AIReviewJob, Area, ClientCommand, Employee, Equipment, FaultCode, Material,
+    Area, ClientCommand, Employee, Equipment, FaultCode, Material,
     MaterialWriteoff, Order, OrderAssignment, OrderAssignmentParticipant,
     OrderEvent, Photo, SubmissionAttempt, SubmissionPhoto, SubmissionWriteoff,
     TimeNorm,
@@ -72,7 +72,6 @@ BASELINE = {
     "submission_attempts": 0,
     "material_writeoffs": 0,
     "complete_events": 0,
-    "ai_review_jobs": 0,
     "complete_receipts": 0,
 }
 
@@ -177,7 +176,6 @@ def prepare(args):
                 "submission_attempts": count(db, SubmissionAttempt),
                 "material_writeoffs": count(db, MaterialWriteoff),
                 "complete_events": count(db, OrderEvent, OrderEvent.action == "complete"),
-                "ai_review_jobs": count(db, AIReviewJob),
                 "complete_receipts": count(db, ClientCommand, ClientCommand.kind == "complete"),
             }
             require(baseline == BASELINE, "prepared_baseline_not_empty")
@@ -299,9 +297,6 @@ def verify_snapshot(db, manifest, result):
     require(complete_event.order_id == order_id and complete_event.actor_id == 6
             and complete_event.from_status == "in_progress" and complete_event.to_status == "completed"
             and complete_event.comment == report["work_done"], "complete_event_mismatch")
-    job = one(db, AIReviewJob, "duplicate_or_missing_ai_job")
-    require(job.attempt_id == attempt.id, "ai_job_attempt_mismatch")
-
     receipt = one(db, ClientCommand, "duplicate_or_missing_complete_receipt", ClientCommand.kind == "complete")
     require(receipt.employee_id == 6 and receipt.client_id == client_id
             and receipt.order_id == order_id and receipt.response_status == 200, "receipt_identity_mismatch")
@@ -343,16 +338,15 @@ def verify_snapshot(db, manifest, result):
             and saved_attempts[0].get("id") == attempt.id
             and saved_attempts[0].get("completion") == frozen_report,
             "original_receipt_attempt_mismatch")
-    require(saved_attempts[0].get("ai_job", {}).get("id") == job.id, "original_receipt_job_mismatch")
     require(not db.connection().exec_driver_sql("PRAGMA foreign_key_check").first(), "broken_fixture_foreign_keys")
-    # Job status, notification delivery and current version may legitimately
-    # advance independently; none is evidence of another completion effect.
+    # Notification delivery and current version may advance independently;
+    # neither is evidence of another completion effect.
     return {
         "status": "verified", "run_marker": marker, "order_id": order_id,
-        "attempt_id": attempt.id, "writeoff_id": writeoff.id, "ai_job_id": job.id,
+        "attempt_id": attempt.id, "writeoff_id": writeoff.id,
         "receipt_version": receipt.order_version,
         "submission_attempts": 1, "material_writeoffs": 1, "material_quantity": 2,
-        "complete_events": 1, "ai_review_jobs": 1, "complete_receipts": 1,
+        "complete_events": 1, "complete_receipts": 1,
     }
 
 
@@ -376,7 +370,7 @@ def serve(args):
     # DB/environment before importing it. Nothing can select the working DB.
     os.environ.update({
         "DATABASE_URL": database_url, "PUSH_ENABLED": "false",
-        "SEED_DEMO": "false", "AI_REVIEW_MODE": "queued_stub",
+        "SEED_DEMO": "false",
     })
     import uvicorn
     from app.main import create_app

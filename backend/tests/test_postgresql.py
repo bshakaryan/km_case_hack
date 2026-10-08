@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.migrations import expected_schema, upgrade_database, validate_schema
-from app.models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, PushTask, utcnow
+from app.models import Area, AuthSession, Brigade, ClientCommand, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, PushTask, utcnow
 from app.security import token_hash
 from test_migrations import fill_legacy, revision, snapshot
 
@@ -20,8 +20,8 @@ from test_migrations import fill_legacy, revision, snapshot
 def assert_head(engine):
     with engine.connect() as connection:
         validate_schema(connection)
-        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0008_ai_attempt_input"
-    assert set(sa.inspect(engine).get_table_names()) == set(expected_schema("0008_ai_attempt_input").tables) | {"alembic_version"}
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0009_remove_ai_modules"
+    assert set(sa.inspect(engine).get_table_names()) == set(expected_schema("0009_remove_ai_modules").tables) | {"alembic_version"}
 
 
 @pytest.mark.parametrize("legacy", ["unversioned1", "unversioned2", "versioned1", "versioned1-with-commands", "versioned2"])
@@ -38,7 +38,11 @@ def test_pg_filled_legacy_upgrade_preserves_data_and_assignment(pg_database, leg
     before = snapshot(engine)
     upgrade_database(engine)
     after = snapshot(engine)
-    assert {name: rows for name, rows in after.items() if name in before} == before
+    unchanged = {name: rows for name, rows in before.items()
+        if name not in {"orders", "order_events", "integration_logs", "client_commands", "ai_assessments"}}
+    assert {name: after[name] for name in unchanged} == unchanged
+    assert after["orders"][0]["status"] == "completed"
+    assert "ai_review" not in after["orders"][0]
     schema = expected_schema("0003_push")
     with engine.connect() as connection:
         assigned = dict(connection.execute(sa.select(schema.tables["orders"].c.id, schema.tables["orders"].c.assigned_at)).all())
@@ -157,8 +161,8 @@ def test_pg_parallel_completion_has_one_report_and_writeoff(pg_client, key):
     if key:
         assert responses[0].json() == responses[1].json()
     with pg_client.app.state.sessions() as db:
-        assert db.get(Order, id_).status == "ai_review"
-        for model, condition in [(MaterialWriteoff, MaterialWriteoff.order_id == id_), (AIAssessment, AIAssessment.order_id == id_), (OrderEvent, sa.and_(OrderEvent.order_id == id_, OrderEvent.action == "complete"))]:
+        assert db.get(Order, id_).status == "completed"
+        for model, condition in [(MaterialWriteoff, MaterialWriteoff.order_id == id_), (OrderEvent, sa.and_(OrderEvent.order_id == id_, OrderEvent.action == "complete"))]:
             assert db.scalar(sa.select(sa.func.count()).select_from(model).where(condition)) == 1
         assert db.scalar(sa.select(MaterialWriteoff.quantity).where(MaterialWriteoff.order_id == id_)) == 2
         if key:
@@ -190,5 +194,5 @@ def test_pg_completion_cannot_race_reassignment(pg_client):
     assert [r.status_code for r in responses] == [200, 409], [r.text for r in responses]
     with pg_client.app.state.sessions() as db:
         order = db.get(Order, id_)
-        assert order.status == "ai_review" and order.assignee_id == 6
+        assert order.status == "completed" and order.assignee_id == 6
         assert db.scalar(sa.select(sa.func.count()).select_from(MaterialWriteoff).where(MaterialWriteoff.order_id == id_)) == 1

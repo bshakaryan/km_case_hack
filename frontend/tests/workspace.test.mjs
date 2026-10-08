@@ -38,7 +38,7 @@ test("Manual dates include the full enterprise day in UTC+05", () => {
 test("Attention groups overlap without turning overdue into a lifecycle status", () => {
   const orders = [
     { status: "issued", priority: "emergency", is_overdue: true },
-    { status: "ai_review", priority: "high", is_overdue: false },
+    { status: "completed", priority: "high", is_overdue: false },
     { status: "rejected", priority: "normal", is_overdue: true },
     { status: "closed", priority: "emergency", is_overdue: false },
     { status: "cancelled", priority: "emergency", is_overdue: true },
@@ -47,7 +47,7 @@ test("Attention groups overlap without turning overdue into a lifecycle status",
     emergency: 1,
     overdue: 2,
     issued: 1,
-    ai_review: 1,
+    completed: 1,
     rejected: 1,
   });
   assert.equal(orders[0].status, "issued");
@@ -72,7 +72,7 @@ test("Next action distinguishes acceptance, execution and pause", () => {
   assert.equal(nextWorkAction("issued"), "Ответить на назначение");
   assert.equal(nextWorkAction("accepted"), "Перейти к выполнению");
   assert.equal(nextWorkAction("paused"), "Продолжить работу");
-  assert.equal(nextWorkAction("ai_review"), "Открыть наряд");
+  assert.equal(nextWorkAction("completed"), "Открыть наряд");
 });
 
 test("Completion validation explains all blockers instead of silently relying on browser validation", () => {

@@ -2,7 +2,7 @@
 import random
 from datetime import timedelta
 from sqlalchemy import select, text
-from .models import AIAssessment, Area, Brigade, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Order, OrderEvent, TimeNorm, utcnow
+from .models import Area, Brigade, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Order, OrderEvent, TimeNorm, utcnow
 from .security import hash_pin
 from .migrations import seed_legacy_history
 
@@ -57,25 +57,26 @@ def seed_database(db):
         score = round(rng.uniform(3.5, 5), 1)
         material_id = 4 if equipment_id == 1 else rng.randint(1, 40)
         material = db.get(Material, material_id)
-        order = Order(number=f"Н-{created.year}-{i + 1:05}", title=title, description="Демонстрационный наряд. Выполнить работы с соблюдением технологической карты и правил безопасности.", work_type="planned" if planned else "unplanned", area_id=min((equipment_id - 1) // 7 + 1, 4), equipment_id=equipment_id, assignee_id=assignee, brigade_id=(assignee - 5) // 5 + 1, master_id=1 + i % 2, priority="planned" if planned else rng.choice(["normal", "high", "emergency"]), status="closed", deadline=deadline, created_at=created, assigned_at=created, started_at=created + timedelta(minutes=10), completed_at=completed, closed_at=completed + timedelta(minutes=12), normal_hours=normal, downtime_minutes=round(elapsed * 60) if not planned else 0, score=score, comment="Синтетические данные для демонстрации", completion={"work_done": "Работы выполнены, оборудование проверено под нагрузкой.", "fault_code_id": 20 if planned else 8 if equipment_id == 1 else rng.randint(1, 19), "comment": "Контрольный запуск выполнен", "materials": [{"material_id": material_id, "name": material.name, "unit": material.unit, "quantity": float(8 if equipment_id == 1 else rng.randint(1, 3))}]}, ai_review={"verdict": "passed", "score": 4.5, "explanation": "Демонстрационная проверка по формальным признакам. Изображения не анализировались.", "is_stub": True, "master_score": score})
+        order = Order(number=f"Н-{created.year}-{i + 1:05}", title=title, description="Демонстрационный наряд. Выполнить работы с соблюдением технологической карты и правил безопасности.", work_type="planned" if planned else "unplanned", area_id=min((equipment_id - 1) // 7 + 1, 4), equipment_id=equipment_id, assignee_id=assignee, brigade_id=(assignee - 5) // 5 + 1, master_id=1 + i % 2, priority="planned" if planned else rng.choice(["normal", "high", "emergency"]), status="closed", deadline=deadline, created_at=created, assigned_at=created, started_at=created + timedelta(minutes=10), completed_at=completed, closed_at=completed + timedelta(minutes=12), normal_hours=normal, downtime_minutes=round(elapsed * 60) if not planned else 0, score=score, comment="Синтетические данные для демонстрации", completion={"work_done": "Работы выполнены, оборудование проверено под нагрузкой.", "fault_code_id": 20 if planned else 8 if equipment_id == 1 else rng.randint(1, 19), "comment": "Контрольный запуск выполнен", "materials": [{"material_id": material_id, "name": material.name, "unit": material.unit, "quantity": float(8 if equipment_id == 1 else rng.randint(1, 3))}]})
         db.add(order)
         db.flush()
-        events = [("issue", None, "issued", created, order.master_id), ("accept", "issued", "accepted", created + timedelta(minutes=5), assignee), ("start", "accepted", "in_progress", order.started_at, assignee), ("complete", "in_progress", "completed", completed, assignee), ("ai_review", "completed", "ai_review", completed, order.master_id), ("close", "ai_review", "closed", order.closed_at, order.master_id)]
+        events = [("issue", None, "issued", created, order.master_id), ("accept", "issued", "accepted", created + timedelta(minutes=5), assignee), ("start", "accepted", "in_progress", order.started_at, assignee), ("complete", "in_progress", "completed", completed, assignee)]
         if i % 13 == 0:
-            events.insert(-1, ("rework", "ai_review", "rework", completed, order.master_id))
-            events.insert(-1, ("start", "rework", "in_progress", completed, assignee))
-            events.insert(-1, ("complete", "in_progress", "completed", completed + timedelta(minutes=5), assignee))
-            events.insert(-1, ("ai_review", "completed", "ai_review", completed + timedelta(minutes=5), order.master_id))
+            second_start = completed + timedelta(minutes=4)
+            second_complete = completed + timedelta(minutes=9)
+            order.completed_at = second_complete
+            order.closed_at = second_complete + timedelta(minutes=12)
+            events.extend([("rework", "completed", "rework", completed + timedelta(minutes=2), order.master_id), ("accept", "rework", "accepted", completed + timedelta(minutes=3), assignee), ("start", "accepted", "in_progress", second_start, assignee), ("complete", "in_progress", "completed", second_complete, assignee)])
+        events.append(("close", "completed", "closed", order.closed_at, order.master_id))
         db.add_all([OrderEvent(order_id=order.id, action=a, from_status=f, to_status=t, created_at=when, actor_id=actor, comment="Демонстрационное событие") for a, f, t, when, actor in events])
-    active_statuses = ["in_progress", "issued", "paused", "accepted", "queued", "ai_review", "rework", "issued", "in_progress", "issued", "queued", "accepted", "issued", "rejected", "issued", "issued"]
+    active_statuses = ["in_progress", "issued", "paused", "accepted", "queued", "completed", "rework", "issued", "in_progress", "issued", "queued", "accepted", "issued", "rejected", "issued", "issued"]
     for i, status in enumerate(active_statuses):
         equipment_id = [1, 3, 8, 14, 20, 7, 2, 17, 23, 9, 4, 21, 15, 11, 25, 6][i]
         created = now - timedelta(minutes=30 + i * 9)
-        order = Order(number=f"Н-{now.year}-{541 + i:05}", title=tasks[i % len(tasks)], description="Проверить состояние оборудования, устранить выявленные неисправности. Перед началом работ оформить допуск.", work_type="planned" if i % 3 == 0 else "unplanned", area_id=min((equipment_id - 1) // 7 + 1, 4), equipment_id=equipment_id, assignee_id=5 + i % 14, brigade_id=(i % 14) // 5 + 1, master_id=1 + i % 2, priority=["emergency", "high", "normal", "planned"][i % 4], status=status, deadline=now + timedelta(minutes=[-40, 20, -15, 180, 90, 45, 60, 210][i % 8]), created_at=created, assigned_at=created, started_at=created + timedelta(minutes=10) if status in ["in_progress", "paused", "ai_review", "rework"] else None, normal_hours=[2, 3, 1.5, 4][i % 4], downtime_minutes=90 if i == 0 else 45 if i == 2 else 0, comment="Демонстрационный наряд текущей смены")
-        if status == "ai_review":
+        order = Order(number=f"Н-{now.year}-{541 + i:05}", title=tasks[i % len(tasks)], description="Проверить состояние оборудования, устранить выявленные неисправности. Перед началом работ оформить допуск.", work_type="planned" if i % 3 == 0 else "unplanned", area_id=min((equipment_id - 1) // 7 + 1, 4), equipment_id=equipment_id, assignee_id=5 + i % 14, brigade_id=(i % 14) // 5 + 1, master_id=1 + i % 2, priority=["emergency", "high", "normal", "planned"][i % 4], status=status, deadline=now + timedelta(minutes=[-40, 20, -15, 180, 90, 45, 60, 210][i % 8]), created_at=created, assigned_at=created, started_at=created + timedelta(minutes=10) if status in ["in_progress", "paused", "completed", "rework"] else None, normal_hours=[2, 3, 1.5, 4][i % 4], downtime_minutes=90 if i == 0 else 45 if i == 2 else 0, comment="Демонстрационный наряд текущей смены")
+        if status == "completed":
             order.completed_at = now - timedelta(minutes=5)
             order.completion = {"work_done": "Заменен изношенный узел, выполнен контрольный запуск", "fault_code_id": 1, "comment": "Оборудование исправно", "materials": []}
-            order.ai_review = {"verdict": "needs_attention", "score": 4, "explanation": "Заглушка ИИ: требуется осмотр мастером; реального анализа фотографий нет.", "is_stub": True, "master_score": None}
         db.add(order)
         db.flush()
         db.add(OrderEvent(order_id=order.id, action="issue", from_status=None, to_status="issued", actor_id=order.master_id, created_at=created, comment="Наряд выдан"))
@@ -85,8 +86,6 @@ def seed_database(db):
     for order in db.scalars(select(Order)):
         for usage in (order.completion or {}).get("materials", []):
             db.add(MaterialWriteoff(order_id=order.id, material_id=usage["material_id"], quantity=usage["quantity"], author_id=order.assignee_id, created_at=order.completed_at))
-        if order.ai_review:
-            db.add(AIAssessment(order_id=order.id, created_at=order.completed_at, **order.ai_review))
     db.flush()
     seed_legacy_history(db.connection())
     db.commit()

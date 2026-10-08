@@ -72,7 +72,7 @@ void main() {
     'queued close score is selected locally, not a final server score',
     (tester) async {
       final store = MemoryLocalStore();
-      final controller = offlineController(store, 'ai_review')
+      final controller = offlineController(store, 'completed')
         ..user = const User(id: 7, name: 'Мастер', role: 'master');
       addTearDown(controller.dispose);
       await controller.transition(9, 'close', score: 5);

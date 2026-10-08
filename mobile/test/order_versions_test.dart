@@ -109,13 +109,13 @@ void main() {
   test(
     'a versionless legacy replay preserves a known newer order snapshot',
     () {
-      final known = WorkOrder.fromJson(order(version: 12, status: 'ai_review'));
+      final known = WorkOrder.fromJson(order(version: 12, status: 'completed'));
       final old = WorkOrder.fromJson(
         {...order(status: 'issued')}..remove('version'),
       );
       final merged = old.withCachedHistory(known);
       expect(merged.version, 12);
-      expect(merged.status, 'ai_review');
+      expect(merged.status, 'completed');
       expect(identical(merged, known), isTrue);
     },
   );

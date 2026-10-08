@@ -30,3 +30,11 @@ def make_engine(url: str | None = None):
 
 def session_factory(engine):
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def begin_sqlite_write(db):
+    """Acquire SQLite's write lock before reading state for a mutation."""
+    if db.bind.dialect.name == "sqlite":
+        connection = db.connection()
+        if not connection.connection.driver_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")

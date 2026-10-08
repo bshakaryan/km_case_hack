@@ -2,7 +2,7 @@
 
 This is evidence collection, not a production repair or a seed acceptance gate.
 The output contains aggregates, bounded numeric IDs and hashes only. There is no
-application startup, monitor, push transport, AI provider or default database.
+application startup, monitor, push transport, external provider or default database.
 Transition checks cover the current seed action subset, not every API command;
 unknown actions require review and do not automatically mean an R40 failure.
 """
@@ -121,8 +121,8 @@ def _audit(connection, control: datetime) -> dict:
         "reject": ({"issued", "accepted", "queued"}, "rejected"),
         "start": ({"accepted", "queued"}, "in_progress"),
         "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"),
-        "complete": ({"in_progress"}, "completed"), "ai_review": ({"completed"}, "ai_review"),
-        "rework": ({"ai_review"}, "rework"), "close": ({"ai_review"}, "closed"),
+        "complete": ({"in_progress"}, "completed"),
+        "rework": ({"completed"}, "rework"), "close": ({"completed"}, "closed"),
     }
     issues = defaultdict(list)
     completion_mismatch_shapes = Counter()
@@ -238,7 +238,6 @@ def _audit(connection, control: datetime) -> dict:
             "attempt_sources": dict(Counter(row["source"] for row in attempts)),
             "attempts_with_known_author_assignment": sum(row["author_id"] is not None
                                                          and row["assignment_id"] is not None for row in attempts),
-            "attempts_with_assessment_link": sum(row["assessment_id"] is not None for row in attempts),
             "frozen_roster_size_distribution": dict(Counter(str(len(by_participants[row["id"]]))
                                                             for row in assignments)),
             "completion_count_mismatch_shapes": dict(completion_mismatch_shapes),
@@ -342,8 +341,7 @@ def run_audit(output_dir: Path, now: datetime) -> dict:
         "limits": [
             "SQLite does not prove PostgreSQL locking or concurrency.",
             "Transition checks cover the current seed action subset, not all API commands; unknown actions require review, not automatic R40 failure.",
-            "Seeded people, photos and patterns are synthetic; patterns do not prove real AI accuracy.",
-            "No Q01-Q06 policy/provider/photo verdict is inferred.",
+            "Seeded people, photos and patterns are synthetic; patterns do not prove repair quality.",
             "PIN salts are random; repeat hash stability is within this fixture, not byte-identical independent databases.",
             "No Android, crash, fsync, power-loss, real push or media acceptance.",
         ],

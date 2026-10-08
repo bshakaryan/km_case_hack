@@ -1479,8 +1479,6 @@ class AppController extends ChangeNotifier {
             );
           } else if (command.kind == OutboxKind.complete) {
             data['status'] = 'completed';
-            data['ai_review'] = null;
-            data['ai_review_job'] = null;
           }
         }
         data['_queued_status'] = data['status'];
@@ -2569,8 +2567,6 @@ class AppController extends ChangeNotifier {
         final updated = _offlineOrderState(id);
         final updatedData = Map<String, dynamic>.from(updated.data);
         updatedData['status'] = 'completed';
-        updatedData['ai_review'] = null;
-        updatedData['ai_review_job'] = null;
         updatedData['_queued_status'] = updated.data['status'];
         updatedData['completed_at'] = DateTime.now().toIso8601String();
         return WorkOrder.fromJson(updatedData);
@@ -2588,149 +2584,6 @@ class AppController extends ChangeNotifier {
         'Действие доступно только ответственному за наряд.',
         403,
       );
-    }
-  }
-
-  // This gateway has no client-command key: never enqueue or replay its POST.
-  Future<WorkOrder> retryAiReview(
-    int id,
-    int attemptId, {
-    OrderWriteBasis? basis,
-  }) async {
-    if (user == null) throw const ApiException('Войдите в приложение.', 401);
-    final current = orders.where((order) => order.id == id).firstOrNull;
-    if (!user!.isMaster ||
-        current?.canRetryAiReview != true ||
-        current?.aiReviewJob?['attempt_id'] != attemptId) {
-      throw const ApiException(
-        'Повтор доступен мастеру для последней неудачной проверки.',
-        409,
-      );
-    }
-    if (offline) {
-      throw const ApiException(
-        'Для повтора проверки подключитесь к серверу.',
-        0,
-      );
-    }
-    final expectedVersion = basis == null
-        ? current?.version
-        : basis.expectedVersion;
-    if (expectedVersion == null) {
-      throw const ApiException('Обновите наряд перед повтором проверки.', 428);
-    }
-    if (saving || _writeLease != null || _recoveringQueue) {
-      throw const ApiException(
-        'Дождитесь завершения предыдущего действия.',
-        409,
-      );
-    }
-    final session = _session;
-    final source = api;
-    final token = source.token;
-    final ownerId = user!.id;
-    final role = user!.role;
-    final authority = captureNavigationScope();
-    final lease = Completer<void>();
-    _writeLease = lease;
-    bool currentWrite() =>
-        authority.isCurrent &&
-        _current(session) &&
-        identical(api, source) &&
-        source.token == token &&
-        user?.id == ownerId &&
-        user?.role == role &&
-        identical(_writeLease, lease);
-    saving = true;
-    _notify();
-    try {
-      final response = await source.retryAiReview(
-        id,
-        attemptId,
-        expectedVersion: expectedVersion,
-      );
-      if (!currentWrite()) {
-        throw const ApiException(
-          'Сессия изменилась. Проверьте результат повтора.',
-          401,
-          requestMayHaveSucceeded: true,
-        );
-      }
-      final previous = orders.firstWhere((order) => order.id == id);
-      final replyVersion = response['order_version'];
-      if (replyVersion is! int ||
-          replyVersion < 1 ||
-          replyVersion < expectedVersion) {
-        throw const ApiException(
-          'Сервер не подтвердил версию наряда. Повтор мог сохраниться; обновите карточку перед новым действием.',
-          200,
-          requestMayHaveSucceeded: true,
-        );
-      }
-      if (response['order_version'] is int &&
-          previous.version != null &&
-          (response['order_version'] as int) < previous.version!) {
-        return previous;
-      }
-      if (previous.submissionAttempts.isNotEmpty &&
-          previous.submissionAttempts.last['id'] != response['attempt_id']) {
-        return await loadOrder(id);
-      }
-      final latest = previous.submissionAttempts.lastOrNull;
-      final latestJob = latest?['ai_job'];
-      final replyJob = response['job'];
-      // The POST snapshot may arrive after a read has already observed its
-      // worker result. Do not regress that same submission to pending.
-      const advancedStates = {'running', 'succeeded', 'superseded'};
-      if (replyJob is Map &&
-          replyJob['status'] == 'pending' &&
-          (previous.status != 'completed' ||
-              latest?['assessment_id'] != null ||
-              latest?['ai_review'] != null ||
-              (latestJob is Map &&
-                  advancedStates.contains(latestJob['status'])) ||
-              advancedStates.contains(previous.aiReviewJob?['status']))) {
-        return previous;
-      }
-      final updated = WorkOrder.fromJson({
-        ...previous.data,
-        if (response['order_version'] is int)
-          'version': response['order_version'],
-        'ai_review': response['ai_review'],
-        'ai_review_job': response['job'],
-        'submission_attempts': previous.submissionAttempts
-            .map(
-              (attempt) => attempt['id'] == response['attempt_id']
-                  ? {
-                      ...attempt,
-                      'ai_job': response['job'],
-                      'ai_review': response['ai_review'],
-                    }
-                  : attempt,
-            )
-            .toList(),
-      });
-      ++_dataRevision;
-      _upsert(updated);
-      await _persistSnapshot(session, force: true);
-      if (!currentWrite()) {
-        throw const ApiException(
-          'Сессия изменилась. Проверьте результат повтора.',
-          401,
-          requestMayHaveSucceeded: true,
-        );
-      }
-      return updated;
-    } on ApiException catch (failure) {
-      if (currentWrite() && failure.statusCode == 401) _expireSession();
-      rethrow;
-    } finally {
-      if (identical(_writeLease, lease)) _writeLease = null;
-      lease.complete();
-      if (_current(session)) {
-        saving = false;
-      }
-      _notify();
     }
   }
 

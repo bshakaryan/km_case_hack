@@ -11,7 +11,7 @@ export type JournalFilters = {
   from_date: string;
   to_date: string;
   scope: "all" | "active" | "closed";
-  focus: "all" | "overdue" | "emergency" | "issued" | "ai_review" | "rejected";
+  focus: "all" | "overdue" | "emergency" | "issued" | "completed" | "rejected";
   sort: "newest" | "deadline" | "priority";
 };
 export type JournalContext = {

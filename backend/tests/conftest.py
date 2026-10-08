@@ -9,16 +9,6 @@ from app.db import make_engine
 from app.main import create_app
 
 
-@pytest.fixture(scope="session", autouse=True)
-def existing_api_inline_stub():
-    # Existing lifecycle tests deliberately retain their synchronous contract.
-    # New queued-job tests override this explicitly before create_app().
-    with pytest.MonkeyPatch.context() as patch:
-        if "AI_REVIEW_MODE" not in os.environ:
-            patch.setenv("AI_REVIEW_MODE", "inline_stub")
-        yield
-
-
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
     database = tmp_path_factory.mktemp("api") / "test.db"

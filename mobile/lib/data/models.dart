@@ -18,7 +18,7 @@ class User {
 
 class WorkOrder {
   WorkOrder.fromJson(Json json)
-    : data = Map<String, dynamic>.unmodifiable(json);
+    : data = Map<String, dynamic>.unmodifiable(_withoutRetiredReview(json));
 
   final Json data;
   Json toJson() => Map<String, dynamic>.from(data);
@@ -38,21 +38,32 @@ class WorkOrder {
   List<Json> get assignmentHistory => _historyRows(data['assignment_history']);
   List<Json> get submissionAttempts =>
       _historyRows(data['submission_attempts']);
-  Json? get aiReviewJob => data['ai_review_job'] is Map
-      ? Map<String, dynamic>.from(data['ai_review_job'] as Map)
-      : null;
-  bool get showAiReview =>
-      aiReviewJob == null || aiReviewJob!['status'] == 'succeeded';
-  bool get canRetryAiReview {
-    final job = aiReviewJob;
-    return !pendingSync &&
-        status == 'completed' &&
-        job?['status'] == 'failed' &&
-        job?['retry_allowed'] == true &&
-        submissionAttempts.isNotEmpty &&
-        submissionAttempts.last['ai_review'] == null &&
-        submissionAttempts.last['assessment_id'] == null &&
-        submissionAttempts.last['id'] == job?['attempt_id'];
+  static Json _withoutRetiredReview(Json source) {
+    final clean = Map<String, dynamic>.from(source)
+      ..remove('ai_review')
+      ..remove('ai_review_job');
+    if (clean['status'] == 'ai_review') clean['status'] = 'completed';
+    if (clean['submission_attempts'] is List) {
+      clean['submission_attempts'] = (clean['submission_attempts'] as List)
+          .whereType<Map>()
+          .map((attempt) => Map<String, dynamic>.from(attempt)
+            ..remove('ai_review')
+            ..remove('ai_job')
+            ..remove('ai_input')
+            ..remove('assessment_id'))
+          .toList();
+    }
+    if (clean['events'] is List) {
+      clean['events'] = (clean['events'] as List).whereType<Map>().map((event) {
+        final row = Map<String, dynamic>.from(event);
+        if (row['action'] == 'ai_review') row['action'] = 'awaiting_acceptance';
+        if (row['action'] == 'ai_review_retry') row['action'] = 'manual_acceptance';
+        if (row['from_status'] == 'ai_review') row['from_status'] = 'completed';
+        if (row['to_status'] == 'ai_review') row['to_status'] = 'completed';
+        return row;
+      }).toList();
+    }
+    return clean;
   }
 
   // Lists and historical command replays may omit detail-only fields. A new
@@ -64,11 +75,7 @@ class WorkOrder {
       return previous;
     }
     return WorkOrder.fromJson({
-      for (final key in [
-        'assignment_history',
-        'submission_attempts',
-        'ai_review_job',
-      ])
+      for (final key in ['assignment_history', 'submission_attempts'])
         if (!data.containsKey(key) && previous?.data.containsKey(key) == true)
           key: previous!.data[key],
       ...data,

@@ -68,12 +68,6 @@ const attempt = (number, overrides = {}) => ({
       author_name: "Первый работник",
     },
   ],
-  ai_review: {
-    verdict: "needs_attention",
-    score: 4,
-    explanation: `Оценка попытки ${number}`,
-    is_stub: true,
-  },
   decisions: [
     {
       id: number,
@@ -106,7 +100,6 @@ test("immutable attempts retain separate reports, extra expense, assessment and 
     "Самостоятельный отчёт 2",
     "Дополнительная деталь 1",
     "Дополнительная деталь 2",
-    "Сохранённая оценка старой проверки: 4 / 5",
     "Решение по попытке 1",
     "Решение по попытке 2",
     "Возвращено на доработку",
@@ -118,8 +111,7 @@ test("immutable attempts retain separate reports, extra expense, assessment and 
   assert.ok(!html.includes("Текущий общий отчёт"));
   assert.ok(html.indexOf("Сдача №1") < html.indexOf("Сдача №2"));
   assert.ok(
-    html.includes("Содержимое") ||
-      html.includes("содержимое снимков не анализируется"),
+    html.includes("Фото, доступные при сдаче"),
   );
 });
 
@@ -149,7 +141,6 @@ test("legacy snapshots expose uncertainty without assigning global photos or cum
         },
         materials: [],
         photos: [],
-        ai_review: null,
         decisions: [],
       }),
     ],
@@ -207,74 +198,12 @@ test("assignment history retains each brigade roster independently of the curren
   assert.doesNotMatch(html, /Новый участник/);
 });
 
-test("a service recommendation with unknown score preserves the separate master's decision", () => {
+test("immutable submission history shows the master's manual decision only", () => {
   const html = render({
     assignment_history: [],
-    submission_attempts: [attempt(2, {
-      ai_job: { status: "succeeded", provider: "ai_service" },
-      ai_review: {
-        verdict: "needs_attention", score: null, is_stub: true,
-        source_verdict: "needs_master_review", llm_used: false,
-        is_recommendation: true,
-        explanation: "<script>private-review-text</script>",
-      },
-    })],
+    submission_attempts: [attempt(2)],
   });
-  assert.match(html, /Проверка сдачи/);
-  assert.match(html, /Оценка не определена/);
-  assert.match(html, /Нужна проверка мастером/);
-  assert.match(html, /языковая модель не использовалась/);
-  assert.match(html, /Содержимое снимков не анализируется/);
-  assert.match(html, /Принято мастером · 5 \/ 5/);
-  assert.match(html, /&lt;script&gt;private-review-text&lt;\/script&gt;/);
-  assert.doesNotMatch(html, /<script>|Предварительная оценка|Историческая формальная проверка|Принято с замечаниями/);
-});
-
-test("text model provenance remains a recommendation and old formal results retain their score", () => {
-  const html = render({
-    assignment_history: [],
-    submission_attempts: [attempt(1, {
-      ai_job: { status: "succeeded", provider: "ai_service" },
-      ai_review: {
-        verdict: "passed", score: 4.5, is_stub: false,
-        source_verdict: "accepted", llm_used: true, is_recommendation: true,
-        explanation: "Текстовый результат",
-      },
-      decisions: [],
-    }), attempt(2, { decisions: [] })],
-  });
-  assert.match(html, /Источник: текстовая модель и правила/);
-  assert.match(html, /Рекомендовано принять/);
-  assert.match(html, /Предварительная оценка: 4,5 \/ 5/);
-  assert.match(html, /Историческая формальная проверка/);
-  assert.match(html, /Сохранённая оценка старой проверки: 4 \/ 5/);
-  assert.match(html, /Окончательное решение принимает мастер/);
-});
-
-test("immutable submission history shows local photo warnings without changing the master's final score", () => {
-  const html = render({
-    assignment_history: [],
-    submission_attempts: [attempt(2, {
-      ai_job: { status: "succeeded", provider: "ai_service" },
-      ai_review: {
-        verdict: "needs_attention", score: null, is_stub: true,
-        source_verdict: "needs_master_review", llm_used: false, is_recommendation: true,
-        bridge_version: 2, explanation: "Технические признаки требуют осмотра",
-        photo_check: {
-          status: "checked", method: "local_cv", scope: "submission_selected_pair",
-          before_id: 80, after_id: 90, duplicate_before: true,
-          exact_duplicate_groups: [[80, 90]], equipment_status: "different",
-          model_available: true, capture_time_status: "unknown",
-          repair_status: "unknown", history_status: "not_checked",
-        },
-      },
-    })],
-  });
-  assert.match(html, /Результат проверки фото/);
-  assert.match(html, /до №80; после №90/);
-  assert.match(html, /признаки повтора фото до ремонта/);
-  assert.match(html, /Возможно, на выбранных снимках разное оборудование/);
-  assert.match(html, /Принято мастером · 5 \/ 5/);
-  assert.match(html, /Оценка не определена/);
-  assert.doesNotMatch(html, /Содержимое снимков не анализируется|Предварительная оценка/);
+  assert.match(html, /Решение по попытке 2/);
+  assert.match(html, /Принято мастером/);
+  assert.doesNotMatch(html, /Проверка сдачи|ИИ|OpenAI|заглушка/);
 });

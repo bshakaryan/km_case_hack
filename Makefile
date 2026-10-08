@@ -12,11 +12,9 @@ logs:
 test:
 	cd backend && ../.venv/bin/python -m pytest -q
 	cd frontend && pnpm run build
-	./frontend/node_modules/.bin/tsc -p native-stub/tsconfig.json
 
 build:
 	cd frontend && pnpm run build
 
 local:
 	./scripts/run-local.sh
-

@@ -5,9 +5,8 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.models import DeviceToken, IntegrationLog, Notification, Order, PushTask, utcnow
-from app.push import FCM_ERROR_TYPE, FcmSender, SendResult, StubSender, build_message, dispatch_push, enqueue_push, get_sender, token_fingerprint
+from app.push import FCM_ERROR_TYPE, DisabledSender, FcmSender, SendResult, build_message, dispatch_push, enqueue_push, get_sender, token_fingerprint
 from app.services import aware, notify
-from conftest import auth_headers
 
 
 @pytest.fixture(autouse=True)
@@ -18,8 +17,6 @@ def isolate_push_credentials(monkeypatch):
 
 
 class FakeSender:
-    is_stub = False
-
     def __init__(self, *results):
         self.results = list(results)
         self.calls = []
@@ -265,57 +262,51 @@ def test_dispatch_stops_after_max_attempts(client, monkeypatch):
         assert task.last_error == "still down"
 
 
-def test_stub_sender_dispatch_never_touches_network(client, monkeypatch):
+def test_disabled_sender_does_not_mark_delivery_as_success(client, monkeypatch):
     monkeypatch.delenv("FIREBASE_CREDENTIALS", raising=False)
     monkeypatch.setenv("PUSH_ENABLED", "true")
-    assert isinstance(get_sender(), StubSender)
+    assert isinstance(get_sender(), DisabledSender)
     with client.app.state.sessions() as db:
         purge_push(db)
-        add_device(db, 6, "token-stub")
+        add_device(db, 6, "token-disabled")
         task = make_task(db, 6)
-        assert dispatch_push(db) == 1
-        assert task.status == "sent"
+        assert dispatch_push(db) == 0
+        assert task.status == "pending"
         assert task.provider_message_id is None
-        trace = db.scalar(select(IntegrationLog).where(IntegrationLog.adapter == "fcm", IntegrationLog.operation == "push_not_sent"))
-        assert trace is not None
-        assert "token" not in trace.payload
-        assert trace.payload["token_fingerprint"] == token_fingerprint("token-stub")
-        assert trace.payload["is_stub"] is True
+        assert task.attempts == 0
+        assert db.scalar(select(IntegrationLog).where(IntegrationLog.adapter == "fcm", IntegrationLog.operation == "push_not_sent")) is None
 
 
 def test_get_sender_configuration(monkeypatch, tmp_path):
     monkeypatch.delenv("FIREBASE_CREDENTIALS", raising=False)
     monkeypatch.delenv("PUSH_ENABLED", raising=False)
-    assert isinstance(get_sender(), StubSender)
+    assert isinstance(get_sender(), DisabledSender)
     monkeypatch.setenv("FIREBASE_CREDENTIALS", str(tmp_path / "missing.json"))
-    assert isinstance(get_sender(), StubSender)
+    assert isinstance(get_sender(), DisabledSender)
     credentials = tmp_path / "service-account.json"
     credentials.write_text("{}")
     monkeypatch.setenv("FIREBASE_CREDENTIALS", str(credentials))
     # Merely placing credentials on disk must never enable real delivery.
-    assert isinstance(get_sender(), StubSender)
+    assert isinstance(get_sender(), DisabledSender)
     monkeypatch.setenv("PUSH_ENABLED", "true")
     sender = get_sender()
     assert isinstance(sender, FcmSender)
     assert sender.project_id == "km-case-hack"
     assert not hasattr(sender, "_credentials") or sender._credentials is None
     monkeypatch.setenv("PUSH_ENABLED", "false")
-    assert isinstance(get_sender(), StubSender)
+    assert isinstance(get_sender(), DisabledSender)
     monkeypatch.setenv("PUSH_ENABLED", "0")
-    assert isinstance(get_sender(), StubSender)
+    assert isinstance(get_sender(), DisabledSender)
     monkeypatch.setenv("PUSH_ENABLED", "unexpected")
-    assert isinstance(get_sender(), StubSender)
+    assert isinstance(get_sender(), DisabledSender)
 
 
-def test_integrations_native_stub_when_unconfigured(client, master, monkeypatch):
+def test_integrations_only_report_real_native_and_realtime_status(client, master, monkeypatch):
     monkeypatch.delenv("FIREBASE_CREDENTIALS", raising=False)
     monkeypatch.setenv("PUSH_ENABLED", "true")
     data = client.get("/api/integrations", headers=master).json()
     assert data["native"] == {"mode": "disabled", "status": "not_configured", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
-    ai_mode = client.app.state.ai_review_mode
-    expected_ai_mode = "openai_vision" if ai_mode == "queued_service" else ai_mode
-    expected_ai_status = ("configured" if client.app.state.ai_vision_configured else "not_configured") if ai_mode == "queued_service" else "fallback"
-    assert data["ai"]["mode"] == expected_ai_mode and data["ai"]["status"] == expected_ai_status
+    assert set(data) == {"native", "realtime"}
     assert data["realtime"] == {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}
 
 
@@ -328,32 +319,6 @@ def test_integrations_native_fcm_when_configured(client, master, tmp_path, monke
     assert data["native"] == {"mode": "fcm", "status": "configured", "description": "Firebase Cloud Messaging (HTTP v1) настроен для Android. Успешная доставка зависит от регистрации устройства и ответа FCM."}
     monkeypatch.setenv("PUSH_ENABLED", "false")
     assert client.get("/api/integrations", headers=master).json()["native"]["mode"] == "disabled"
-
-
-def test_integrations_reports_openai_vision_configuration_without_exposing_key(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-    from app.main import create_app
-
-    monkeypatch.setenv("AI_REVIEW_MODE", "queued_service")
-    monkeypatch.setenv("AI_SERVICE_URL", "http://ai-review:8010")
-    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token-at-least-16")
-    monkeypatch.setenv("AI_VISION_CONFIGURED", "false")
-    app = create_app(f"sqlite:///{tmp_path / 'integrations.db'}", monitor=False)
-    with TestClient(app) as service_client:
-        service_master = auth_headers(service_client, "master")
-        integration = service_client.get("/api/integrations", headers=service_master).json()["ai"]
-        health = service_client.get("/api/health").json()
-    assert integration["mode"] == "openai_vision" and health["ai"] == "ai_service"
-    assert integration["status"] == "not_configured"
-    assert "OPENAI_API_KEY" in integration["description"]
-    assert "AI_SERVICE_TOKEN" in integration["description"]
-
-    monkeypatch.setenv("AI_VISION_CONFIGURED", "true")
-    configured_app = create_app(f"sqlite:///{tmp_path / 'integrations-configured.db'}", monitor=False)
-    with TestClient(configured_app) as service_client:
-        integration = service_client.get("/api/integrations", headers=auth_headers(service_client, "master")).json()["ai"]
-    assert integration["mode"] == "openai_vision" and integration["status"] == "configured"
-    assert "только связанные фото" in integration["description"]
 
 
 @pytest.mark.parametrize("http_status,error,invalid_token", [

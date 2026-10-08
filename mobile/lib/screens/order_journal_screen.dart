@@ -197,7 +197,7 @@ class _OrderJournalScreenState extends State<OrderJournalScreen> {
                           'overdue': 'Срок истёк',
                           'emergency': 'Аварийные',
                           'issued': 'Ещё не приняты',
-                          'ai_review': 'Ожидают приёмки',
+                          'completed': 'Ожидают приёмки',
                           'rejected': 'Отклонены',
                         }, (value) => _focus = value),
                         _select('Порядок', _sort, const {

@@ -7,7 +7,7 @@ import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Order, OrderAssignment, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
+from app.models import Area, AuthSession, Brigade, ClientCommand, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Order, OrderAssignment, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
 from app.security import token_hash
 from test_idempotency import photo_bytes
 from test_postgresql import MASTER, WORKER, new_order, parallel_requests, pg_client
@@ -89,7 +89,7 @@ def test_assignment_history_tracks_same_worker_reassignment_and_cancel(history_c
     assert len(closed["assignment_history"]) == 3
 
 
-def test_submissions_freeze_photos_extra_materials_ai_and_master_decisions(history_client):
+def test_submissions_freeze_photos_extra_materials_and_master_decisions(history_client):
     client = history_client
     id_ = new_order(client)
     start(client, id_)
@@ -97,7 +97,7 @@ def test_submissions_freeze_photos_extra_materials_ai_and_master_decisions(histo
     first, report1 = complete(client, id_)
     frozen = copy.deepcopy(first["submission_attempts"][0])
     assert frozen["source"] == "live" and frozen["number"] == 1
-    assert frozen["author_id"] == 6 and frozen["assessment_id"] is not None
+    assert frozen["author_id"] == 6 and "assessment_id" not in frozen
     assert frozen["assignment_id"] == first["assignment_history"][0]["id"]
     assert [photo["id"] for photo in frozen["photos"]] == [photo1]
     assert frozen["completion"]["materials"][0]["quantity"] == 2
@@ -122,10 +122,9 @@ def test_submissions_freeze_photos_extra_materials_ai_and_master_decisions(histo
     assert attempts[1]["completion"]["materials"][0]["quantity"] == 3
     assert attempts[1]["materials"][0]["quantity"] == 3
     assert attempts[1]["materials"][0]["name"] == "Renamed part"
-    assert attempts[1]["ai_review"] == second["submission_attempts"][1]["ai_review"]
-    assert attempts[1]["ai_review"]["master_score"] is None
+    assert "ai_review" not in attempts[1]
     assert attempts[1]["decisions"][0]["score"] == 4
-    assert closed["ai_review"]["master_score"] == 4
+    assert "ai_review" not in closed
     assert closed["completion"]["materials"][0]["quantity"] == 5
     assert closed["assignment_history"][0]["ended_at"] == closed["closed_at"]
     replay = client.post(f"/api/orders/{id_}/complete", json=report1, headers={**WORKER, "X-Client-Command-Id": "history-complete-001"})
@@ -142,13 +141,13 @@ def test_failed_completion_rolls_back_attempt_links_and_offline_claim(history_cl
     def fail_after_history(*args, **kwargs):
         raise RuntimeError("Injected notification failure")
     with monkeypatch.context() as patch:
-        patch.setattr(services_module, "notify", fail_after_history)
+        patch.setattr("app.main.notify", fail_after_history)
         with pytest.raises(RuntimeError, match="Injected notification failure"):
             complete(client, id_)
     with client.app.state.sessions() as db:
         assert db.get(Order, id_).status == "in_progress"
         assert db.get(Order, id_).completion is None
-        for model in [SubmissionAttempt, SubmissionPhoto, SubmissionWriteoff, SubmissionDecision, MaterialWriteoff, AIAssessment, ClientCommand]:
+        for model in [SubmissionAttempt, SubmissionPhoto, SubmissionWriteoff, SubmissionDecision, MaterialWriteoff, ClientCommand]:
             assert db.scalar(sa.select(sa.func.count()).select_from(model)) == 0
         assert db.scalar(sa.select(sa.func.count()).select_from(OrderAssignment)) == 1
     retried, _ = complete(client, id_)
@@ -160,22 +159,20 @@ def test_legacy_snapshot_keeps_unknown_links_and_accepts_new_master_decision(his
     id_ = new_order(client)
     add_photo(client, id_)
     payload = {"work_done": "Preserved old report", "materials": [{"material_id": 1, "quantity": 7, "name": "Old name", "unit": "piece"}]}
-    review = {"verdict": "passed", "score": 4, "master_score": None, "is_stub": True}
     with client.app.state.sessions() as db:
         order = db.get(Order, id_)
-        order.status = "ai_review"
+        order.status = "completed"
         order.completion = payload
-        order.ai_review = review
         db.add(MaterialWriteoff(order_id=id_, material_id=1, quantity=7, author_id=6))
-        db.add(SubmissionAttempt(order_id=id_, sequence=1, payload=payload, ai_review=review, source="legacy_snapshot"))
+        db.add(SubmissionAttempt(order_id=id_, sequence=1, payload=payload, source="legacy_snapshot"))
         db.commit()
     before = detail(client, id_)["submission_attempts"][0]
     assert before["source"] == "legacy_snapshot"
-    assert all(before[key] is None for key in ["submitted_at", "author_id", "author_name", "assignment_id", "assessment_id"])
+    assert all(before[key] is None for key in ["submitted_at", "author_id", "author_name", "assignment_id"])
     assert before["photos"] == before["materials"] == []
     closed = act(client, id_, "close", headers=MASTER, score=5)
     after = closed["submission_attempts"][0]
-    assert after["completion"] == payload and after["ai_review"] == review
+    assert after["completion"] == payload and "ai_review" not in after
     assert after["decisions"][0]["action"] == "close"
     assert after["decisions"][0]["score"] == 5
 
@@ -195,7 +192,7 @@ def test_pg_parallel_replays_create_one_attempt_and_one_decision(pg_client, deci
     assert [r.status_code for r in responses] == [200, 200]
     assert responses[0].json() == responses[1].json()
     with client.app.state.sessions() as db:
-        for model in [OrderAssignment, SubmissionAttempt, SubmissionDecision, MaterialWriteoff, SubmissionWriteoff, AIAssessment]:
+        for model in [OrderAssignment, SubmissionAttempt, SubmissionDecision, MaterialWriteoff, SubmissionWriteoff]:
             assert db.scalar(sa.select(sa.func.count()).select_from(model)) == 1
 
 
