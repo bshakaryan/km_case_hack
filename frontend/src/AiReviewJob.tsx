@@ -1,5 +1,69 @@
 import type { AiReviewJob, AttemptAiReview, OrderDetail } from "./model";
-import { confirmedOrderVersion, postOrder } from "./model";
+import { confirmedOrderVersion, number, postOrder } from "./model";
+
+type Review = NonNullable<OrderDetail["ai_review"]>;
+
+function isServiceReview(review: Review, job?: AiReviewJob | null) {
+  return (
+    job?.provider === "ai_service" ||
+    review.source_verdict !== undefined ||
+    typeof review.llm_used === "boolean"
+  );
+}
+
+export function aiReviewTitle(review: Review, job?: AiReviewJob | null) {
+  return isServiceReview(review, job)
+    ? "Сервис проверки"
+    : review.is_stub
+      ? "Формальная проверка · демо"
+      : "Проверка ИИ";
+}
+
+export function aiReviewScoreLabel(score: number | null | undefined) {
+  return typeof score === "number" &&
+    Number.isFinite(score) &&
+    score >= 1 &&
+    score <= 5
+    ? `Предварительная оценка: ${number(score, 1)} / 5`
+    : "Оценка не определена";
+}
+
+export function aiReviewVerdict(review: Review) {
+  if (review.source_verdict) {
+    return ({
+      accepted: "Рекомендовано принять",
+      accepted_with_remarks: "Рекомендовано принять с замечаниями",
+      needs_rework: "Рекомендована доработка",
+      needs_master_review: "Нужна проверка мастером",
+    }[review.source_verdict] || "Нужна проверка мастером");
+  }
+  return (
+    ({
+      passed: "Принято",
+      needs_attention: "Принято с замечаниями",
+      rework: "Требует доработки",
+      needs_rework: "Требует доработки",
+    } as Record<string, string>)[review.verdict] ||
+    "Нужна проверка мастером"
+  );
+}
+
+export function aiReviewSource(review: Review) {
+  return review.llm_used === true
+    ? "Источник: текстовая модель и правила"
+    : review.llm_used === false
+      ? "Источник: текст отчёта и правила; языковая модель не использовалась"
+      : null;
+}
+
+export function aiReviewNote(review: Review, job?: AiReviewJob | null) {
+  if (isServiceReview(review, job)) {
+    return "Проверяются текст отчёта и правила. Содержимое снимков не анализируется. Окончательное решение принимает мастер.";
+  }
+  return review.is_stub
+    ? "Проверяется наличие фото; содержимое снимков не анализируется. Окончательное решение принимает мастер."
+    : "Окончательное решение принимает мастер.";
+}
 
 export function showAiReview(job?: AiReviewJob | null) {
   return !job || job.status === "succeeded";
@@ -93,8 +157,9 @@ export function AiJobStatus({
             : "Отчёт сохранён на сервере. Результат появится после завершения проверки."}
       </p>
       <small>
-        Формальная проверка · демо. Содержимое снимков не анализируется.
-        Окончательное решение принимает мастер.
+        {job.provider === "ai_service"
+          ? "Сервис проверки · текст отчёта и правила. Окончательное решение принимает мастер."
+          : "Формальная проверка · демо. Содержимое снимков не анализируется. Окончательное решение принимает мастер."}
       </small>
       {uncertain && (
         <p>

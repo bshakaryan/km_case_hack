@@ -31,6 +31,11 @@ const {
   canRetryAiReview,
   requestAiReviewRetry,
   applyAiReviewJob,
+  aiReviewScoreLabel,
+  aiReviewTitle,
+  aiReviewVerdict,
+  aiReviewSource,
+  aiReviewNote,
 } = loaded.exports;
 const job = (status, overrides = {}) => ({
   id: 8,
@@ -65,6 +70,42 @@ const order = {
 };
 const render = (props) =>
   renderToStaticMarkup(React.createElement(AiJobStatus, props));
+
+test("a service job is a saved report awaiting a recommendation, not the local formal stub", () => {
+  for (const status of ["pending", "running", "failed", "superseded"]) {
+    const html = render({ job: job(status, { provider: "ai_service" }) });
+    assert.match(html, /Сервис проверки/);
+    assert.match(html, /Окончательное решение принимает мастер/);
+    assert.doesNotMatch(html, /Формальная проверка · демо|PRIVATE_PROVIDER_DIAGNOSTIC/);
+    assert.equal(showAiReview(job(status, { provider: "ai_service" })), false);
+  }
+});
+
+test("unknown scores never become zero or a blank scale, and valid scores retain the scale", () => {
+  for (const value of [null, undefined, 0, NaN, Infinity, -1, 6, "4"])
+    assert.equal(aiReviewScoreLabel(value), "Оценка не определена");
+  assert.equal(aiReviewScoreLabel(4.5), "Предварительная оценка: 4,5 / 5");
+  assert.equal(aiReviewScoreLabel(5), "Предварительная оценка: 5 / 5");
+});
+
+test("source metadata distinguishes rules from text models without making a final decision", () => {
+  const review = {
+    verdict: "needs_attention", score: null, is_stub: true,
+    source_verdict: "needs_master_review", llm_used: false,
+    is_recommendation: true, explanation: "Проверьте отчёт",
+  };
+  assert.equal(aiReviewTitle(review, job("succeeded", { provider: "ai_service" })), "Сервис проверки");
+  assert.equal(aiReviewVerdict(review), "Нужна проверка мастером");
+  assert.match(aiReviewSource(review), /языковая модель не использовалась/);
+  assert.match(aiReviewSource({ ...review, llm_used: true }), /текстовая модель и правила/);
+  assert.match(aiReviewNote(review), /Содержимое снимков не анализируется/);
+  assert.match(aiReviewNote(review), /Окончательное решение принимает мастер/);
+  assert.equal(aiReviewSource({ verdict: "passed", score: 4.5, is_stub: true }), null);
+  assert.equal(aiReviewTitle({ verdict: "passed", score: 4.5, is_stub: true }), "Формальная проверка · демо");
+  assert.equal(aiReviewVerdict({ ...review, source_verdict: "accepted" }), "Рекомендовано принять");
+  assert.equal(aiReviewVerdict({ ...review, source_verdict: "accepted_with_remarks" }), "Рекомендовано принять с замечаниями");
+  assert.equal(aiReviewVerdict({ ...review, source_verdict: "needs_rework" }), "Рекомендована доработка");
+});
 
 test("pending and running preserve report confirmation without showing an old result", () => {
   for (const status of ["pending", "running"]) {

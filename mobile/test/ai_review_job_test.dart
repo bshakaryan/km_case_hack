@@ -120,6 +120,131 @@ Future<void> openDetail(WidgetTester tester, AppController controller) async {
 }
 
 void main() {
+  test('nullable review scores never become zero or a blank scale', () {
+    for (final value in <Object?>[
+      null,
+      0,
+      double.nan,
+      double.infinity,
+      -1,
+      6,
+      '4',
+    ]) {
+      expect(aiReviewScoreLabel(value), 'Оценка не определена');
+    }
+    expect(aiReviewScoreLabel(4.5), 'Предварительная оценка: 4.5 / 5');
+    expect(aiReviewScoreLabel(5), 'Предварительная оценка: 5 / 5');
+    expect(
+      aiReviewTitle(review('OLD_FORMAL_RESULT')),
+      'Формальная проверка · демо',
+    );
+    expect(aiReviewSource(review('OLD_FORMAL_RESULT')), isNull);
+    expect(
+      aiReviewSource({...review('TEXT_RESULT'), 'llm_used': true}),
+      'Источник: текстовая модель и правила',
+    );
+    expect(
+      aiReviewVerdict({...review('TEXT_RESULT'), 'source_verdict': 'accepted'}),
+      'Рекомендовано принять',
+    );
+    expect(
+      aiReviewVerdict({
+        ...review('TEXT_RESULT'),
+        'source_verdict': 'accepted_with_remarks',
+      }),
+      'Рекомендовано принять с замечаниями',
+    );
+    expect(
+      aiReviewVerdict({
+        ...review('TEXT_RESULT'),
+        'source_verdict': 'needs_rework',
+      }),
+      'Рекомендована доработка',
+    );
+  });
+
+  testWidgets(
+    'service task provenance does not masquerade as the local formal stub',
+    (tester) async {
+      for (final status in ['pending', 'running', 'failed', 'superseded']) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: AiJobStatus(
+                job: {...job(status), 'provider': 'ai_service'},
+              ),
+            ),
+          ),
+        );
+        expect(find.textContaining('Сервис проверки'), findsOneWidget);
+        expect(
+          find.textContaining('Окончательное решение принимает мастер'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Формальная проверка'), findsNothing);
+        expect(
+          find.textContaining('PRIVATE_PROVIDER_DIAGNOSTIC'),
+          findsNothing,
+        );
+        expect(
+          showAttemptAiReview({...job(status), 'provider': 'ai_service'}),
+          isFalse,
+        );
+        expect(tester.takeException(), isNull);
+      }
+    },
+  );
+
+  testWidgets(
+    'unknown service assessment leaves the master decision explicit and sends no action',
+    (tester) async {
+      final serviceReview = <String, dynamic>{
+        'verdict': 'needs_attention',
+        'score': null,
+        'is_stub': true,
+        'source_verdict': 'needs_master_review',
+        'llm_used': false,
+        'is_recommendation': true,
+        'explanation': 'Проверьте описанные работы вручную',
+      };
+      final returned = {
+        ...detail('succeeded', orderStatus: 'ai_review'),
+        'ai_review': serviceReview,
+        'ai_review_job': {...job('succeeded'), 'provider': 'ai_service'},
+      };
+      var writes = 0;
+      final controller = controllerFor(
+        MemoryLocalStore(),
+        MockClient((request) async {
+          if (request.method != 'GET') writes++;
+          return jsonResponse(returned);
+        }),
+        status: 'succeeded',
+        orderStatus: 'ai_review',
+      );
+      await openDetail(tester, controller);
+      await tester.scrollUntilVisible(find.text('Оценка не определена'), 300);
+      expect(find.text('Сервис проверки'), findsOneWidget);
+      expect(find.text('Нужна проверка мастером'), findsOneWidget);
+      expect(
+        find.textContaining('языковая модель не использовалась'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Содержимое снимков не анализируется'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Предварительная оценка:'), findsNothing);
+      expect(find.text('Принято с замечаниями'), findsNothing);
+      expect(find.text('Принять работу'), findsOneWidget);
+      expect(controller.orders.single.status, 'ai_review');
+      expect(controller.orders.single.score, isNull);
+      expect(writes, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   test('an unusable AI retry version leaves the outcome uncertain and the previous order intact', () async {
     for (final invalidVersion in <Object?>[null, 0, -1, '8', 8.5, 6]) {
       final store = MemoryLocalStore();

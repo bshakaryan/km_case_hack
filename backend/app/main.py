@@ -26,7 +26,8 @@ from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
 from .conditional_response import conditional_json_response
-from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
+from .ai_jobs import FormalStub, begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
+from .ai_adapter import AttemptServiceAdapter
 from .migrations import upgrade_database
 from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
 from .push import StubSender, dispatch_push, env_int, get_sender
@@ -89,8 +90,11 @@ class Realtime:
 
 def create_app(database_url=None, seed=True, monitor=True):
     ai_mode = os.getenv("AI_REVIEW_MODE", "queued_stub").strip()
-    if ai_mode not in {"queued_stub", "inline_stub"}:
-        raise ValueError("AI_REVIEW_MODE must be queued_stub or inline_stub")
+    if ai_mode not in {"queued_stub", "inline_stub", "queued_service"}:
+        raise ValueError("AI_REVIEW_MODE must be queued_stub, inline_stub or queued_service")
+    ai_providers = {"stub": FormalStub()}
+    if ai_mode == "queued_service":
+        ai_providers["ai_service"] = AttemptServiceAdapter.from_env()
     engine = make_engine(database_url)
     sessions = session_factory(engine)
     realtime = Realtime()
@@ -101,7 +105,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     async def ai_loop():
         while True:
             try:
-                changed_orders = await asyncio.to_thread(dispatch_ai_jobs, sessions)
+                changed_orders = await asyncio.to_thread(dispatch_ai_jobs, sessions, providers=ai_providers)
                 for order_id in changed_orders:
                     await realtime.publish("orders.updated", order_id)
                     await realtime.publish("notifications.updated")
@@ -150,7 +154,7 @@ def create_app(database_url=None, seed=True, monitor=True):
                 seed_database(db)
         task = asyncio.create_task(deadline_loop()) if monitor else None
         push_task = asyncio.create_task(push_loop()) if monitor and not isinstance(push_sender, StubSender) else None
-        ai_task = asyncio.create_task(ai_loop()) if monitor and ai_mode == "queued_stub" else None
+        ai_task = asyncio.create_task(ai_loop()) if monitor and ai_mode != "inline_stub" else None
         yield
         if ai_task:
             ai_task.cancel()
@@ -174,7 +178,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     app.state.sessions = sessions
     app.state.realtime = realtime
     app.state.ai_review_mode = ai_mode
-    app.state.run_ai_jobs = lambda provider=None, limit=10: dispatch_ai_jobs(sessions, provider=provider, limit=limit)
+    app.state.run_ai_jobs = lambda provider=None, limit=10: dispatch_ai_jobs(sessions, provider=provider, limit=limit, providers=ai_providers)
     app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id", "X-Expected-Order-Version", "X-Previous-Client-Command-Id", "If-None-Match"], expose_headers=["ETag"])
 
     def get_db():
@@ -625,7 +629,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             job.lease_token = None
             job.lease_expires_at = None
             order.version += 1
-            audit(db, order, "ai_review_retry", user.id, order.status, "Повтор формальной проверки ИИ")
+            audit(db, order, "ai_review_retry", user.id, order.status, "Повтор проверки конкретной сдачи")
             db.flush()
             return {"attempt_id": attempt.id, "order_version": order.version, "ai_review": None, "job": job_dict(job)}, [("orders.updated", order.id)]
         return run_idempotent(db, user, request, "ai_review_retry", request_hash(str(attempt_id)), 200, perform, order_id=id_)
@@ -830,7 +834,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             notify(db, participant_ids(db, order) + [order.master_id], "Статус наряда изменён", f"{order.number}: in_progress → completed", "status", order.id)
             order.ai_review = None
             attempt = append_submission(db, order, user.id, submission_payload, writeoffs)
-            job = enqueue_job(db, attempt)
+            job = enqueue_job(db, attempt, "ai_service" if ai_mode == "queued_service" else "stub")
             if ai_mode == "inline_stub":
                 run_inline(db, order, attempt, job)
             return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]

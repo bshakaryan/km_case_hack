@@ -136,6 +136,6 @@ jobs:
           cache-dependency-path: .github/requirements-ai-checks.txt
       - name: Install only policy and data-source dependencies
         run: python -m pip install -r ../.github/requirements-ai-checks.txt
-      # No application runtime, CV/model packages, downloads or live providers.
+      # No CV/model packages, downloads or live external providers.
       - name: Test isolated AI boundaries
-        run: python -m pytest -q tests/test_runtime_policy.py tests/test_datasources.py tests/test_phase7.py
+        run: python -m pytest -q tests/test_runtime_policy.py tests/test_datasources.py tests/test_phase7.py tests/test_attempt_bridge.py

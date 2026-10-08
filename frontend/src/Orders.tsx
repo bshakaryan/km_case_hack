@@ -21,6 +21,11 @@ import {
 } from "./OrderVersion";
 import {
   AiJobStatus,
+  aiReviewNote,
+  aiReviewScoreLabel,
+  aiReviewSource,
+  aiReviewTitle,
+  aiReviewVerdict,
   applyAiReviewJob,
   canRetryAiReview,
   requestAiReviewRetry,
@@ -2983,35 +2988,30 @@ export function OrderDialog({
                     <div>
                       <Sparkles size={18} />
                       <h3>
-                        {order.ai_review.is_stub
-                          ? "Формальная проверка"
-                          : "Проверка ИИ"}
+                        {aiReviewTitle(order.ai_review, order.ai_review_job)}
                       </h3>
                       {order.ai_review.is_stub && (
-                        <span className="stub-tag">ДЕМО · ЗАГЛУШКА</span>
+                        <span className="stub-tag">
+                          {order.ai_review_job?.provider === "ai_service"
+                            ? "РЕКОМЕНДАЦИЯ"
+                            : "ДЕМО · ЗАГЛУШКА"}
+                        </span>
                       )}
                     </div>
                     <div className="review-verdict">
                       <strong>
-                        {(
-                          {
-                            passed: "Принято",
-                            needs_attention: "Принято с замечаниями",
-                            needs_rework: "Требует доработки",
-                            rework: "Требует доработки",
-                          } as Record<string, string>
-                        )[order.ai_review.verdict] || "Нужна проверка мастером"}
+                        {aiReviewVerdict(order.ai_review)}
                       </strong>
                       <span>
-                        Предварительная оценка: {order.ai_review.score} / 5
+                        {aiReviewScoreLabel(order.ai_review.score)}
                       </span>
                     </div>
                     <p>{order.ai_review.explanation}</p>
+                    {aiReviewSource(order.ai_review) && (
+                      <p className="muted">{aiReviewSource(order.ai_review)}</p>
+                    )}
                     <small>
-                      {order.ai_review.is_stub
-                        ? "Проверяется наличие фотографий. Содержимое снимков не анализируется. "
-                        : ""}
-                      Окончательное решение принимает мастер.
+                      {aiReviewNote(order.ai_review, order.ai_review_job)}
                     </small>
                     {order.score !== null && (
                       <strong className="final-score">

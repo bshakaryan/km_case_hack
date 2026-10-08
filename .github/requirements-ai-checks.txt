@@ -1,6 +1,7 @@
-# Imports used by runtime-policy, data-source and external-LLM boundary tests.
+# Imports used by runtime-policy, data-source and attempt-bridge boundary tests.
 # Keep these pins aligned with ai_service/requirements.txt; no CV/model runtime.
 httpx==0.28.1
+fastapi==0.115.12
 pydantic==2.11.3
 python-dotenv==1.0.1
 pytest==8.3.5

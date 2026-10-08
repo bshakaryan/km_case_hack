@@ -103,17 +103,24 @@ export type OrderDetail = Order & {
   } | null;
   ai_review: {
     verdict: string;
-    score: number;
+    score: number | null;
     explanation: string;
     is_stub: boolean;
     master_score?: number | null;
+    source_verdict?:
+      | "accepted"
+      | "accepted_with_remarks"
+      | "needs_rework"
+      | "needs_master_review";
+    llm_used?: boolean;
+    is_recommendation?: true;
   } | null;
 };
 export type AiReviewJob = {
   id: Id;
   attempt_id: Id;
   status: "pending" | "running" | "succeeded" | "failed" | "superseded";
-  provider: "stub";
+  provider: "stub" | "ai_service";
   attempts: number;
   max_attempts: number;
   next_attempt_at: string | null;

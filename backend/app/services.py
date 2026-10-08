@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 from collections import defaultdict
@@ -5,7 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from sqlalchemy import func, or_, select
-from .models import AIReviewJob, Area, Brigade, Employee, Equipment, IntegrationLog, Material, MaterialWriteoff, Notification, Order, OrderAssignment, OrderAssignmentParticipant, OrderEvent, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
+from .models import AIReviewJob, Area, Brigade, Employee, Equipment, FaultCode, IntegrationLog, Material, MaterialWriteoff, Notification, Order, OrderAssignment, OrderAssignmentParticipant, OrderEvent, Photo, SubmissionAttempt, SubmissionDecision, SubmissionPhoto, SubmissionWriteoff, utcnow
 from .ai_jobs import job_dict
 from .push import enqueue_push
 
@@ -211,9 +212,17 @@ def append_submission(db, order, author_id, payload, writeoffs, assessment=None)
     attempt = SubmissionAttempt(order_id=order.id, sequence=latest.sequence + 1 if latest else 1,
         assignment_id=assignment.id, submitted_at=order.completed_at, author_id=author_id,
         payload=deepcopy(payload), ai_review=deepcopy(order.ai_review), assessment_id=assessment.id if assessment else None, source="live")
+    photos = list(db.scalars(select(Photo).where(Photo.order_id == order.id).order_by(Photo.id)))
+    attempt.ai_input = {
+        "order": {key: getattr(order, key) for key in ("id", "number", "title", "description", "work_type", "area_id", "equipment_id", "assignee_id", "brigade_id", "master_id", "priority", "status", "normal_hours")},
+        "submission_order_version": order.version, "assignment_id": assignment.id, "sequence": attempt.sequence,
+        "fault_codes": [{"id": row.id, "code": row.code, "name": row.name} for row in db.scalars(select(FaultCode).order_by(FaultCode.id))],
+        "photos": [{"id": row.id, "kind": row.kind, "sha256": hashlib.sha256(row.data).hexdigest()} for row in photos],
+    }
+    attempt.ai_input["order"].update({key: iso(getattr(order, key)) for key in ("deadline", "created_at", "started_at", "completed_at")})
     db.add(attempt)
     db.flush()
-    db.add_all([SubmissionPhoto(attempt_id=attempt.id, photo_id=id_) for id_ in db.scalars(select(Photo.id).where(Photo.order_id == order.id).order_by(Photo.id))])
+    db.add_all([SubmissionPhoto(attempt_id=attempt.id, photo_id=row.id) for row in photos])
     db.add_all([SubmissionWriteoff(attempt_id=attempt.id, writeoff_id=row.id) for row in writeoffs])
     return attempt
 

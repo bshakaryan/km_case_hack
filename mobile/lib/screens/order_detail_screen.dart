@@ -1211,35 +1211,29 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   Widget _review(WorkOrder order) {
     final review = Map<String, dynamic>.from(order.data['ai_review'] as Map);
-    final stub = review['is_stub'] == true;
-    final verdict = switch (review['verdict']) {
-      'passed' => 'Принято',
-      'needs_attention' => 'Принято с замечаниями',
-      'rework' || 'needs_rework' => 'Требует доработки',
-      _ => 'Нужна проверка мастером',
-    };
-    return _section(stub ? 'Формальная проверка · демо' : 'Проверка ИИ', [
+    return _section(aiReviewTitle(review, job: order.aiReviewJob), [
       Text(
-        verdict,
+        aiReviewVerdict(review),
         style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
       ),
       const SizedBox(height: 8),
-      if (review['score'] != null)
-        Text('Предварительная оценка: ${_number(review['score'])} / 5'),
+      Text(aiReviewScoreLabel(review['score'])),
       const SizedBox(height: 8),
+      if (aiReviewSource(review) != null) ...[
+        Text(aiReviewSource(review)!),
+        const SizedBox(height: 8),
+      ],
       Text(
         (review['explanation'] ??
                 'Объяснение отсутствует. Требуется проверка мастера.')
             .toString(),
         style: const TextStyle(height: 1.4),
       ),
-      if (stub) ...[
-        const Divider(height: 24),
-        const Text(
-          'Проверяется наличие фото. Содержимое снимков не анализируется; настоящий ИИ пока не подключён.',
-          style: TextStyle(fontSize: 14, color: Color(0xFF64748B)),
-        ),
-      ],
+      const Divider(height: 24),
+      Text(
+        aiReviewNote(review, job: order.aiReviewJob),
+        style: const TextStyle(fontSize: 14, color: Color(0xFF64748B)),
+      ),
     ]);
   }
 
