@@ -106,8 +106,7 @@ test("immutable attempts retain separate reports, extra expense, assessment and 
     "Самостоятельный отчёт 2",
     "Дополнительная деталь 1",
     "Дополнительная деталь 2",
-    "Оценка попытки 1",
-    "Оценка попытки 2",
+    "Сохранённая оценка старой проверки: 4 / 5",
     "Решение по попытке 1",
     "Решение по попытке 2",
     "Возвращено на доработку",
@@ -221,14 +220,14 @@ test("a service recommendation with unknown score preserves the separate master'
       },
     })],
   });
-  assert.match(html, /Сервис проверки/);
+  assert.match(html, /Локальная проверка сдачи/);
   assert.match(html, /Оценка не определена/);
   assert.match(html, /Нужна проверка мастером/);
   assert.match(html, /языковая модель не использовалась/);
   assert.match(html, /Содержимое снимков не анализируется/);
   assert.match(html, /Принято мастером · 5 \/ 5/);
   assert.match(html, /&lt;script&gt;private-review-text&lt;\/script&gt;/);
-  assert.doesNotMatch(html, /<script>|Предварительная оценка|Формальная проверка · демо|Принято с замечаниями/);
+  assert.doesNotMatch(html, /<script>|Предварительная оценка|Историческая формальная проверка|Принято с замечаниями/);
 });
 
 test("text model provenance remains a recommendation and old formal results retain their score", () => {
@@ -247,8 +246,8 @@ test("text model provenance remains a recommendation and old formal results reta
   assert.match(html, /Источник: текстовая модель и правила/);
   assert.match(html, /Рекомендовано принять/);
   assert.match(html, /Предварительная оценка: 4,5 \/ 5/);
-  assert.match(html, /Формальная проверка · демо/);
-  assert.match(html, /Предварительная оценка: 4 \/ 5/);
+  assert.match(html, /Историческая формальная проверка/);
+  assert.match(html, /Сохранённая оценка старой проверки: 4 \/ 5/);
   assert.match(html, /Окончательное решение принимает мастер/);
 });
 

@@ -53,6 +53,13 @@ def client_for(llm=None, settings=None):
     return TestClient(create_attempt_app(settings or Settings(ai_service_token=TOKEN), llm))
 
 
+def test_bridge_health_does_not_require_service_token():
+    with client_for() as client:
+        response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def semantic(match):
     return {"works_match_problem": match, "match_confidence": 0.9, "remarks": [],
             "explanation_worker": "Требуется проверка мастера.",

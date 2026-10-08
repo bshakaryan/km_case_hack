@@ -11,33 +11,54 @@ bool _serviceReview(Json review, Object? job) =>
     review['llm_used'] is bool;
 
 String aiReviewTitle(Json review, {Object? job}) => _serviceReview(review, job)
-    ? 'Сервис проверки'
+    ? 'Локальная проверка сдачи'
     : review['is_stub'] == true
-    ? 'Формальная проверка · демо'
+    ? 'Историческая формальная проверка'
     : 'Проверка ИИ';
 
-String aiReviewScoreLabel(Object? value) {
+String aiReviewScoreLabel(Object? value, {Json? review}) {
   if (value is! num || !value.isFinite || value < 1 || value > 5) {
     return 'Оценка не определена';
   }
   final number = value == value.roundToDouble()
       ? value.toInt().toString()
       : value.toStringAsFixed(1);
-  return 'Предварительная оценка: $number / 5';
+  return review?['is_stub'] == true && !_serviceReview(review!, null)
+      ? 'Сохранённая оценка старой проверки: $number / 5'
+      : 'Предварительная оценка: $number / 5';
 }
 
-String aiReviewVerdict(Json review) => switch (review['source_verdict']) {
-  'accepted' => 'Рекомендовано принять',
-  'accepted_with_remarks' => 'Рекомендовано принять с замечаниями',
-  'needs_rework' => 'Рекомендована доработка',
-  'needs_master_review' => 'Нужна проверка мастером',
-  _ => switch (review['verdict']) {
+String aiReviewVerdict(Json review) {
+  switch (review['source_verdict']) {
+    case 'accepted':
+      return 'Рекомендовано принять';
+    case 'accepted_with_remarks':
+      return 'Рекомендовано принять с замечаниями';
+    case 'needs_rework':
+      return 'Рекомендована доработка';
+    case 'needs_master_review':
+      return 'Нужна проверка мастером';
+  }
+  if (review['is_stub'] == true) {
+    return switch (review['verdict']) {
+      'passed' => 'Старая рекомендация: принять',
+      'needs_attention' => 'Старая рекомендация: проверить мастеру',
+      'rework' || 'needs_rework' => 'Старая рекомендация: доработка',
+      _ => 'Старый результат формальной проверки',
+    };
+  }
+  return switch (review['verdict']) {
     'passed' => 'Принято',
     'needs_attention' => 'Принято с замечаниями',
     'rework' || 'needs_rework' => 'Требует доработки',
     _ => 'Нужна проверка мастером',
-  },
-};
+  };
+}
+
+String aiReviewExplanation(Json review, {Object? job}) =>
+    review['is_stub'] == true && !_serviceReview(review, job)
+    ? 'Сохранённый результат прежнего формального режима: проверялись поля отчёта и наличие фотографий, содержимое изображений не анализировалось. Локальный модуль для этой сдачи не запускался; запись не пересчитывалась.'
+    : (review['explanation'] ?? 'Объяснение отсутствует. Требуется проверка мастера.').toString();
 
 String? aiReviewSource(Json review) {
   final photoCheck = review['photo_check'];
@@ -70,9 +91,10 @@ String aiReviewNote(Json review, {Object? job}) {
   if (_serviceReview(review, job)) {
     return 'Проверяются текст отчёта и правила. Содержимое снимков не анализируется. Окончательное решение принимает мастер.';
   }
-  return review['is_stub'] == true
-      ? 'Проверяется наличие фото; содержимое снимков не анализируется. Окончательное решение принимает мастер.'
-      : 'Окончательное решение принимает мастер.';
+  if (review['is_stub'] == true) {
+    return 'Это исторический результат прежней проверки; содержимое снимков не анализируется и запись не пересчитывалась. Окончательное решение принимает мастер.';
+  }
+  return 'Окончательное решение принимает мастер.';
 }
 
 List<String> aiPhotoCheckLines(Object? check) {
@@ -212,8 +234,8 @@ class AiJobStatus extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             job?['provider'] == 'ai_service'
-                ? 'Сервис проверки · рекомендация. Окончательное решение принимает мастер.'
-                : 'Формальная проверка · демо. Содержимое снимков не анализируется. Окончательное решение принимает мастер.',
+                ? 'Локальная проверка сдачи · рекомендация. Окончательное решение принимает мастер.'
+                : 'Старая формальная проверка · демо. Содержимое снимков не анализируется. Окончательное решение принимает мастер.',
             style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
           ),
           if (uncertain)

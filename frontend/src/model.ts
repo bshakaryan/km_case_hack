@@ -262,10 +262,9 @@ export type Analytics = {
     title: string;
     description: string;
     severity: string;
-    is_stub: boolean;
   }[];
-  ai_summary: string;
-  is_stub: boolean;
+  insight_method: "deterministic_rules";
+  summary_text: string;
 };
 export const statusNames: Record<string, string> = {
   issued: "Выдан",

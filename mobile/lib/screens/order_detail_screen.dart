@@ -1217,16 +1217,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
       ),
       const SizedBox(height: 8),
-      Text(aiReviewScoreLabel(review['score'])),
+      Text(aiReviewScoreLabel(review['score'], review: review)),
       const SizedBox(height: 8),
       if (aiReviewSource(review) != null) ...[
         Text(aiReviewSource(review)!),
         const SizedBox(height: 8),
       ],
       Text(
-        (review['explanation'] ??
-                'Объяснение отсутствует. Требуется проверка мастера.')
-            .toString(),
+        aiReviewExplanation(review, job: order.aiReviewJob),
         style: const TextStyle(height: 1.4),
       ),
       AiPhotoCheck(check: review['photo_check']),

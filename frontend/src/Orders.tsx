@@ -22,6 +22,7 @@ import {
 import {
   AiJobStatus,
   AiPhotoCheck,
+  aiReviewExplanation,
   aiReviewNote,
   aiReviewScoreLabel,
   aiReviewSource,
@@ -2993,9 +2994,9 @@ export function OrderDialog({
                       </h3>
                       {order.ai_review.is_stub && (
                         <span className="stub-tag">
-                          {order.ai_review_job?.provider === "ai_service"
+                          {order.ai_review_job?.provider === "ai_service" || order.ai_review.bridge_version != null
                             ? "РЕКОМЕНДАЦИЯ"
-                            : "ДЕМО · ЗАГЛУШКА"}
+                            : "СТАРЫЙ РЕЗУЛЬТАТ"}
                         </span>
                       )}
                     </div>
@@ -3004,10 +3005,10 @@ export function OrderDialog({
                         {aiReviewVerdict(order.ai_review)}
                       </strong>
                       <span>
-                        {aiReviewScoreLabel(order.ai_review.score)}
+                        {aiReviewScoreLabel(order.ai_review.score, order.ai_review)}
                       </span>
                     </div>
-                    <p>{order.ai_review.explanation}</p>
+                    <p>{aiReviewExplanation(order.ai_review, order.ai_review_job)}</p>
                     {aiReviewSource(order.ai_review) && (
                       <p className="muted">{aiReviewSource(order.ai_review)}</p>
                     )}

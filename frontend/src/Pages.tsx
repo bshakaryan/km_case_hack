@@ -930,24 +930,8 @@ export function AnalyticsPage({
                 </div>
                 <section className="insights-section">
                   <SectionTitle
-                    title={
-                      data.is_stub
-                        ? "Демонстрационные подсказки"
-                        : "Сигналы по истории"
-                    }
-                    caption={
-                      data.is_stub
-                        ? "Правила на данных выборки. Настоящий анализ ИИ ещё не подключён."
-                        : "Выводы по выбранному периоду"
-                    }
-                    action={
-                      data.is_stub ? (
-                        <span className="stub-tag">
-                          <Sparkles size={12} />
-                          ИИ · ЗАГЛУШКА
-                        </span>
-                      ) : undefined
-                    }
+                    title="Сигналы по данным"
+                    caption="Проверяемые агрегаты и детерминированные правила по выбранной выборке; это не вывод генеративного ИИ."
                   />
                   <div className="insights-grid">
                     {data.insights.map((ins, i) => (
@@ -967,9 +951,7 @@ export function AnalyticsPage({
                         <h3>{ins.title}</h3>
                         <p>{ins.description}</p>
                         <span className="insight-foot">
-                          {ins.is_stub
-                            ? "Правило демонстрации"
-                            : "По данным выбранной выборки"}
+                          Расчёт по данным выбранной выборки
                           <Info size={13} />
                         </span>
                       </article>
@@ -980,12 +962,9 @@ export function AnalyticsPage({
                   <Sparkles size={20} />
                   <div>
                     <strong>
-                      Краткий обзор периода{" "}
-                      {data.is_stub && (
-                        <span className="stub-tag">ЗАГЛУШКА</span>
-                      )}
+                      Сводка по данным
                     </strong>
-                    <p>{data.ai_summary}</p>
+                    <p>{data.summary_text}</p>
                   </div>
                 </div>
               </>
@@ -1656,90 +1635,97 @@ export function IntegrationsPage() {
               <span className="eyebrow">СОСТОЯНИЕ СИСТЕМЫ</span>
               <h2>Что работает сейчас</h2>
               <p>
-                Веб-панель и мобильный клиент Flutter работают с общим API и
-                базой. Настоящий ИИ, push на устройства и офлайн-синхронизация
-                остаются отдельными этапами.
+                Веб-панель и Flutter работают с общим API и базой. Проверка
+                новой сдачи использует локальный модуль; внешний LLM/vision не
+                включён. Состояние push зависит от настроек окружения.
               </p>
             </div>
-            <span className="outlined-tag">DEMO / V1.0</span>
+            <span className="outlined-tag">ЛОКАЛЬНЫЙ КОНТУР</span>
           </div>
           <div className="integration-grid">
             {[
               {
                 key: "ai",
-                title: "Интеллектуальная проверка",
+                title: "Проверка сдачи",
                 icon: Sparkles,
-                subtitle: "AI ADAPTER",
-                stub: true,
+                subtitle: "LOCAL REVIEW",
               },
               {
                 key: "native",
                 title: "Push на устройства",
                 icon: Smartphone,
                 subtitle: "ДОСТАВКА УВЕДОМЛЕНИЙ",
-                stub: true,
               },
               {
                 key: "realtime",
                 title: "Обновления в реальном времени",
                 icon: Radio,
                 subtitle: "REALTIME",
-                stub: false,
               },
-            ].map(({ key, title, icon: Icon, subtitle, stub }) => (
-              <section className="integration-card" key={key}>
-                <div className="integration-card-top">
-                  <span className="integration-icon">
-                    <Icon size={25} />
-                  </span>
-                  <span className={stub ? "stub-tag" : "status status-closed"}>
-                    {stub ? "ЗАГЛУШКА" : "ПОДКЛЮЧЕНО"}
-                  </span>
-                </div>
-                <div className="eyebrow">{subtitle}</div>
-                <h3>{title}</h3>
-                <p>
-                  {key === "native"
-                    ? "События уведомлений сохраняются на сервере. Отправка push на телефон ещё не подключена."
-                    : data[key]?.description}
-                </p>
-                <div className="integration-meta">
-                  <span>Режим</span>
-                  <code>{data[key]?.mode}</code>
-                  <span>Статус</span>
-                  <code>{data[key]?.status}</code>
-                </div>
-                {key === "ai" && (
-                  <div className="integration-note">
-                    <Info size={15} />
-                    <span>
-                      Выводы создаёт детерминированный алгоритм. Автоматической
-                      приёмки нет: решение всегда за мастером.
+            ].map(({ key, title, icon: Icon, subtitle }) => {
+              const integration = data[key];
+              const active = integration?.status === "active";
+              const label = active
+                ? "ПОДКЛЮЧЕНО"
+                : integration?.status === "configured"
+                  ? "НАСТРОЕНО"
+                  : integration?.status === "not_configured"
+                    ? "НЕ НАСТРОЕНО"
+                    : integration?.status === "fallback"
+                      ? "ТЕСТОВЫЙ РЕЖИМ"
+                      : "ОТКЛЮЧЕНО";
+              return (
+                <section className="integration-card" key={key}>
+                  <div className="integration-card-top">
+                    <span className="integration-icon">
+                      <Icon size={25} />
+                    </span>
+                    <span className={active ? "status status-closed" : "outlined-tag"}>
+                      {label}
                     </span>
                   </div>
-                )}
-                {key === "native" && (
-                  <div className="integration-note">
-                    <Info size={15} />
-                    <span>
-                      Flutter-клиент уже поддерживает основной сценарий через
-                      API. Статус этой заглушки относится к доставке push, а не
-                      к наличию приложения.
-                    </span>
+                  <div className="eyebrow">{subtitle}</div>
+                  <h3>{title}</h3>
+                  <p>{integration?.description}</p>
+                  <div className="integration-meta">
+                    <span>Режим</span>
+                    <code>{integration?.mode}</code>
+                    <span>Статус</span>
+                    <code>{integration?.status}</code>
                   </div>
-                )}
-                {key === "realtime" && (
-                  <div className="integration-note">
-                    <ShieldCheck size={15} />
-                    <span>
-                      WebSocket с авторизацией и резервное обновление. Интервал
-                      опроса — 5 секунд; время доставки под нагрузкой ещё не
-                      измерено.
-                    </span>
-                  </div>
-                )}
-              </section>
-            ))}
+                  {key === "ai" && (
+                    <div className="integration-note">
+                      <Info size={15} />
+                      <span>
+                        Локальные правила и CV дают только рекомендацию. Внешний
+                        LLM/vision не вызывается; числовую оценку и решение
+                        выставляет мастер.
+                      </span>
+                    </div>
+                  )}
+                  {key === "native" && (
+                    <div className="integration-note">
+                      <Info size={15} />
+                      <span>
+                        Flutter-клиент работает через API независимо от push.
+                        Реальная доставка включается только при настроенных
+                        учётных данных FCM и PUSH_ENABLED=true.
+                      </span>
+                    </div>
+                  )}
+                  {key === "realtime" && (
+                    <div className="integration-note">
+                      <ShieldCheck size={15} />
+                      <span>
+                        WebSocket с авторизацией и резервное обновление. Интервал
+                        опроса — 5 секунд; время доставки под нагрузкой ещё не
+                        измерено.
+                      </span>
+                    </div>
+                  )}
+                </section>
+              );
+            })}
           </div>
           <section className="panel architecture-panel">
             <SectionTitle

@@ -310,7 +310,7 @@ void main() {
       for (final text in [
         'Самостоятельный отчёт 1',
         'Дополнительная деталь 1 · 1 шт',
-        'Оценка попытки 1',
+        'Историческая формальная проверка',
         'Решение по попытке 1',
         'Возвращено на доработку',
         'Шифр неисправности: F-01 · Утечка',
@@ -407,7 +407,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Сдача №2'));
       await tester.pumpAndSettle();
-      expect(find.text('Сервис проверки'), findsOneWidget);
+      expect(find.text('Локальная проверка сдачи'), findsOneWidget);
       expect(find.text('Оценка не определена'), findsOneWidget);
       expect(find.text('Нужна проверка мастером'), findsOneWidget);
       expect(find.text('Принято мастером · 5 / 5'), findsOneWidget);

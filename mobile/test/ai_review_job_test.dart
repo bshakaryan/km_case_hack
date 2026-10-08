@@ -322,8 +322,15 @@ void main() {
     expect(aiReviewScoreLabel(5), 'Предварительная оценка: 5 / 5');
     expect(
       aiReviewTitle(review('OLD_FORMAL_RESULT')),
-      'Формальная проверка · демо',
+      'Историческая формальная проверка',
     );
+    final oldReview = review('Заглушка ИИ: старый результат');
+    expect(aiReviewVerdict(oldReview), 'Старая рекомендация: принять');
+    expect(
+      aiReviewScoreLabel(oldReview['score'], review: oldReview),
+      'Сохранённая оценка старой проверки: 4.5 / 5',
+    );
+    expect(aiReviewExplanation(oldReview), isNot(contains('Заглушка ИИ')));
     expect(aiReviewSource(review('OLD_FORMAL_RESULT')), isNull);
     expect(
       aiReviewSource({...review('TEXT_RESULT'), 'llm_used': true}),
@@ -362,7 +369,7 @@ void main() {
             ),
           ),
         );
-        expect(find.textContaining('Сервис проверки'), findsOneWidget);
+        expect(find.textContaining('Локальная проверка сдачи'), findsOneWidget);
         expect(
           find.textContaining('Окончательное решение принимает мастер'),
           findsOneWidget,
@@ -415,7 +422,7 @@ void main() {
       );
       await openDetail(tester, controller);
       await tester.scrollUntilVisible(find.text('Оценка не определена'), 300);
-      expect(find.text('Сервис проверки'), findsOneWidget);
+      expect(find.text('Локальная проверка сдачи'), findsOneWidget);
       expect(find.text('Нужна проверка мастером'), findsOneWidget);
       expect(
         find.textContaining('языковая модель не использовалась'),

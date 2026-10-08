@@ -189,10 +189,10 @@ class OrderHistory extends StatelessWidget {
                   showAttemptAiReview(attempt['ai_job'])) ...[
                 _heading(aiReviewTitle(review, job: attempt['ai_job'])),
                 _text(aiReviewVerdict(review)),
-                _text(aiReviewScoreLabel(review['score'])),
+                _text(aiReviewScoreLabel(review['score'], review: review)),
                 if (aiReviewSource(review) != null)
                   _text(aiReviewSource(review)!),
-                _text('${review['explanation'] ?? 'Объяснение не сохранено.'}'),
+                _text(aiReviewExplanation(review, job: attempt['ai_job'])),
                 AiPhotoCheck(check: review['photo_check']),
                 _text(aiReviewNote(review, job: attempt['ai_job'])),
               ],

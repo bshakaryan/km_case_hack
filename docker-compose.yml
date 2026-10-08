@@ -17,6 +17,22 @@ services:
       retries: 12
       start_period: 10s
 
+  ai-review:
+    build:
+      context: ./ai_service
+      args:
+        FETCH_EQUIPMENT_MODEL: "false"
+    command: ["uvicorn", "app.attempt_bridge:create_attempt_app", "--factory", "--host", "0.0.0.0", "--port", "8010", "--no-access-log"]
+    restart: unless-stopped
+    environment:
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?Set AI_SERVICE_TOKEN in the ignored root .env file}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
+
   backend:
     build:
       context: ./backend
@@ -24,14 +40,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      ai-review:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-naryad}:${POSTGRES_PASSWORD:-demo-only-change-me}@db:5432/${POSTGRES_DB:-naryad_ai}
       SEED_DEMO: ${SEED_DEMO:-true}
-      AI_REVIEW_MODE: ${AI_REVIEW_MODE:-queued_stub}
-      AI_SERVICE_URL: ${AI_SERVICE_URL:-}
-      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+      AI_REVIEW_MODE: ${AI_REVIEW_MODE:-queued_service}
+      AI_SERVICE_URL: ${AI_SERVICE_URL:-http://ai-review:8010}
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?Set AI_SERVICE_TOKEN in the ignored root .env file}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
-      # FCM push: without FIREBASE_CREDENTIALS(_JSON) the backend stays in stub mode.
+      # Without FCM credentials the API records notifications but does not deliver push.
       FIREBASE_CREDENTIALS: ${FIREBASE_CREDENTIALS:-}
       FIREBASE_CREDENTIALS_JSON: ${FIREBASE_CREDENTIALS_JSON:-}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-km-case-hack}
@@ -73,4 +91,3 @@ services:
 
 volumes:
   postgres_data:
-

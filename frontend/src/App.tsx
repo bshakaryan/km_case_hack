@@ -241,7 +241,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
               ))}
             </div>
             <p>
-              ПИН 1234 · Учебные данные. Проверка ИИ пока имитируется сервером.
+              ПИН 1234 · Учебные данные. В Compose новые сдачи проверяет локальный модуль; решение принимает мастер.
             </p>
           </div>
         </div>
@@ -1143,7 +1143,7 @@ export default function App() {
         </main>
         <footer className="main-footer">
           <span>НарядAI · Костанайские минералы</span>
-          <span>Демо · учебные данные · ИИ-заглушка</span>
+          <span>Демо · учебные данные · локальная проверка сдачи</span>
         </footer>
       </div>
       {create && (

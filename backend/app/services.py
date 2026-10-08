@@ -392,14 +392,16 @@ def analytics(db, orders, start, end):
     insights = []
     if equipment_rows:
         top = equipment_rows[0]
-        insights.append({"title": "Оборудование с максимальным простоем", "description": f"{top['name']}: {top['downtime_hours']} ч простоя, {top['orders']} нарядов. Детерминированная сводка заглушки; требует проверки инженером.", "severity": "high", "is_stub": True})
-    repeated = [o for o in orders if o.equipment_id == 1 and o.work_type == "unplanned"]
-    if repeated:
-        insights.append({"title": "Повторные неисправности конвейера", "description": f"За выбранный период зарегистрировано {len(repeated)} внеплановых работ на КЛ-01. Заглушка предлагает проверить ролики и центровку.", "severity": "warning", "is_stub": True})
-    post_maintenance = [o for o in orders if o.work_type == "unplanned" and "после обслуживания" in o.title.lower()]
-    if post_maintenance:
-        insights.append({"title": "Повторные обращения после обслуживания", "description": f"В описаниях {len(post_maintenance)} внеплановых нарядов отмечена неисправность после обслуживания. Заглушка использует ключевые слова; причинную связь должен проверить инженер.", "severity": "warning", "is_stub": True})
-    if material_counts:
-        top_material = max(material_counts.values(), key=lambda v: v["quantity"])
-        insights.append({"title": "Контроль расхода материалов", "description": f"Наибольший численный расход: {top_material['name']} — {top_material['quantity']:g} {top_material['unit']}. Сравнение разных единиц условно; это демонстрационное правило, не ИИ-вывод.", "severity": "info", "is_stub": True})
-    return {"summary": {"total": len(orders), "closed": len(closed), "on_time_percent": round(100 * len(ontime) / len(closed), 1) if closed else 0, "avg_score": round(sum(scored) / len(scored), 2) if scored else 0, "downtime_hours": round(sum(downtime_minutes(o) for o in orders) / 60, 1)}, "trend": list(trend.values()), "by_area": [{"name": areas[id_], "count": values["count"], "downtime_hours": round(values["minutes"] / 60, 1)} for id_, values in area_counts.items()], "rankings": rankings, "equipment": equipment_rows, "materials": sorted(material_counts.values(), key=lambda v: v["quantity"], reverse=True), "insights": insights, "ai_summary": f"Демонстрационная аналитика: {len(orders)} нарядов, {len(closed)} закрыто. Показатели рассчитаны сервером; рекомендации формируются правилами заглушки ИИ и требуют проверки специалистом.", "is_stub": True}
+        insights.append({"title": "Наибольшая рассчитанная длительность", "description": f"{top['name']}: {top['downtime_hours']} ч по {top['orders']} нарядам. Расчёт не объединяет пересекающиеся интервалы.", "severity": "info"})
+    unplanned_by_equipment = defaultdict(int)
+    for order in orders:
+        if order.work_type == "unplanned":
+            unplanned_by_equipment[order.equipment_id] += 1
+    repeated = sorted(
+        ((count, equipment.get(equipment_id)) for equipment_id, count in unplanned_by_equipment.items() if count >= 2),
+        key=lambda item: (-item[0], item[1].name if item[1] else ""),
+    )
+    for count, item in repeated[:3]:
+        name = item.name if item else "Неизвестное оборудование"
+        insights.append({"title": "Повторные внеплановые наряды", "description": f"{name}: {count} нарядов за выбранный период. Это группировка по оборудованию, не вывод о причине неисправности.", "severity": "warning"})
+    return {"summary": {"total": len(orders), "closed": len(closed), "on_time_percent": round(100 * len(ontime) / len(closed), 1) if closed else 0, "avg_score": round(sum(scored) / len(scored), 2) if scored else 0, "downtime_hours": round(sum(downtime_minutes(o) for o in orders) / 60, 1)}, "trend": list(trend.values()), "by_area": [{"name": areas[id_], "count": values["count"], "downtime_hours": round(values["minutes"] / 60, 1)} for id_, values in area_counts.items()], "rankings": rankings, "equipment": equipment_rows, "materials": sorted(material_counts.values(), key=lambda v: v["quantity"], reverse=True), "insights": insights, "insight_method": "deterministic_rules", "summary_text": f"За выбранный период: {len(orders)} нарядов, {len(closed)} закрыто. Сводка рассчитана по данным сервера; причинные выводы не формируются."}

@@ -21,7 +21,10 @@ def photo_bytes():
 
 
 def test_seed_and_authentication(client, master):
-    assert client.get("/api/health").json()["database"] == "connected"
+    health = client.get("/api/health").json()
+    assert health["database"] == "connected"
+    expected_ai = "ai_service" if client.app.state.ai_review_mode == "queued_service" else client.app.state.ai_review_mode
+    assert health["ai"] == expected_ai and health["native"] in {"disabled", "fcm"}
     assert client.get("/api/orders").status_code == 401
     assert client.post("/api/auth/login", json={"login": "master", "pin": "0000"}).status_code == 401
     reference = client.get("/api/reference", headers=master).json()
@@ -227,7 +230,10 @@ def test_analytics_real_filters_csv_xlsx_and_websocket(client, master):
     assert report["summary"]["total"] >= 540
     assert len(report["trend"]) >= 90
     assert report["rankings"]
-    assert report["is_stub"]
+    assert report["insight_method"] == "deterministic_rules"
+    assert "is_stub" not in report and "ai_summary" not in report
+    assert all("заглуш" not in insight["description"].lower() for insight in report["insights"])
+    assert all("ролики" not in insight["description"].lower() for insight in report["insights"])
     filtered = client.get("/api/analytics?area_id=4", headers=master).json()
     assert filtered["summary"]["total"] < report["summary"]["total"]
     assert client.get("/api/analytics?from_date=bad", headers=master).status_code == 422

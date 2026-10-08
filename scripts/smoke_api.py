@@ -98,17 +98,19 @@ def main():
         assert job.get("status") not in ("failed", "superseded"), "Review could not finish; the report remains saved"
         time.sleep(1)
         order = request(path, worker)
-    assert order["status"] == "ai_review" and order["ai_review"]["is_stub"] is True
+    assert order["status"] == "ai_review" and order["ai_review"]["is_stub"] is False
+    assert order["ai_review"]["score"] is None and order["ai_review"]["llm_used"] is False
     request(path + "/transition", worker, {"action": "close", "score": 5}, expected=403, expected_version=order["version"])
     order = request(path + "/transition", master, {"action": "close", "score": 5}, expected_version=order["version"])
     assert order["status"] == "closed" and len(order["events"]) >= 6
     report = request("/api/reports/export?format=xlsx", master, raw=True)
     assert zipfile.is_zipfile(io.BytesIO(report)), "Excel export must be a real XLSX archive"
     analytics = request("/api/analytics?days=90", master)
-    assert analytics["summary"]["total"] >= 500 and analytics["is_stub"] is True
+    assert analytics["summary"]["total"] >= 500 and analytics["insight_method"] == "deterministic_rules"
     request("/api/notifications", worker)
     integrations = request("/api/integrations", master)
-    assert integrations["ai"]["mode"] in ("stub", "queued_stub", "inline_stub") and integrations["native"]["mode"] in ("stub", "fcm")
+    assert integrations["ai"]["mode"] == "ai_service" and integrations["ai"]["status"] == "configured"
+    assert integrations["native"]["mode"] in ("disabled", "fcm")
     print(f"PASS: auth, RBAC, seed, full lifecycle, mandatory photo, protected media, audit, Excel, analytics. Order {order['number']}.")
 
 

@@ -13,18 +13,23 @@ function isServiceReview(review: Review, job?: AiReviewJob | null) {
 
 export function aiReviewTitle(review: Review, job?: AiReviewJob | null) {
   return isServiceReview(review, job)
-    ? "Сервис проверки"
+    ? "Локальная проверка сдачи"
     : review.is_stub
-      ? "Формальная проверка · демо"
+      ? "Историческая формальная проверка"
       : "Проверка ИИ";
 }
 
-export function aiReviewScoreLabel(score: number | null | undefined) {
+export function aiReviewScoreLabel(
+  score: number | null | undefined,
+  review?: Review,
+) {
   return typeof score === "number" &&
     Number.isFinite(score) &&
     score >= 1 &&
     score <= 5
-    ? `Предварительная оценка: ${number(score, 1)} / 5`
+    ? review?.is_stub && !isServiceReview(review)
+      ? `Сохранённая оценка старой проверки: ${number(score, 1)} / 5`
+      : `Предварительная оценка: ${number(score, 1)} / 5`
     : "Оценка не определена";
 }
 
@@ -37,6 +42,14 @@ export function aiReviewVerdict(review: Review) {
       needs_master_review: "Нужна проверка мастером",
     }[review.source_verdict] || "Нужна проверка мастером");
   }
+  if (review.is_stub) {
+    return ({
+      passed: "Старая рекомендация: принять",
+      needs_attention: "Старая рекомендация: проверить мастеру",
+      rework: "Старая рекомендация: доработка",
+      needs_rework: "Старая рекомендация: доработка",
+    } as Record<string, string>)[review.verdict] || "Старый результат формальной проверки";
+  }
   return (
     ({
       passed: "Принято",
@@ -46,6 +59,12 @@ export function aiReviewVerdict(review: Review) {
     } as Record<string, string>)[review.verdict] ||
     "Нужна проверка мастером"
   );
+}
+
+export function aiReviewExplanation(review: Review, job?: AiReviewJob | null) {
+  return review.is_stub && !isServiceReview(review, job)
+    ? "Сохранённый результат прежнего формального режима: проверялись поля отчёта и наличие фотографий, содержимое изображений не анализировалось. Локальный модуль для этой сдачи не запускался; запись не пересчитывалась."
+    : review.explanation;
 }
 
 export function aiReviewSource(review: Review) {
@@ -74,9 +93,10 @@ export function aiReviewNote(review: Review, job?: AiReviewJob | null) {
   if (isServiceReview(review, job)) {
     return "Проверяются текст отчёта и правила. Содержимое снимков не анализируется. Окончательное решение принимает мастер.";
   }
-  return review.is_stub
-    ? "Проверяется наличие фото; содержимое снимков не анализируется. Окончательное решение принимает мастер."
-    : "Окончательное решение принимает мастер.";
+  if (review.is_stub) {
+    return "Это исторический результат прежней проверки; содержимое снимков не анализируется и запись не пересчитывалась. Окончательное решение принимает мастер.";
+  }
+  return "Окончательное решение принимает мастер.";
 }
 
 export function aiPhotoCheckLines(check?: SubmissionPhotoCheck | null) {
@@ -220,8 +240,8 @@ export function AiJobStatus({
       </p>
       <small>
         {job.provider === "ai_service"
-          ? "Сервис проверки · рекомендация. Окончательное решение принимает мастер."
-          : "Формальная проверка · демо. Содержимое снимков не анализируется. Окончательное решение принимает мастер."}
+          ? "Локальная проверка сдачи · рекомендация. Окончательное решение принимает мастер."
+          : "Старая формальная проверка · демо. Содержимое снимков не анализируется. Окончательное решение принимает мастер."}
       </small>
       {uncertain && (
         <p>

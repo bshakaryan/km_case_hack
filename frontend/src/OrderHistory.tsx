@@ -5,6 +5,7 @@ import { Photo } from "./ui";
 import {
   AiJobStatus,
   AiPhotoCheck,
+  aiReviewExplanation,
   aiReviewNote,
   aiReviewScoreLabel,
   aiReviewSource,
@@ -198,14 +199,14 @@ export function OrderHistory({
                       </h5>
                       <p>
                         {aiReviewVerdict(attempt.ai_review)} ·{" "}
-                        {aiReviewScoreLabel(attempt.ai_review.score)}
+                        {aiReviewScoreLabel(attempt.ai_review.score, attempt.ai_review)}
                       </p>
                       {aiReviewSource(attempt.ai_review) && (
                         <p className="muted">
                           {aiReviewSource(attempt.ai_review)}
                         </p>
                       )}
-                      <p>{attempt.ai_review.explanation}</p>
+                      <p>{aiReviewExplanation(attempt.ai_review, attempt.ai_job)}</p>
                       <AiPhotoCheck check={attempt.ai_review.photo_check} />
                       <p className="muted">
                         {aiReviewNote(attempt.ai_review, attempt.ai_job)}

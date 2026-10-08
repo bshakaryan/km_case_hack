@@ -188,7 +188,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 16),
                   const InfoPanel(
-                    'Демо: master или worker2 · ПИН 1234.\nДанные учебные. Проверка ИИ пока имитируется сервером.',
+                    'Демо: master или worker2 · ПИН 1234.\nВ Compose новые сдачи проверяет локальный модуль; решение принимает мастер.',
                     icon: Icons.science_outlined,
                   ),
                 ],

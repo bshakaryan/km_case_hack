@@ -379,7 +379,9 @@ def create_app(database_url=None, seed=True, monitor=True):
     @app.get("/health")
     def health(db: DB):
         db.execute(sql_text("SELECT 1"))
-        return {"status": "ok", "database": "connected", "ai": "stub", "native": "stub"}
+        ai = "ai_service" if app.state.ai_review_mode == "queued_service" else app.state.ai_review_mode
+        native = "fcm" if not isinstance(get_sender(), StubSender) else "disabled"
+        return {"status": "ok", "database": "connected", "ai": ai, "native": native}
 
     @app.post("/api/auth/login")
     def login(payload: Login, request: Request, db: DB):
@@ -993,10 +995,14 @@ def create_app(database_url=None, seed=True, monitor=True):
     def integrations(user: User):
         require_role(user, "master", "manager", "admin")
         if isinstance(get_sender(), StubSender):
-            native = {"mode": "stub", "status": "demo", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
+            native = {"mode": "disabled", "status": "not_configured", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
         else:
-            native = {"mode": "fcm", "status": "active", "description": "Firebase Cloud Messaging (HTTP v1), Android. Доставка на устройства включена."}
-        return {"ai": {"mode": "stub", "status": "demo", "description": "Детерминированная заглушка. Реальные LLM и компьютерное зрение не подключены. Итоговое решение принимает мастер."}, "native": native, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
+            native = {"mode": "fcm", "status": "configured", "description": "Firebase Cloud Messaging (HTTP v1) настроен для Android. Успешная доставка зависит от регистрации устройства и ответа FCM."}
+        if app.state.ai_review_mode == "queued_service":
+            ai = {"mode": "ai_service", "status": "configured", "description": "Для новых сдач настроен локальный модуль: текстовые правила и ограниченное сравнение связанных фото. Доступность сервиса контролируется его healthcheck; внешние LLM/vision не подключены, итоговое решение принимает мастер."}
+        else:
+            ai = {"mode": app.state.ai_review_mode, "status": "fallback", "description": "Включён совместимый stub-режим проверки сдачи. Это тестовый fallback, а не подключённый модуль. Для локального модуля задайте AI_REVIEW_MODE=queued_service; итоговое решение принимает мастер."}
+        return {"ai": ai, "native": native, "realtime": {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}}
 
     @app.websocket("/api/ws")
     @app.websocket("/ws")

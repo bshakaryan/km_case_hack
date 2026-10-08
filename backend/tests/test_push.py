@@ -7,6 +7,7 @@ from sqlalchemy import delete, select
 from app.models import DeviceToken, IntegrationLog, Notification, Order, PushTask, utcnow
 from app.push import FCM_ERROR_TYPE, FcmSender, SendResult, StubSender, build_message, dispatch_push, enqueue_push, get_sender, token_fingerprint
 from app.services import aware, notify
+from conftest import auth_headers
 
 
 @pytest.fixture(autouse=True)
@@ -310,8 +311,11 @@ def test_integrations_native_stub_when_unconfigured(client, master, monkeypatch)
     monkeypatch.delenv("FIREBASE_CREDENTIALS", raising=False)
     monkeypatch.setenv("PUSH_ENABLED", "true")
     data = client.get("/api/integrations", headers=master).json()
-    assert data["native"] == {"mode": "stub", "status": "demo", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
-    assert data["ai"]["mode"] == "stub" and data["ai"]["status"] == "demo"
+    assert data["native"] == {"mode": "disabled", "status": "not_configured", "description": "Push отключён или не настроен. События сохраняются в БД; отправки на устройства нет."}
+    ai_mode = client.app.state.ai_review_mode
+    expected_ai_mode = "ai_service" if ai_mode == "queued_service" else ai_mode
+    expected_ai_status = "active" if ai_mode == "queued_service" else "fallback"
+    assert data["ai"]["mode"] == expected_ai_mode and data["ai"]["status"] == expected_ai_status
     assert data["realtime"] == {"mode": "websocket", "status": "active", "description": "Авторизованный WebSocket и резервный опрос каждые 5 секунд."}
 
 
@@ -321,9 +325,26 @@ def test_integrations_native_fcm_when_configured(client, master, tmp_path, monke
     monkeypatch.setenv("FIREBASE_CREDENTIALS", str(credentials))
     monkeypatch.setenv("PUSH_ENABLED", "true")
     data = client.get("/api/integrations", headers=master).json()
-    assert data["native"] == {"mode": "fcm", "status": "active", "description": "Firebase Cloud Messaging (HTTP v1), Android. Доставка на устройства включена."}
+    assert data["native"] == {"mode": "fcm", "status": "configured", "description": "Firebase Cloud Messaging (HTTP v1) настроен для Android. Успешная доставка зависит от регистрации устройства и ответа FCM."}
     monkeypatch.setenv("PUSH_ENABLED", "false")
-    assert client.get("/api/integrations", headers=master).json()["native"]["mode"] == "stub"
+    assert client.get("/api/integrations", headers=master).json()["native"]["mode"] == "disabled"
+
+
+def test_integrations_reports_local_ai_module_when_enabled(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    monkeypatch.setenv("AI_REVIEW_MODE", "queued_service")
+    monkeypatch.setenv("AI_SERVICE_URL", "http://ai-review:8010")
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "test-service-token-at-least-16")
+    app = create_app(f"sqlite:///{tmp_path / 'integrations.db'}", monitor=False)
+    with TestClient(app) as service_client:
+        service_master = auth_headers(service_client, "master")
+        integration = service_client.get("/api/integrations", headers=service_master).json()["ai"]
+        health = service_client.get("/api/health").json()
+    assert integration["mode"] == health["ai"] == "ai_service"
+    assert integration["status"] == "configured"
+    assert "локальный модуль" in integration["description"]
 
 
 @pytest.mark.parametrize("http_status,error,invalid_token", [

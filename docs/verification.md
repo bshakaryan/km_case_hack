@@ -1,5 +1,21 @@
 # Проверки реализации
 
+## D26: аудит refs в master и корректные статусы интеграций · 8 октября 2026
+
+После `git fetch origin` проверена ancestry каждого опубликованного ref относительно `origin/master` (`05f8b82`): `main` (`43ecb93`), `feature/ai-integration` (`aa580fc`), `feature/ai-review-jobs` (`a8054c9`), `feature/fcm-push-notifications` (`051a6eb`), `feature/offline-persistent-state` (`01cb79f`), `feature/order-history` (`cbd0b64`), `feature/order-versions` (`9a72674`) и `feature/postgresql-ci` (`2ca4555`) уже входят в master; для каждого `origin/master..<ref>` пуст. Это аудит доступных Git refs, не проверка статуса каждого GitHub PR. Страница PR в браузере не получила разрешение; альтернативный способ получения списка PR не использовался, поэтому открытые/закрытые статусы не утверждаются.
+
+Обновлённые backend/frontend/mobile/docs основаны на `origin/master`; заполненный PostgreSQL volume не удалялся, миграции и seed не менялись. Health/integrations теперь сообщают реальный режим локального `ai_service` и отсутствие push-конфигурации. Аналитический ответ показывает только детерминированные сводки и ограниченные сигналы по данным, без прежних неподтверждённых рекомендаций; `ai_summary`/`is_stub` убраны из аналитики. Старые AI-результаты и явные compatibility/test fallback не пересчитываются.
+
+Проверки текущего дерева: Web **112/112** тестов, production `tsc -b`/Vite build прошли; backend targeted API/push/AI-набор **105 passed, 3 skipped**, локальный bridge **36 passed**; Flutter analyze пяти затронутых файлов — **No issues found**. Compose пересобран, все четыре контейнера healthy; ответ `/api/health`: `ai=ai_service`, `native=disabled`. Успешная сборка проверяет локальную интеграцию, не внешний LLM/vision, фактическую доставку FCM, производственную точность отчётов или физическое устройство. Q01/Q04/Q05 остаются открытыми.
+
+## D25: локальный bridge включён в основной Compose · 8 октября 2026
+
+Новые сдачи в стандартном Docker Compose направляются в существующий `ai_service` bridge v2; межсервисный токен хранится только в корневом игнорируемом `.env`, сам bridge не публикуется наружу. Локальная сборка отключает необязательное скачивание MobileNet-весов: наличие оборудования остаётся неизвестным без модели. `queued_stub` сохранён как явный fallback, прямой запуск backend без Compose по-прежнему требует явного выбора режима. Ранее сохранённые stub-задачи и результаты не меняются; веб и Flutter обозначают их как историческую проверку и не показывают шаблонное «Принято» как актуальную рекомендацию. Схема/миграционные файлы этого пакета не менялись, существующий PostgreSQL volume не удалялся.
+
+Frontend: **112/112 тестов passed**; production `tsc -b`/Vite build прошёл в Compose. Bridge: `test_attempt_bridge.py` — **36 passed, 1 deprecation warning**; backend-набор `test_ai_bridge.py test_ai_photo_bridge.py test_ai_jobs.py` — **73 passed, 3 PostgreSQL skips**. Docker Compose пересобран; `ai-review`, backend, PostgreSQL и frontend — **healthy**, backend сообщает `queued_service` и внутренний URL bridge. Flutter: анализ затронутых Dart-файлов — **No issues found**; widget-тесты не завершились, поскольку установленный macOS SDK не смог слинковать Objective-C hook (`libSystem.B.tbd`, `unknown architecture`). Реальные сдачи в PostgreSQL для проверки не создавались.
+
+Это проверка локальных правил/ограниченного фото-модуля, health и тестовых фикстур, не внешнего LLM/vision, MobileNet, промышленной точности или качества ремонта.
+
 ## D24: JPEG конкретной сдачи, локальное CV и правдивая неизвестность · 8 октября 2026
 
 Пакет в существующей `feature/order-versions` после `96f2637`: v2 передаёт оригинальные связанные JPEG, проверяет frozen SHA/контекст/отчёт, выполняет локальное сравнение в отдельном процессе и сохраняет ограниченный `photo_check`. v1/старые результаты совместимы, default `queued_stub` не меняется. Схемы/миграции/seed не менялись; новые базы и фотографии были только временными тестовыми фикстурами. [Контракт, запуск и лимиты](ai-attempt-bridge.md).

@@ -34,6 +34,7 @@ const {
   aiReviewScoreLabel,
   aiReviewTitle,
   aiReviewVerdict,
+  aiReviewExplanation,
   aiReviewSource,
   aiReviewNote,
   AiPhotoCheck,
@@ -126,7 +127,7 @@ test("unavailable and absent-after results never pretend that image comparison c
 test("a service job is a saved report awaiting a recommendation, not the local formal stub", () => {
   for (const status of ["pending", "running", "failed", "superseded"]) {
     const html = render({ job: job(status, { provider: "ai_service" }) });
-    assert.match(html, /Сервис проверки/);
+    assert.match(html, /Локальная проверка сдачи/);
     assert.match(html, /Окончательное решение принимает мастер/);
     assert.doesNotMatch(html, /Формальная проверка · демо|PRIVATE_PROVIDER_DIAGNOSTIC/);
     assert.doesNotMatch(html, /текст отчёта и правила|проверка изображений выполнена|Содержимое снимков не анализируется/);
@@ -147,14 +148,18 @@ test("source metadata distinguishes rules from text models without making a fina
     source_verdict: "needs_master_review", llm_used: false,
     is_recommendation: true, explanation: "Проверьте отчёт",
   };
-  assert.equal(aiReviewTitle(review, job("succeeded", { provider: "ai_service" })), "Сервис проверки");
+  assert.equal(aiReviewTitle(review, job("succeeded", { provider: "ai_service" })), "Локальная проверка сдачи");
   assert.equal(aiReviewVerdict(review), "Нужна проверка мастером");
   assert.match(aiReviewSource(review), /языковая модель не использовалась/);
   assert.match(aiReviewSource({ ...review, llm_used: true }), /текстовая модель и правила/);
   assert.match(aiReviewNote(review), /Содержимое снимков не анализируется/);
   assert.match(aiReviewNote(review), /Окончательное решение принимает мастер/);
   assert.equal(aiReviewSource({ verdict: "passed", score: 4.5, is_stub: true }), null);
-  assert.equal(aiReviewTitle({ verdict: "passed", score: 4.5, is_stub: true }), "Формальная проверка · демо");
+  const legacy = { verdict: "passed", score: 4.5, is_stub: true, explanation: "Заглушка ИИ: legacy output" };
+  assert.equal(aiReviewTitle(legacy), "Историческая формальная проверка");
+  assert.equal(aiReviewVerdict(legacy), "Старая рекомендация: принять");
+  assert.equal(aiReviewScoreLabel(legacy.score, legacy), "Сохранённая оценка старой проверки: 4,5 / 5");
+  assert.doesNotMatch(aiReviewExplanation(legacy), /Заглушка ИИ/);
   assert.equal(aiReviewVerdict({ ...review, source_verdict: "accepted" }), "Рекомендовано принять");
   assert.equal(aiReviewVerdict({ ...review, source_verdict: "accepted_with_remarks" }), "Рекомендовано принять с замечаниями");
   assert.equal(aiReviewVerdict({ ...review, source_verdict: "needs_rework" }), "Рекомендована доработка");
@@ -164,7 +169,7 @@ test("pending and running preserve report confirmation without showing an old re
   for (const status of ["pending", "running"]) {
     const html = render({ job: job(status) });
     assert.match(html, /Отчёт сохранён на сервере/);
-    assert.match(html, /Формальная проверка/);
+    assert.match(html, /Старая формальная проверка/);
     assert.doesNotMatch(html, /PRIVATE_PROVIDER_DIAGNOSTIC/);
     assert.equal(showAiReview(job(status)), false);
   }

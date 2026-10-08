@@ -262,6 +262,10 @@ def create_attempt_app(settings: Settings | None = None, llm=None, photo_runner=
     expected = settings.ai_service_token.get_secret_value().encode("utf-8")
     app = FastAPI(title="Submission review bridge", docs_url=None, redoc_url=None, openapi_url=None)
 
+    @app.get("/healthz")
+    async def healthz():
+        return {"status": "ok"}
+
     def authorize(request):
         # Parse no body before server-to-server authority is established.
         if not expected:
