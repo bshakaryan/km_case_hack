@@ -9,9 +9,10 @@ import 'local_store.dart';
 import 'models.dart';
 
 class SqfliteLocalStore implements LocalStore {
-  SqfliteLocalStore({this.directoryPath});
+  SqfliteLocalStore({this.directoryPath, this.dbFactory});
 
   final String? directoryPath;
+  final DatabaseFactory? dbFactory;
   Database? _db;
   Directory? _root;
 
@@ -26,8 +27,7 @@ class SqfliteLocalStore implements LocalStore {
     final root = Directory(path);
     await root.create(recursive: true);
     _root = root;
-    final db = await openDatabase(
-      '${root.path}/local_store.db',
+    final options = OpenDatabaseOptions(
       version: _schemaVersion,
       onCreate: (db, version) async {
         await _createSchema(db);
@@ -67,7 +67,10 @@ class SqfliteLocalStore implements LocalStore {
         }
       },
     );
-    _db = db;
+    _db = await (dbFactory ?? databaseFactory).openDatabase(
+      '${root.path}/local_store.db',
+      options: options,
+    );
     await resetRunningOutbox();
   }
 
@@ -287,6 +290,129 @@ class SqfliteLocalStore implements LocalStore {
         ? File(path)
         : File('${_directory.path}/outbox_photos/$commandId.photo');
     if (await file.exists()) await file.delete();
+  }
+
+  @override
+  Future<OutboxRecoveryCommit> recoverOutbox(
+    List<OutboxCommand> expectedCommands, {
+    OutboxCommand? replacement,
+    List<String> serverIdKeys = const [],
+    required void Function() ensureCurrent,
+  }) async {
+    validateRecoverySelection(expectedCommands, replacement, serverIdKeys);
+    final expected = {
+      for (final command in expectedCommands)
+        command.commandId: jsonEncode(command.toJson()),
+    };
+    final original = expectedCommands.first;
+    final mediaPaths = <String, String>{};
+    ensureCurrent();
+    final result = await _database.transaction((transaction) async {
+      ensureCurrent();
+      final rows = await transaction.query(
+        'outbox',
+        where: 'owner_id = ? AND server_url = ?',
+        whereArgs: [original.ownerId, original.serverUrl],
+      );
+      ensureCurrent();
+      final selected = {
+        for (final row in rows)
+          if (expected.containsKey(row['command_id']))
+            row['command_id'] as String: row,
+      };
+      for (final entry in expected.entries) {
+        final row = selected[entry.key];
+        if (row?['state'] == OutboxState.running) {
+          return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.busy);
+        }
+        if (row == null ||
+            jsonEncode(_commandFromRow(row).toJson()) != entry.value) {
+          return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.changed);
+        }
+      }
+      if (replacement != null) {
+        await transaction.update(
+          'outbox',
+          _outboxRow(replacement),
+          where: 'command_id = ? AND owner_id = ? AND server_url = ?',
+          whereArgs: [
+            replacement.commandId,
+            original.ownerId,
+            original.serverUrl,
+          ],
+        );
+        ensureCurrent();
+      } else {
+        for (final entry in selected.entries) {
+          await transaction.delete(
+            'outbox',
+            where: 'command_id = ? AND owner_id = ? AND server_url = ?',
+            whereArgs: [entry.key, original.ownerId, original.serverUrl],
+          );
+          ensureCurrent();
+          final path = entry.value['photo_path'] as String?;
+          if (path != null) mediaPaths[entry.key] = path;
+        }
+        for (final key in serverIdKeys) {
+          await transaction.delete(
+            'id_map',
+            where: 'local_ref = ?',
+            whereArgs: [key],
+          );
+          ensureCurrent();
+        }
+      }
+      ensureCurrent();
+      return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.committed);
+    });
+    // The SQL transaction has committed. File failures cannot roll it back and
+    // must not be reported as though the reviewed commands were still queued.
+    if (!result.committed) return result;
+    var cleanupFailed = false;
+    String comparablePath(String path) {
+      final normalized = path.replaceAll('\\', '/');
+      return Platform.isWindows ? normalized.toLowerCase() : normalized;
+    }
+
+    for (final entry in mediaPaths.entries) {
+      try {
+        ensureCurrent();
+        final file = File(entry.value);
+        final exists = await file.exists();
+        ensureCurrent();
+        if (exists) {
+          if (!RegExp(r'^[A-Za-z0-9._:-]{8,64}$').hasMatch(entry.key)) {
+            cleanupFailed = true;
+            continue;
+          }
+          final root = await _directory.resolveSymbolicLinks();
+          ensureCurrent();
+          final folder = await Directory('${_directory.path}/outbox_photos')
+              .resolveSymbolicLinks();
+          ensureCurrent();
+          final actual = await file.resolveSymbolicLinks();
+          ensureCurrent();
+          // A corrupt row, path traversal or symlink must never turn queue
+          // recovery into deletion of another document or another scope's file.
+          if (comparablePath(folder) != comparablePath('$root/outbox_photos') ||
+              comparablePath(actual) !=
+                  comparablePath('$folder/${entry.key}.photo')) {
+            cleanupFailed = true;
+            continue;
+          }
+          await File('$folder/${entry.key}.photo').delete();
+          ensureCurrent();
+        }
+      } catch (_) {
+        cleanupFailed = true;
+      }
+    }
+    return OutboxRecoveryCommit(
+      OutboxRecoveryCommitStatus.committed,
+      cleanupWarning: cleanupFailed
+          ? 'Цепочка удалена из очереди. Не удалось очистить часть её локальных фото.'
+          : null,
+    );
   }
 
   @override

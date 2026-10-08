@@ -59,6 +59,14 @@ flutter test test/live_api_test.dart --dart-define=LIVE_API_URL=http://127.0.0.1
 
 Последняя команда работает из Flutter test на компьютере, поэтому использует `127.0.0.1`, а не адрес эмулятора. Обычный прогон пропускает live-тест. Фактические результаты и границы — в [verification](../docs/verification.md).
 
+Целевые проверки разбора офлайн-конфликтов без телефона/API:
+
+```sh
+flutter test --concurrency=2 test/offline_recovery_test.dart test/offline_recovery_ui_test.dart test/brigade_recovery_test.dart test/local_store_recovery_sqlite_test.dart
+```
+
+Последний файл использует настоящую временную SQLite через dev-зависимость `sqflite_common_ffi` и внедряемый `DatabaseFactory`: проверяет rollback после сбоя удаления, сравнение снимка, границу сессии и сохранность чужих файлов. Рабочая БД не открывается; production продолжает использовать Android `sqflite`. Основа процедуры — [официальная инструкция SQLite-тестов](https://github.com/tekartik/sqflite/blob/master/sqflite_common_ffi/doc/testing.md). Это проверка транзакций и UI на компьютере; остановка Android посреди HTTP, физические устройства и доставка FCM требуют отдельных испытаний.
+
 ### Связанный тест Android Emulator и веб-клиента API
 
 Физический телефон не нужен. Заранее запустите Android Emulator `emulator-5556`, API на `8000` и Vite на `5174` с прокси к этому API. Используйте отдельную демобазу с исходными справочниками: у `worker2` не должно быть текущей работы (`in_progress` или `paused`). Тест создаёт синтетические данные и не исправляет чужие назначения.

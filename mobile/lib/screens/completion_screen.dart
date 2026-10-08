@@ -48,6 +48,8 @@ class _CompletionScreenState extends State<CompletionScreen>
   FormDraftSession? _draftSession;
   late final NaryadApi _draftApi;
   late final int? _draftOwnerId;
+  late final String? _draftToken;
+  bool _openedAsResponsible = false;
   bool _draftLoading = true;
   bool _draftSaving = false;
   bool _draftSaved = false;
@@ -62,9 +64,15 @@ class _CompletionScreenState extends State<CompletionScreen>
   String? _operation;
   Json? _assignmentSnapshot;
 
+  bool get _draftContextCurrent =>
+      identical(widget.controller.api, _draftApi) &&
+      widget.controller.api.token == _draftToken &&
+      widget.controller.user?.id == _draftOwnerId &&
+      widget.controller.user?.isWorker == true;
+
   bool get _canComplete {
     final user = widget.controller.user;
-    if (user?.isWorker != true || !widget.order.isResponsible(user?.id)) {
+    if (!_draftContextCurrent || !widget.order.isResponsible(user?.id)) {
       return false;
     }
     final current = widget.controller.orders
@@ -119,8 +127,7 @@ class _CompletionScreenState extends State<CompletionScreen>
   };
 
   void _ensureDraftContext() {
-    if (!identical(widget.controller.api, _draftApi) ||
-        widget.controller.user?.id != _draftOwnerId) {
+    if (!_draftContextCurrent) {
       throw const ApiException(
         'Контекст формы изменился. Черновик принадлежит исходному аккаунту и серверу.',
         401,
@@ -419,6 +426,7 @@ class _CompletionScreenState extends State<CompletionScreen>
     widget.controller.addListener(_controllerChanged);
     _draftApi = widget.controller.api;
     _draftOwnerId = widget.controller.user?.id;
+    _draftToken = widget.controller.api.token;
     _basis = widget.controller.captureOrderBasis(widget.order);
     _assignmentSnapshot = {
       'id': widget.order.id,
@@ -441,7 +449,8 @@ class _CompletionScreenState extends State<CompletionScreen>
     }
     _work.addListener(_changed);
     _comment.addListener(_changed);
-    if (_canComplete) {
+    _openedAsResponsible = _canComplete;
+    if (_openedAsResponsible) {
       unawaited(_restoreDraft());
     } else {
       _draftLoading = false;
@@ -937,13 +946,15 @@ class _CompletionScreenState extends State<CompletionScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (!_canComplete) {
+    if (!_draftContextCurrent || (!_canComplete && !_openedAsResponsible)) {
       return Scaffold(
         appBar: AppBar(title: const Text('Отчёт о выполнении')),
-        body: const Padding(
-          padding: EdgeInsets.all(24),
+        body: Padding(
+          padding: const EdgeInsets.all(24),
           child: Text(
-            'Общий результат сдаёт только ответственный. Для участника доступны карточка и фотографии. Существующий черновик сохранён без изменений.',
+            _draftContextCurrent
+                ? 'Общий результат сдаёт только ответственный. Для участника доступны карточка и фотографии. Существующий черновик сохранён без изменений.'
+                : 'Контекст формы изменился. Черновик принадлежит исходному аккаунту и серверу.',
           ),
         ),
       );
@@ -1014,7 +1025,9 @@ class _CompletionScreenState extends State<CompletionScreen>
                     Text(widget.order.equipmentName),
                     const SizedBox(height: 16),
                     _notice(
-                      'После отправки отчёт поступит мастеру на приёмку. Фото загружаются сразу; текст и материалы — при отправке отчёта.',
+                      _canComplete
+                          ? 'После отправки отчёт поступит мастеру на приёмку. Фото загружаются сразу; текст и материалы — при отправке отчёта.'
+                          : 'Ответственный изменился. Отправка отчёта заблокирована. Ввод доступен только для просмотра; перед выходом дождитесь сохранения черновика.',
                     ),
                     if (_error != null) ...[
                       const SizedBox(height: 12),
@@ -1032,19 +1045,27 @@ class _CompletionScreenState extends State<CompletionScreen>
                         color: Color(0xFF64748B),
                       ),
                     ),
-                    if (_draftError != null) ...[
-                      const SizedBox(height: 8),
-                      _notice(_draftError!, error: true),
-                      TextButton(
-                        onPressed: () => _draftSession == null
-                            ? _restoreDraft()
-                            : _saveDraft(),
-                        child: const Text('Повторить сохранение черновика'),
-                      ),
-                    ],
+                    // Keep this slot stable: inserting error children into the
+                    // lazy list must not recreate the focused form fields.
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (_draftError != null) ...[
+                          const SizedBox(height: 8),
+                          _notice(_draftError!, error: true),
+                          TextButton(
+                            onPressed: () => _draftSession == null
+                                ? _restoreDraft()
+                                : _saveDraft(),
+                            child: const Text('Повторить сохранение черновика'),
+                          ),
+                        ],
+                      ],
+                    ),
                     const SizedBox(height: 24),
                     _title('Выполненные работы'),
                     TextFormField(
+                      key: const ValueKey('completion-work'),
                       controller: _work,
                       enabled: !_locked && !_done && !_uncertain,
                       minLines: 4,
@@ -1061,6 +1082,7 @@ class _CompletionScreenState extends State<CompletionScreen>
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<int>(
+                      key: const ValueKey('completion-fault'),
                       initialValue: faults.any((row) => row['id'] == _faultId)
                           ? _faultId
                           : null,
@@ -1181,6 +1203,7 @@ class _CompletionScreenState extends State<CompletionScreen>
                     const SizedBox(height: 24),
                     _title('Комментарий'),
                     TextFormField(
+                      key: const ValueKey('completion-comment'),
                       controller: _comment,
                       enabled: !_locked && !_done && !_uncertain,
                       minLines: 2,
@@ -1206,52 +1229,54 @@ class _CompletionScreenState extends State<CompletionScreen>
                   ],
                 ),
               ),
-        bottomNavigationBar: SafeArea(
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              border: Border(top: BorderSide(color: Color(0xFFDDE3EB))),
-            ),
-            child: FilledButton.icon(
-              style: FilledButton.styleFrom(
-                minimumSize: const Size(double.infinity, 56),
-                backgroundColor: const Color(0xFF173E68),
-              ),
-              onPressed: _locked || _stale
-                  ? null
-                  : _done
-                  ? _exit
-                  : _uncertain
-                  ? _checkServer
-                  : _submit,
-              icon: _locked
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(
-                      _done
-                          ? Icons.assignment_outlined
-                          : _uncertain
-                          ? Icons.refresh
-                          : Icons.send_outlined,
+        bottomNavigationBar: !_canComplete
+            ? null
+            : SafeArea(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    border: Border(top: BorderSide(color: Color(0xFFDDE3EB))),
+                  ),
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 56),
+                      backgroundColor: const Color(0xFF173E68),
                     ),
-              label: Text(
-                _sending
-                    ? 'Отправка отчёта…'
-                    : _checking
-                    ? 'Проверка…'
-                    : _done
-                    ? 'Открыть карточку наряда'
-                    : _uncertain
-                    ? 'Проверить отправку'
-                    : 'Отправить на приёмку',
+                    onPressed: _locked || _stale
+                        ? null
+                        : _done
+                        ? _exit
+                        : _uncertain
+                        ? _checkServer
+                        : _submit,
+                    icon: _locked
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(
+                            _done
+                                ? Icons.assignment_outlined
+                                : _uncertain
+                                ? Icons.refresh
+                                : Icons.send_outlined,
+                          ),
+                    label: Text(
+                      _sending
+                          ? 'Отправка отчёта…'
+                          : _checking
+                          ? 'Проверка…'
+                          : _done
+                          ? 'Открыть карточку наряда'
+                          : _uncertain
+                          ? 'Проверить отправку'
+                          : 'Отправить на приёмку',
+                    ),
+                  ),
+                ),
               ),
-            ),
-          ),
-        ),
       ),
     );
   }

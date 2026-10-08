@@ -201,6 +201,16 @@ class OutboxCommand {
 
 const int maxPhotoCacheBytes = 50 * 1024 * 1024;
 
+enum OutboxRecoveryCommitStatus { committed, changed, busy }
+
+class OutboxRecoveryCommit {
+  const OutboxRecoveryCommit(this.status, {this.cleanupWarning});
+
+  final OutboxRecoveryCommitStatus status;
+  final String? cleanupWarning;
+  bool get committed => status == OutboxRecoveryCommitStatus.committed;
+}
+
 abstract class LocalStore {
   Future<void> open();
   Future<void> close();
@@ -221,6 +231,14 @@ abstract class LocalStore {
   Future<List<OutboxCommand>> outbox();
   Future<void> updateOutbox(OutboxCommand command);
   Future<void> removeOutbox(String commandId);
+  // Compare the reviewed rows and mutate them as one unit. The guard must throw
+  // if the original session is no longer active; no media is touched precommit.
+  Future<OutboxRecoveryCommit> recoverOutbox(
+    List<OutboxCommand> expectedCommands, {
+    OutboxCommand? replacement,
+    List<String> serverIdKeys = const [],
+    required void Function() ensureCurrent,
+  });
   Future<Uint8List?> outboxPhoto(String commandId);
   Future<void> resetRunningOutbox();
 
@@ -298,8 +316,10 @@ class MemoryLocalStore implements LocalStore {
 
   @override
   Future<List<OutboxCommand>> outbox() async =>
-      _outbox.values.map(OutboxCommand.fromJson).toList()
-        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      _outbox.values.map(OutboxCommand.fromJson).toList()..sort((a, b) {
+        final time = a.createdAt.compareTo(b.createdAt);
+        return time == 0 ? a.commandId.compareTo(b.commandId) : time;
+      });
 
   @override
   Future<void> updateOutbox(OutboxCommand command) async {
@@ -312,6 +332,45 @@ class MemoryLocalStore implements LocalStore {
   Future<void> removeOutbox(String commandId) async {
     _outbox.remove(commandId);
     _photos.remove('outbox:$commandId');
+  }
+
+  @override
+  Future<OutboxRecoveryCommit> recoverOutbox(
+    List<OutboxCommand> expectedCommands, {
+    OutboxCommand? replacement,
+    List<String> serverIdKeys = const [],
+    required void Function() ensureCurrent,
+  }) async {
+    validateRecoverySelection(expectedCommands, replacement, serverIdKeys);
+    final expected = {
+      for (final command in expectedCommands)
+        command.commandId: jsonEncode(command.toJson()),
+    };
+    ensureCurrent();
+    for (final entry in expected.entries) {
+      final current = _outbox[entry.key];
+      if (current?['state'] == OutboxState.running) {
+        return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.busy);
+      }
+      if (current == null || jsonEncode(current) != entry.value) {
+        return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.changed);
+      }
+    }
+    // Synchronous from guard to commit: neither another command nor a session
+    // change can interleave with this memory-store mutation.
+    ensureCurrent();
+    if (replacement != null) {
+      _outbox[replacement.commandId] = replacement.toJson();
+    } else {
+      for (final id in expected.keys) {
+        _outbox.remove(id);
+        _photos.remove('outbox:$id');
+      }
+      for (final key in serverIdKeys) {
+        _serverIds.remove(key);
+      }
+    }
+    return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.committed);
   }
 
   @override
@@ -385,5 +444,56 @@ class MemoryLocalStore implements LocalStore {
       if (!key.startsWith('outbox:')) total += value.length;
     });
     return total;
+  }
+}
+
+// Fail closed for malformed or mixed-account selections, even when called
+// directly by storage clients. Recovery never derives ownership from live UI.
+void validateRecoverySelection(
+  List<OutboxCommand> commands,
+  OutboxCommand? replacement,
+  List<String> serverIdKeys,
+) {
+  if (commands.isEmpty ||
+      commands.first.ownerId == null ||
+      commands.first.serverUrl == null ||
+      commands.map((command) => command.commandId).toSet().length !=
+          commands.length ||
+      commands.any(
+        (command) =>
+            command.ownerId != commands.first.ownerId ||
+            command.serverUrl != commands.first.serverUrl,
+      )) {
+    throw ArgumentError('Recovery requires one confirmed account and server.');
+  }
+  final allowedMappingKeys = commands
+      .where((command) => command.localRef != null)
+      .map(
+        (command) => localScopeKey(
+          command.serverUrl!,
+          command.ownerId!,
+          command.localRef!,
+        ),
+      )
+      .toSet();
+  if (serverIdKeys.any((key) => !allowedMappingKeys.contains(key))) {
+    throw ArgumentError('Recovery cannot remove another scope mapping.');
+  }
+  if (replacement != null) {
+    final original = commands
+        .where((command) => command.commandId == replacement.commandId)
+        .firstOrNull;
+    Json immutableFields(OutboxCommand command) => command.toJson()
+      ..remove('state')
+      ..remove('attempts')
+      ..remove('response_status')
+      ..remove('response')
+      ..remove('last_error');
+    if (original == null ||
+        serverIdKeys.isNotEmpty ||
+        jsonEncode(immutableFields(original)) !=
+            jsonEncode(immutableFields(replacement))) {
+      throw ArgumentError('Recovery cannot rewrite a command or its basis.');
+    }
   }
 }

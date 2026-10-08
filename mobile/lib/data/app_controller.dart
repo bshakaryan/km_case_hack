@@ -13,6 +13,7 @@ import 'local_store_open.dart';
 import 'models.dart';
 import 'order_journal.dart';
 import 'push_service.dart';
+import 'recovery_models.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -64,6 +65,9 @@ class AppController extends ChangeNotifier {
   Future<void> _draftTail = Future.value();
   final Map<String, Object> _draftHandles = {};
   Future<void>? _syncFuture;
+  // Unlike UI saving, this survives _resetData until the original write drains.
+  Completer<void>? _writeLease;
+  bool _recoveringQueue = false;
   DateTime? _lastSnapshotWrite;
   int _session = 0;
   int _dataRevision = 0;
@@ -488,12 +492,16 @@ class AppController extends ChangeNotifier {
     try {
       final result = await next.login(login, pin);
       if (!_current(session)) return;
-      user = User.fromJson(result['user'] as Json);
-      final authenticated = user!;
+      final authenticated = User.fromJson(result['user'] as Json);
       await _syncFuture;
       if (!_current(session)) return;
+      await _writeLease?.future;
+      if (!_current(session)) return;
       try {
-        await (await _local()).resetRunningOutbox();
+        final store = await _local();
+        if (!_current(session)) return;
+        await store.resetRunningOutbox();
+        if (!_current(session)) return;
         await _hydrateSnapshot(session, next, authenticated.id);
       } catch (_) {
         // Authentication is usable for reading even if durable writes are not.
@@ -947,6 +955,7 @@ class AppController extends ChangeNotifier {
   final Map<String, int> _resolvedIds = {};
   List<OutboxCommand> get outbox => List.unmodifiable(_outboxCache);
   bool get syncing => _syncFuture != null;
+  bool get recoveringQueue => _recoveringQueue;
   bool hasQueuedWritesForOrder(int id) => _outboxCache.any(
     (command) =>
         command.kind != OutboxKind.markRead &&
@@ -992,14 +1001,24 @@ class AppController extends ChangeNotifier {
     final reloadRevision = ++_outboxReloadRevision;
     final session = _session;
     final source = api;
+    final token = source.token;
     final ownerId = user!.id;
+    final role = user!.role;
+    bool current() =>
+        _current(session) &&
+        reloadRevision == _outboxReloadRevision &&
+        identical(api, source) &&
+        source.token == token &&
+        user?.id == ownerId &&
+        user?.role == role;
     try {
       final store = await _local();
+      if (!current()) return;
       final commands = await store.outbox();
       final relevant = commands
           .where((command) => _owns(command, source, ownerId))
           .toList();
-      if (!_current(session) || reloadRevision != _outboxReloadRevision) return;
+      if (!current()) return;
       final activeRefs = relevant
           .map((command) => command.localRef)
           .whereType<String>()
@@ -1010,12 +1029,13 @@ class AppController extends ChangeNotifier {
         final serverId = await store.serverId(
           _scope(ref, source: source, ownerId: ownerId),
         );
+        if (!current()) return;
         if (serverId != null) {
           mapped.add(ref);
           resolvedIds[ref] = serverId;
         }
       }
-      if (!_current(session) || reloadRevision != _outboxReloadRevision) return;
+      if (!current()) return;
       _outboxCache
         ..clear()
         ..addAll(relevant);
@@ -1074,92 +1094,356 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> retryCommand(String commandId) async {
-    if (user == null || saving) return;
+  _QueueRecoveryScope _beginQueueRecovery() {
+    if (user == null || _disposed) {
+      throw const _QueueRecoveryFailure(
+        QueueRecoveryStatus.scopeChanged,
+        'Войдите в исходный аккаунт для просмотра очереди.',
+      );
+    }
+    if (_recoveringQueue ||
+        saving ||
+        _writeLease != null ||
+        _syncFuture != null) {
+      throw const _QueueRecoveryFailure(
+        QueueRecoveryStatus.busy,
+        'Дождитесь завершения отправки или другого действия с очередью.',
+      );
+    }
     final session = _session;
+    final source = api;
+    final token = source.token;
+    final ownerId = user!.id;
+    final role = user!.role;
+    final scope = _QueueRecoveryScope(source, ownerId, () {
+      if (!_current(session) ||
+          !identical(api, source) ||
+          source.token != token ||
+          user?.id != ownerId ||
+          user?.role != role) {
+        throw const _QueueRecoveryFailure(
+          QueueRecoveryStatus.scopeChanged,
+          'Контекст очереди изменился. Данные исходного аккаунта не перенесены.',
+        );
+      }
+    });
+    // Claim synchronously, before any storage await. New enqueue/sync cannot
+    // sneak between this busy check and the durable recovery transaction.
+    _recoveringQueue = true;
+    _notify();
+    return scope;
+  }
+
+  Future<_QueueRecoverySelection> _queueRecoverySelection(
+    LocalStore store,
+    _QueueRecoveryScope scope,
+    String commandId,
+  ) async {
+    scope.ensureCurrent();
+    final commands = await store.outbox();
+    scope.ensureCurrent();
+    final owned = commands
+        .where((command) => _owns(command, scope.source, scope.ownerId))
+        .map(
+          (command) =>
+              OutboxCommand.fromJson(freezeRecoveryJson(command.toJson())),
+        )
+        .toList();
+    final index = owned.indexWhere((command) => command.commandId == commandId);
+    if (index == -1) {
+      throw const _QueueRecoveryFailure(
+        QueueRecoveryStatus.notFound,
+        'Команда отсутствует в очереди этого аккаунта и сервера.',
+      );
+    }
+    final target = owned[index];
+    final lane = await _lane(store, target);
+    scope.ensureCurrent();
+    final selected = <OutboxCommand>[];
+    final retainedPhotos = <OutboxCommand>[];
+    final laneCommands = <OutboxCommand>[];
+    for (var i = 0; i < owned.length; i++) {
+      final item = owned[i];
+      final itemLane = await _lane(store, item);
+      scope.ensureCurrent();
+      if (itemLane != lane) continue;
+      laneCommands.add(item);
+      if (i >= index) selected.add(item);
+      if (item.kind == OutboxKind.uploadPhoto) retainedPhotos.add(item);
+    }
+    if (laneCommands.any((command) => command.state == OutboxState.running)) {
+      throw const _QueueRecoveryFailure(
+        QueueRecoveryStatus.busy,
+        'Команда этой цепочки сейчас отправляется. Дождитесь результата.',
+      );
+    }
+    return _QueueRecoverySelection(selected, lane, retainedPhotos);
+  }
+
+  Future<QueueCommandInspectionResult> inspectCommand(String commandId) async {
+    var claimed = false;
+    _QueueRecoveryScope? scope;
     try {
+      scope = _beginQueueRecovery();
+      claimed = true;
+      scope.ensureCurrent();
       final store = await _local();
-      if (!_current(session)) return;
-      final commands = await store.outbox();
-      OutboxCommand? command;
-      for (final item in commands) {
-        if (item.commandId == commandId && _owns(item, api, user!.id)) {
-          command = item;
-          break;
+      scope.ensureCurrent();
+      final selection = await _queueRecoverySelection(store, scope, commandId);
+      scope.ensureCurrent();
+      final photos = <String, Uint8List>{};
+      final warnings = <String, String>{};
+      for (final command in selection.retainedPhotos) {
+        try {
+          final bytes = await store.outboxPhoto(command.commandId);
+          scope.ensureCurrent();
+          if (bytes == null) {
+            warnings[command.commandId] =
+                'Файл фото недоступен. Метаданные команды сохранены.';
+          } else {
+            photos[command.commandId] = bytes;
+          }
+        } on _QueueRecoveryFailure {
+          rethrow;
+        } catch (_) {
+          scope.ensureCurrent();
+          warnings[command.commandId] = 'Не удалось прочитать локальное фото. Метаданные команды сохранены.';
         }
       }
-      if (command == null || !command.canRetry) return;
-      await store.updateOutbox(
-        command.copyWith(
-          state: OutboxState.pending,
-          attempts: 0,
-          responseStatus: null,
-          response: null,
-          lastError: null,
+      final id = selection.lane.startsWith('order:')
+          ? int.tryParse(selection.lane.substring('order:'.length))
+          : null;
+      final cached = orders.where((order) => order.id == id).firstOrNull;
+      WorkOrder? cachedOrder;
+      if (cached != null && cached.id > 0) {
+        final data = cached.toJson();
+        final serverStatus = data.remove('_server_status');
+        if (serverStatus is String) data['status'] = serverStatus;
+        data.remove('_pending_sync');
+        data.remove('_queued_status');
+        cachedOrder = WorkOrder.fromJson(data);
+      }
+      scope.ensureCurrent();
+      return QueueCommandInspectionResult(
+        QueueRecoveryStatus.success,
+        'Сохранённые данные команды. Текущее состояние сервера не проверялось.',
+        inspection: QueueCommandInspection(
+          command: selection.commands.first,
+          dependentCommands: selection.commands.skip(1).toList(),
+          preparedPhotoBytesByCommandId: photos,
+          mediaWarnings: warnings,
+          retainedPhotoCommands: selection.retainedPhotos,
+          cachedOrder: cachedOrder,
         ),
       );
-      await _reloadOutbox();
-      unawaited(syncOutbox());
+    } on _QueueRecoveryFailure catch (failure) {
+      return QueueCommandInspectionResult(failure.status, failure.message);
     } catch (_) {
-      // Retry is best effort; the same action is available again.
+      try {
+        scope?.ensureCurrent();
+      } on _QueueRecoveryFailure catch (failure) {
+        return QueueCommandInspectionResult(failure.status, failure.message);
+      }
+      return const QueueCommandInspectionResult(
+        QueueRecoveryStatus.storageFailure,
+        'Не удалось прочитать очередь на устройстве. Данные не изменены.',
+      );
+    } finally {
+      if (claimed) {
+        _recoveringQueue = false;
+        _notify();
+      }
     }
   }
 
-  Future<void> discardCommand(String commandId) async {
-    if (user == null) return;
-    final session = _session;
+  Future<QueueActionResult> retryCommand(String commandId) =>
+      _mutateQueueCommand(commandId, discard: false);
+
+  Future<QueueActionResult> discardCommand(
+    String commandId, {
+    List<String>? expectedCommandIds,
+    List<OutboxCommand>? expectedCommands,
+  }) => _mutateQueueCommand(
+    commandId,
+    discard: true,
+    expectedCommandIds: expectedCommandIds == null
+        ? null
+        : List.unmodifiable(expectedCommandIds),
+    expectedCommands: expectedCommands == null
+        ? null
+        : List.unmodifiable(
+            expectedCommands.map(
+              (command) =>
+                  OutboxCommand.fromJson(freezeRecoveryJson(command.toJson())),
+            ),
+          ),
+  );
+
+  Future<QueueActionResult> _mutateQueueCommand(
+    String commandId, {
+    required bool discard,
+    List<String>? expectedCommandIds,
+    List<OutboxCommand>? expectedCommands,
+  }) async {
+    var claimed = false;
+    var committed = false;
+    var resume = false;
+    var ids = <String>[];
+    String? warning;
+    _QueueRecoveryScope? scope;
     try {
+      scope = _beginQueueRecovery();
+      claimed = true;
+      scope.ensureCurrent();
       final store = await _local();
-      if (!_current(session)) return;
-      final commands = await store.outbox();
-      OutboxCommand? command;
-      for (final item in commands) {
-        if (item.commandId == commandId && _owns(item, api, user!.id)) {
-          command = item;
-          break;
-        }
+      scope.ensureCurrent();
+      final selection = await _queueRecoverySelection(store, scope, commandId);
+      scope.ensureCurrent();
+      ids = selection.commands.map((command) => command.commandId).toList();
+      if (discard &&
+          ((expectedCommandIds != null &&
+                  !listEquals(expectedCommandIds, ids)) ||
+              (expectedCommands != null &&
+                  jsonEncode(
+                        expectedCommands
+                            .map((command) => command.toJson())
+                            .toList(),
+                      ) !=
+                      jsonEncode(
+                        selection.commands
+                            .map((command) => command.toJson())
+                            .toList(),
+                      )))) {
+        throw const _QueueRecoveryFailure(
+          QueueRecoveryStatus.changed,
+          'Данные или состав цепочки изменились. Откройте её заново перед удалением.',
+        );
       }
-      if (command == null) {
-        await _reloadOutbox();
-        return;
+      final command = selection.commands.first;
+      if (!discard && !command.canRetry) {
+        throw const _QueueRecoveryFailure(
+          QueueRecoveryStatus.notRetryable,
+          'Нельзя повторить действие с неизвестным или конфликтующим основанием. Сохранённые данные не изменены.',
+        );
       }
-      final target = command;
-      final targetLane = await _lane(store, target);
-      final dependents = <OutboxCommand>[];
-      var afterTarget = false;
-      for (final item in commands) {
-        if (item.commandId == commandId) {
-          afterTarget = true;
-          continue;
-        }
-        if (afterTarget &&
-            _owns(item, api, user!.id) &&
-            await _lane(store, item) == targetLane) {
-          dependents.add(item);
-        }
+      final activeScope = scope;
+      final mappingKeys = discard && command.kind == OutboxKind.createOrder
+          ? selection.commands
+                .map((command) => command.localRef)
+                .whereType<String>()
+                .map(
+                  (ref) => localScopeKey(
+                    activeScope.source.baseUrl,
+                    activeScope.ownerId,
+                    ref,
+                  ),
+                )
+                .toSet()
+                .toList()
+          : <String>[];
+      final result = await store.recoverOutbox(
+        selection.commands,
+        // Keep the previous response: a local retry does not prove that an
+        // unknown previous server result disappeared or that rights returned.
+        replacement: discard
+            ? null
+            : command.copyWith(state: OutboxState.pending, attempts: 0),
+        serverIdKeys: mappingKeys,
+        ensureCurrent: scope.ensureCurrent,
+      );
+      committed = result.committed;
+      warning = result.cleanupWarning;
+      scope.ensureCurrent();
+      if (result.status == OutboxRecoveryCommitStatus.busy) {
+        throw const _QueueRecoveryFailure(
+          QueueRecoveryStatus.busy,
+          'Команда сейчас отправляется. Дождитесь результата.',
+        );
       }
-      await store.removeOutbox(commandId);
-      for (final dependent in dependents) {
-        await store.removeOutbox(dependent.commandId);
+      if (!committed) {
+        throw const _QueueRecoveryFailure(
+          QueueRecoveryStatus.changed,
+          'Сохранённая цепочка изменилась. Откройте её заново.',
+        );
       }
-      for (final localRef in [
-        target.localRef,
-        ...dependents.map((item) => item.localRef),
-      ]) {
-        if (localRef == null) continue;
-        if (target.kind == OutboxKind.createOrder) {
-          await store.removeServerId(_scope(localRef));
-        }
-      }
+      if (!discard) ids = [commandId];
       await _reloadOutbox();
+      scope.ensureCurrent();
+      final cacheUpdated = discard
+          ? !_outboxCache.any((command) => ids.contains(command.commandId))
+          : _outboxCache.any(
+              (command) =>
+                  command.commandId == commandId &&
+                  command.state == OutboxState.pending &&
+                  command.attempts == 0,
+            );
+      if (!cacheUpdated) {
+        warning ??= 'Данные очереди сохранены. Не удалось обновить её список.';
+      }
+      resume = !discard && !offline;
+      return QueueActionResult(
+        QueueRecoveryStatus.success,
+        discard
+            ? 'Цепочка удалена только из локальной очереди. Серверные действия не отменены.'
+            : 'Та же команда снова готова к отправке. Результат сервера пока не подтверждён.',
+        changed: true,
+        warning: warning,
+        commandIds: ids,
+      );
+    } on _QueueRecoveryFailure catch (failure) {
+      return QueueActionResult(
+        failure.status,
+        failure.message,
+        changed: committed,
+        warning: warning,
+        commandIds: committed ? ids : const [],
+      );
     } catch (_) {
-      // Discard is best effort; the command stays visible for a second try.
+      try {
+        scope?.ensureCurrent();
+      } on _QueueRecoveryFailure catch (failure) {
+        return QueueActionResult(
+          failure.status,
+          failure.message,
+          changed: committed,
+          warning: warning,
+          commandIds: committed ? ids : const [],
+        );
+      }
+      return QueueActionResult(
+        QueueRecoveryStatus.storageFailure,
+        committed
+            ? 'Очередь изменена на устройстве, но её список не удалось обновить.'
+            : 'Не удалось изменить очередь на устройстве. Цепочка сохранена.',
+        changed: committed,
+        warning: warning,
+        commandIds: committed ? ids : const [],
+      );
+    } finally {
+      if (claimed) {
+        _recoveringQueue = false;
+        _notify();
+        if (resume && scope != null) {
+          try {
+            scope.ensureCurrent();
+            unawaited(syncOutbox());
+          } on _QueueRecoveryFailure {
+            // A changed session never resumes another owner's exact command.
+          }
+        }
+      }
     }
   }
 
   Future<void> syncOutbox() {
     if (_syncFuture != null) return _syncFuture!;
-    if (user == null || saving || _disposed) return Future.value();
+    if (user == null ||
+        saving ||
+        _writeLease != null ||
+        _recoveringQueue ||
+        _disposed) {
+      return Future.value();
+    }
     final pending = _syncOutbox(_session, api, user!.id);
     _syncFuture = pending;
     pending.whenComplete(() {
@@ -1330,8 +1614,10 @@ class AppController extends ChangeNotifier {
     LocalStore store,
     NaryadApi source,
     OutboxCommand command,
-    int orderId,
-  ) async {
+    int orderId, {
+    void Function()? ensureCurrent,
+  }) async {
+    ensureCurrent?.call();
     if (!command.hasOrderPrecondition) {
       throw const ApiException(
         'Версия наряда неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново.',
@@ -1372,6 +1658,7 @@ class AppController extends ChangeNotifier {
         );
       case OutboxKind.uploadPhoto:
         final bytes = await store.outboxPhoto(command.commandId);
+        ensureCurrent?.call();
         if (bytes == null) {
           throw const ApiException('Локальная фотография недоступна.', 422);
         }
@@ -1405,7 +1692,7 @@ class AppController extends ChangeNotifier {
     OrderWriteBasis? basis,
   }) async {
     if (user == null) throw const ApiException('Войдите в приложение.', 401);
-    if (saving) {
+    if (saving || _writeLease != null || _recoveringQueue) {
       throw const ApiException(
         'Дождитесь завершения предыдущего действия.',
         409,
@@ -1414,30 +1701,45 @@ class AppController extends ChangeNotifier {
     final session = _session;
     final source = api;
     final ownerId = user!.id;
+    final token = source.token;
+    final role = user!.role;
     final commandId = _newCommandId();
+    final lease = Completer<void>();
+    _writeLease = lease;
+    bool currentWrite() =>
+        _current(session) &&
+        identical(api, source) &&
+        source.token == token &&
+        user?.id == ownerId &&
+        user?.role == role &&
+        identical(_writeLease, lease);
+    void ensureCurrent() {
+      if (!currentWrite()) {
+        throw const ApiException('Сессия или права изменились.', 401);
+      }
+    }
+
     saving = true;
     error = null;
     _notify();
     try {
       await _syncFuture;
-      if (!_current(session)) {
-        throw const ApiException('Сессия изменилась.', 401);
-      }
+      ensureCurrent();
       LocalStore store;
       try {
         store = await _local();
       } catch (_) {
+        ensureCurrent();
         throw const ApiException(
           'Не удалось сохранить действие на устройстве. Оно не отправлено. Проверьте свободное место и повторите.',
           507,
         );
       }
-      if (!_current(session)) {
-        throw const ApiException('Сессия изменилась.', 401);
-      }
+      ensureCurrent();
       final previous = (await store.outbox())
           .where((item) => _owns(item, source, ownerId))
           .toList();
+      ensureCurrent();
       var createdAt = DateTime.now().millisecondsSinceEpoch;
       for (final item in previous) {
         if (item.createdAt >= createdAt) createdAt = item.createdAt + 1;
@@ -1452,12 +1754,15 @@ class AppController extends ChangeNotifier {
         localRef: localRef,
       );
       final lane = await _lane(store, probe);
+      ensureCurrent();
       OutboxCommand? predecessor;
       if (basis == null &&
           kind != OutboxKind.createOrder &&
           kind != OutboxKind.markRead) {
         for (final item in previous) {
-          if (await _lane(store, item) == lane) predecessor = item;
+          final itemLane = await _lane(store, item);
+          ensureCurrent();
+          if (itemLane == lane) predecessor = item;
         }
       }
       final cachedId = orderId ?? int.tryParse(localRef ?? '');
@@ -1467,6 +1772,7 @@ class AppController extends ChangeNotifier {
       // Both the key and media must exist on disk BEFORE any HTTP write.
       // A killed process can then replay the exact same command safely.
       late OutboxCommand command;
+      ensureCurrent();
       try {
         command = await store.enqueue(
           OutboxCommand(
@@ -1489,20 +1795,22 @@ class AppController extends ChangeNotifier {
           photoBytes: photoBytes,
         );
       } catch (_) {
+        ensureCurrent();
         throw const ApiException(
           'Не удалось сохранить действие на устройстве. Оно не отправлено. Проверьте свободное место и повторите.',
           507,
         );
       }
+      ensureCurrent();
       Future<dynamic> queuedResult() async {
-        if (!_current(session)) {
-          throw const ApiException('Сессия изменилась.', 401);
-        }
+        ensureCurrent();
         final result = onOffline(command);
         ++_dataRevision;
         if (result is WorkOrder) _upsert(result);
         await _reloadOutbox();
+        ensureCurrent();
         await _persistSnapshot(session, force: true);
+        ensureCurrent();
         return result is WorkOrder
             ? orders.firstWhere(
                 (order) => order.id == result.id,
@@ -1519,8 +1827,11 @@ class AppController extends ChangeNotifier {
             lastError: 'Версия наряда неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново.',
           ),
         );
+        ensureCurrent();
         await _reloadOutbox();
+        ensureCurrent();
         await _persistSnapshot(session, force: true);
+        ensureCurrent();
         throw const ApiException(
           'Версия наряда неизвестна. Действие сохранено в очереди как конфликт. Обновите наряд и создайте действие заново.',
           428,
@@ -1535,10 +1846,13 @@ class AppController extends ChangeNotifier {
         resolvedId = await store.serverId(
           _scope(localRef, source: source, ownerId: ownerId),
         );
+        ensureCurrent();
       }
       var hasPredecessor = false;
       for (final item in previous) {
-        if (await _lane(store, item) == lane) {
+        final itemLane = await _lane(store, item);
+        ensureCurrent();
+        if (itemLane == lane) {
           hasPredecessor = true;
           break;
         }
@@ -1550,16 +1864,15 @@ class AppController extends ChangeNotifier {
       }
       await store.updateOutbox(command.copyWith(state: OutboxState.running));
       try {
-        if (!_current(session)) {
-          throw const ApiException('Сессия изменилась.', 401);
-        }
+        ensureCurrent();
         final result = await _executeCommand(
           store,
           source,
           command,
           resolvedId ?? 0,
+          ensureCurrent: ensureCurrent,
         );
-        if (!_current(session)) {
+        if (!currentWrite()) {
           throw const ApiException(
             'Сессия изменилась. Проверьте результат действия перед повтором.',
             401,
@@ -1567,7 +1880,7 @@ class AppController extends ChangeNotifier {
           );
         }
         await store.removeOutbox(commandId);
-        if (!_current(session)) {
+        if (!currentWrite()) {
           throw const ApiException(
             'Сессия изменилась. Проверьте результат действия перед повтором.',
             401,
@@ -1577,10 +1890,11 @@ class AppController extends ChangeNotifier {
         ++_dataRevision;
         if (result is WorkOrder) _upsert(result);
         await _reloadOutbox();
+        ensureCurrent();
         try {
           await _refreshFuture;
         } catch (_) {}
-        if (!_current(session)) {
+        if (!currentWrite()) {
           throw const ApiException(
             'Сессия изменилась. Проверьте результат действия перед повтором.',
             401,
@@ -1590,12 +1904,12 @@ class AppController extends ChangeNotifier {
         try {
           await refresh(silent: true);
         } catch (failure) {
-          if (_current(session)) {
+          if (currentWrite()) {
             error =
                 'Действие сохранено, но обновить данные не удалось: $failure';
           }
         }
-        if (!_current(session)) {
+        if (!currentWrite()) {
           throw const ApiException(
             'Сессия изменилась. Проверьте результат действия перед повтором.',
             401,
@@ -1604,11 +1918,14 @@ class AppController extends ChangeNotifier {
         }
         return result;
       } on ApiException catch (failure) {
-        if (!_current(session) || failure.statusCode == 401) {
+        if (!currentWrite() || failure.statusCode == 401) {
           await store.updateOutbox(
             command.copyWith(
               state: OutboxState.pending,
-              responseStatus: failure.statusCode,
+              responseStatus:
+                  failure.statusCode == 401 && failure.requestMayHaveSucceeded
+                  ? 0
+                  : failure.statusCode,
               lastError: failure.message,
             ),
           );
@@ -1653,7 +1970,7 @@ class AppController extends ChangeNotifier {
         rethrow;
       }
     } catch (failure) {
-      if (_current(session)) {
+      if (currentWrite()) {
         if (failure is ApiException && failure.statusCode == 401) {
           _expireSession();
         } else {
@@ -1662,10 +1979,12 @@ class AppController extends ChangeNotifier {
       }
       rethrow;
     } finally {
+      if (identical(_writeLease, lease)) _writeLease = null;
+      lease.complete();
       if (_current(session)) {
         saving = false;
-        _notify();
       }
+      _notify();
     }
   }
 
@@ -1879,7 +2198,7 @@ class AppController extends ChangeNotifier {
     if (expectedVersion == null) {
       throw const ApiException('Обновите наряд перед повтором проверки.', 428);
     }
-    if (saving) {
+    if (saving || _writeLease != null || _recoveringQueue) {
       throw const ApiException(
         'Дождитесь завершения предыдущего действия.',
         409,
@@ -1887,6 +2206,18 @@ class AppController extends ChangeNotifier {
     }
     final session = _session;
     final source = api;
+    final token = source.token;
+    final ownerId = user!.id;
+    final role = user!.role;
+    final lease = Completer<void>();
+    _writeLease = lease;
+    bool currentWrite() =>
+        _current(session) &&
+        identical(api, source) &&
+        source.token == token &&
+        user?.id == ownerId &&
+        user?.role == role &&
+        identical(_writeLease, lease);
     saving = true;
     _notify();
     try {
@@ -1895,7 +2226,7 @@ class AppController extends ChangeNotifier {
         attemptId,
         expectedVersion: expectedVersion,
       );
-      if (!_current(session)) {
+      if (!currentWrite()) {
         throw const ApiException(
           'Сессия изменилась. Проверьте результат повтора.',
           401,
@@ -1959,7 +2290,7 @@ class AppController extends ChangeNotifier {
       ++_dataRevision;
       _upsert(updated);
       await _persistSnapshot(session, force: true);
-      if (!_current(session)) {
+      if (!currentWrite()) {
         throw const ApiException(
           'Сессия изменилась. Проверьте результат повтора.',
           401,
@@ -1968,13 +2299,15 @@ class AppController extends ChangeNotifier {
       }
       return updated;
     } on ApiException catch (failure) {
-      if (_current(session) && failure.statusCode == 401) _expireSession();
+      if (currentWrite() && failure.statusCode == 401) _expireSession();
       rethrow;
     } finally {
+      if (identical(_writeLease, lease)) _writeLease = null;
+      lease.complete();
       if (_current(session)) {
         saving = false;
-        _notify();
       }
+      _notify();
     }
   }
 
@@ -2022,4 +2355,27 @@ class AppController extends ChangeNotifier {
     api.close();
     super.dispose();
   }
+}
+
+class _QueueRecoveryScope {
+  const _QueueRecoveryScope(this.source, this.ownerId, this.ensureCurrent);
+
+  final NaryadApi source;
+  final int ownerId;
+  final void Function() ensureCurrent;
+}
+
+class _QueueRecoverySelection {
+  const _QueueRecoverySelection(this.commands, this.lane, this.retainedPhotos);
+
+  final List<OutboxCommand> commands;
+  final String lane;
+  final List<OutboxCommand> retainedPhotos;
+}
+
+class _QueueRecoveryFailure implements Exception {
+  const _QueueRecoveryFailure(this.status, this.message);
+
+  final QueueRecoveryStatus status;
+  final String message;
 }
