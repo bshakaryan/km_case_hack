@@ -35,7 +35,19 @@ class NaryadApi {
   final String baseUrl;
   final http.Client _client;
   bool _closed = false;
-  String? token;
+  String? _token;
+  int _tokenEpoch = 0;
+  int _ordersReadId = 0;
+  _OrdersSnapshot? _ordersSnapshot;
+  String? get token => _token;
+  set token(String? value) {
+    // Every assignment is an authority boundary, including A -> B -> A and
+    // re-login with an identical test token. Never retain another session's list.
+    _token = value;
+    _tokenEpoch++;
+    _ordersSnapshot = null;
+  }
+
   static const _timeout = Duration(seconds: 30);
   static const _readTimeout = Duration(seconds: 8);
 
@@ -58,11 +70,15 @@ class NaryadApi {
     if (token != null) 'Authorization': 'Bearer $token',
   };
 
-  Future<http.Response> _send(http.BaseRequest request) async {
+  Future<http.Response> _send(
+    http.BaseRequest request, {
+    bool allowOrdersNotModified = false,
+  }) async {
     final changesData = request.method != 'GET';
     final timeout = changesData ? _timeout : _readTimeout;
     final clock = Stopwatch()..start();
     final capturedToken = token;
+    final capturedEpoch = _tokenEpoch;
     // Capture a replayable bodyless read BEFORE send finalizes the source.
     // Writes and streamed/body-bearing requests never enter this path.
     final retryRequest =
@@ -85,6 +101,7 @@ class NaryadApi {
         if (retryRequest == null ||
             _closed ||
             token != capturedToken ||
+            _tokenEpoch != capturedEpoch ||
             clock.elapsed >= timeout ||
             request is! http.Request ||
             request.bodyBytes.isNotEmpty ||
@@ -104,7 +121,8 @@ class NaryadApi {
       // The single timeout includes both attempts and body consumption. The
       // Stopwatch guard also prevents a late abandoned send from retrying.
       final response = await perform().timeout(timeout);
-      if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (!(allowOrdersNotModified && response.statusCode == 304) &&
+          (response.statusCode < 200 || response.statusCode >= 300)) {
         throw ApiException(
           _errorMessage(response),
           response.statusCode,
@@ -280,7 +298,91 @@ class NaryadApi {
   Future<User> me() async => User.fromJson(await meData());
   Future<Json> reference() => _object('/reference');
   Future<List<Json>> employees() => _list('/employees');
-  Future<List<Json>> orders() => _list('/orders?limit=5000');
+  Future<List<Json>> orders() async {
+    final uri = Uri.parse('$baseUrl/orders?limit=5000');
+    final capturedToken = token;
+    final epoch = _tokenEpoch;
+    final readId = ++_ordersReadId;
+    final previous = _ordersSnapshot;
+    final cached =
+        previous != null &&
+            previous.uri == uri &&
+            previous.token == capturedToken &&
+            previous.epoch == epoch
+        ? previous
+        : null;
+    bool current() =>
+        !_closed && _tokenEpoch == epoch && token == capturedToken;
+    ApiException staleContext() => const ApiException(
+      'Контекст загрузки нарядов изменился. Повторите чтение в текущей сессии.',
+      409,
+      detail: {'code': 'read_context_changed'},
+    );
+    final request = http.Request('GET', uri)..headers.addAll(_headers);
+    if (cached != null) request.headers['If-None-Match'] = cached.etag;
+    try {
+      final response = await _send(
+        request,
+        allowOrdersNotModified: cached != null,
+      );
+      if (!current()) throw staleContext();
+      if (response.statusCode == 304) {
+        if (cached == null ||
+            !identical(_ordersSnapshot, cached) ||
+            response.bodyBytes.isNotEmpty ||
+            response.headers['etag'] != cached.etag) {
+          throw const ApiException(
+            'Сервер вернул 304 без подходящего сохранённого списка нарядов.',
+            304,
+          );
+        }
+        // Deserialize anew: callers may mutate all returned maps/nested lists.
+        return _decodeOrders(cached.body, 304);
+      }
+      if (response.statusCode != 200) {
+        throw ApiException(
+          'Сервер вернул неожиданный статус списка нарядов.',
+          response.statusCode,
+        );
+      }
+      final body = utf8.decode(response.bodyBytes);
+      final result = _decodeOrders(body, response.statusCode);
+      final etag = response.headers['etag'];
+      if (readId == _ordersReadId) {
+        _ordersSnapshot = _validOrdersEtag(etag)
+            ? _OrdersSnapshot(uri, capturedToken, epoch, etag!, body)
+            : null;
+      }
+      return result;
+    } on FormatException {
+      if (!current()) throw staleContext();
+      if (readId == _ordersReadId) _ordersSnapshot = null;
+      throw const ApiException(
+        'Сервер вернул некорректный список нарядов.',
+        200,
+      );
+    } catch (_) {
+      // A late 401 for an old authority must not expire the new login. The
+      // stale read cannot publish a body or alter the current session cache.
+      if (!current()) throw staleContext();
+      if (readId == _ordersReadId) _ordersSnapshot = null;
+      rethrow;
+    }
+  }
+
+  static bool _validOrdersEtag(String? etag) =>
+      etag != null &&
+      etag.length <= 4096 &&
+      RegExp(r'^(?:W/)?"[\x21\x23-\x7e]*"$').hasMatch(etag);
+
+  static List<Json> _decodeOrders(String body, int status) {
+    final result = jsonDecode(body);
+    if (result is List && result.every((row) => row is Json)) {
+      return result.cast<Json>();
+    }
+    throw ApiException('Сервер вернул некорректный список нарядов.', status);
+  }
+
   Future<OrderPage> ordersPage(
     OrderJournalQuery query, {
     String? cursor,
@@ -474,6 +576,19 @@ class NaryadApi {
 
   void close() {
     _closed = true;
+    _tokenEpoch++;
+    _ordersSnapshot = null;
     _client.close();
   }
+}
+
+// The cache belongs to ONE API instance/full URI/current authority epoch. A
+// serialized body has no mutable references shared with application callers.
+class _OrdersSnapshot {
+  const _OrdersSnapshot(this.uri, this.token, this.epoch, this.etag, this.body);
+  final Uri uri;
+  final String? token;
+  final int epoch;
+  final String etag;
+  final String body;
 }

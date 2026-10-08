@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
+from .conditional_response import conditional_json_response
 from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
 from .migrations import upgrade_database
 from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
@@ -174,7 +175,7 @@ def create_app(database_url=None, seed=True, monitor=True):
     app.state.realtime = realtime
     app.state.ai_review_mode = ai_mode
     app.state.run_ai_jobs = lambda provider=None, limit=10: dispatch_ai_jobs(sessions, provider=provider, limit=limit)
-    app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id", "X-Expected-Order-Version", "X-Previous-Client-Command-Id"])
+    app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id", "X-Expected-Order-Version", "X-Previous-Client-Command-Id", "If-None-Match"], expose_headers=["ETag"])
 
     def get_db():
         with sessions() as db:
@@ -504,14 +505,25 @@ def create_app(database_url=None, seed=True, monitor=True):
         return result
 
     @app.get("/api/orders")
-    def orders(db: DB, user: User, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, priority: str | None = None, status: str | None = None, search: str | None = Query(None, max_length=200), from_date: str | None = None, to_date: str | None = None, limit: int = Query(1000, ge=1, le=5000)):
+    def orders(request: Request, db: DB, user: User, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, priority: str | None = None, status: str | None = None, search: str | None = Query(None, max_length=200), from_date: str | None = None, to_date: str | None = None, limit: int = Query(1000, ge=1, le=5000)):
+        require_role(user, "worker", "master", "manager", "admin")
         query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id, priority, status, search, from_date, to_date, participant_access=True)
         refs = {"areas": {a.id: a for a in db.scalars(select(Area))}, "equipment": {e.id: e for e in db.scalars(select(Equipment))}, "employees": {p.id: p for p in db.scalars(select(Employee))}}
         positions = queue_positions(db)
         statuses = effective_queue_statuses(db)
         selected = list(db.scalars(query.order_by(Order.created_at.desc()).limit(limit)))
         participants = current_participants(db, selected)
-        return [order_dict(db, o, refs=refs, positions=positions, statuses=statuses, participants=participants[o.id]) for o in selected]
+        body = [order_dict(db, o, refs=refs, positions=positions, statuses=statuses, participants=participants[o.id]) for o in selected]
+        scope = {"user_id": user.id, "role": user.role,
+            "session": token_hash(request.headers["Authorization"][7:]),
+            "query": {"area_id": area_id, "equipment_id": equipment_id,
+                "assignee_id": assignee_id, "brigade_id": brigade_id,
+                "priority": priority or None, "status": status or None,
+                "search": search or None, "limit": limit,
+                "from_date": iso(parse_date(from_date)) if from_date else None,
+                "to_date": iso(parse_date(to_date, end=True)) if to_date else None}}
+        return conditional_json_response(body, scope=scope,
+            if_none_match=request.headers.getlist("If-None-Match"))
 
     @app.get("/api/orders/page", response_model=OrderPage)
     def orders_page(request: Request, db: DB, user: User,

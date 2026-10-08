@@ -795,6 +795,9 @@ class AppController extends ChangeNotifier {
       unawaited(_persistSnapshot(session));
       unawaited(syncOutbox());
     } catch (failure) {
+      // A refresh belongs to its captured session. A cancelled old read is
+      // discarded just like its old successful response after another login.
+      if (!_current(session)) return;
       if (_current(session)) {
         if (failure is ApiException && failure.statusCode == 401) {
           _expireSession();

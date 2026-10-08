@@ -72,7 +72,10 @@ test("Bearer is sent and successful old-session data is discarded", async () => 
     currentToken = "new-session";
     return new Response('{"private":true}');
   };
-  await assert.rejects(api("/orders"), (e) => e.statusCode === 401);
+  await assert.rejects(
+    api("/orders"),
+    (e) => e.statusCode === 409 && e.code === "read_context_changed",
+  );
 });
 test("Read error never claims a write occurred; current 401 requests login", async () => {
   globalThis.fetch = async () => {

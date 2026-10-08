@@ -111,6 +111,10 @@ class PollingMetricsPhase {
   int inFlightAtEnd = 0;
   final List<_RequestMetric> _requests = [];
   final Map<String, int> snapshotCalls = {};
+  final List<int> _ordersReturnLengths = [];
+
+  void recordSuccessfulOrdersReturn(int length) =>
+      _ordersReturnLengths.add(length);
 
   Map<String, Object?> toJson() {
     final routes = <String, List<_RequestMetric>>{};
@@ -125,6 +129,12 @@ class PollingMetricsPhase {
           .where((r) => r.finished && !r.failed)
           .length,
       'transport_failures': _requests.where((r) => r.failed).length,
+      'not_modified_responses': _requests
+          .where((r) => r.status == 304 && r.finished && !r.failed)
+          .length,
+      'not_modified_received_body_bytes': _requests
+          .where((r) => r.status == 304)
+          .fold<int>(0, (sum, r) => sum + r.bytes),
       'peak_concurrency': peakConcurrency,
       'in_flight_at_end': inFlightAtEnd,
       'unfinished_after_drain': _requests.where((r) => !r.finished).length,
@@ -133,6 +143,10 @@ class PollingMetricsPhase {
         (sum, r) => sum + r.bytes,
       ),
       'snapshot_put_calls': snapshotCalls,
+      'orders_application_returns': {
+        'completed_successful_calls': _ordersReturnLengths.length,
+        'returned_list_lengths': List<int>.of(_ordersReturnLengths),
+      },
       'routes': {
         for (final entry in routes.entries) entry.key: _routeJson(entry.value),
       },
@@ -157,6 +171,12 @@ class PollingMetricsPhase {
     return {
       'requests': requests.length,
       'status_counts': statuses,
+      'not_modified_responses': requests
+          .where((r) => r.status == 304 && r.finished && !r.failed)
+          .length,
+      'not_modified_received_body_bytes': requests
+          .where((r) => r.status == 304)
+          .fold<int>(0, (sum, r) => sum + r.bytes),
       'logical_response_body_bytes': requests.fold<int>(
         0,
         (sum, r) => sum + r.bytes,

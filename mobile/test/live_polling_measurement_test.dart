@@ -1,4 +1,4 @@
-// Opt-in BEFORE-optimization desktop baseline; no production changes.
+// Opt-in desktop polling comparison; production app and real transport.
 // flutter test test/live_polling_measurement_test.dart \
 //   --dart-define=LIVE_POLLING_FIXTURE_FILE=<fresh synthetic fixture.json>
 // Each phase lasts 60 REAL seconds. FullyLive binding uses no FakeAsync;
@@ -34,6 +34,21 @@ const _samplePeriod = Duration(milliseconds: 50);
 // The normal widget-test HttpClient override fabricates HTTP 400. This empty
 // override restores dart:io's genuine HttpClient for login, polling and edits.
 class _RealHttpOverrides extends HttpOverrides {}
+
+// Observe genuine API return values without changing transport, timers, auth,
+// cache behavior or the controller. Only count/length leave this observer.
+class _ObservedApi extends NaryadApi {
+  _ObservedApi(super.baseUrl, {required super.client, required this.recorder});
+  final PollingMetricsRecorder recorder;
+
+  @override
+  Future<List<Json>> orders() async {
+    final phase = recorder.activePhase;
+    final result = await super.orders();
+    phase?.recordSuccessfulOrdersReturn(result.length);
+    return result;
+  }
+}
 
 class _CompletedFrames {
   _CompletedFrames(this.binding, this.clock) {
@@ -340,9 +355,10 @@ Future<void> _liveMeasurement(
   final recorder = PollingMetricsRecorder(clock);
   final frames = _CompletedFrames(binding, clock);
   final store = PollingMetricsMemoryStore(recorder);
-  NaryadApi meteredApi(String url) => NaryadApi(
+  NaryadApi meteredApi(String url) => _ObservedApi(
     url,
     client: PollingMetricsClient(IOClient(HttpClient()), recorder),
+    recorder: recorder,
   );
   final controller = AppController(
     api: meteredApi(uri.toString()),
@@ -509,6 +525,8 @@ Future<void> _liveMeasurement(
         'time': 'monotonic Stopwatch, real Timer/Future.delayed; no FakeAsync or timed pump',
         'phase_boundary': 'requests enrolled at send; late full responses retained in originating phase; drain excluded',
         'network': 'genuine loopback HTTP through injected IOClient; external authenticated PATCH excluded',
+        'conditional_orders': 'only /orders?limit=5000 uses per-API/current-authority immutable ETag body; actual 304 bytes counted as received, cached bytes not network bytes; five-second cadence unchanged',
+        'orders_return_evidence': 'test-only API subclass counts successful full orders() returns and list lengths; together with consumed 304 and global refresh observations, not an independently correlated per-request cache-use counter',
         'bytes': 'logical received response body bytes after IOClient decompression; not wire/TLS/request bytes',
         'latency': 'send entry to complete response stream consumption; excludes JSON decode and controller apply',
         'display': '50ms real sampling of version-bound RenderParagraph after live frame, no pending layout/paint, inside view/scroll clips',

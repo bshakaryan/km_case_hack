@@ -35,6 +35,7 @@ import {
   number,
   post,
   roleNames,
+  setToken,
   token,
 } from "./model";
 import type {
@@ -133,7 +134,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         login: demo || login.trim(),
         pin: demo ? "1234" : pin,
       });
-      localStorage.setItem("naryad_token", res.token);
+      setToken(res.token);
       onLogin(res.user);
     } catch (error) {
       setError((error as Error).message);
@@ -293,7 +294,7 @@ export default function App() {
     ++session.current;
     pending.current = null;
     refreshAgain.current = false;
-    localStorage.removeItem("naryad_token");
+    setToken(null);
     setUser(null);
     setOrders([]);
     setEmployees([]);
