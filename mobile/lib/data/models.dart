@@ -45,16 +45,23 @@ class WorkOrder {
 
   // Lists and historical command replays may omit detail-only fields. A new
   // explicit empty array is authoritative; only missing fields use the cache.
-  WorkOrder withCachedHistory(WorkOrder? previous) => WorkOrder.fromJson({
-    for (final key in [
-      'assignment_history',
-      'submission_attempts',
-      'ai_review_job',
-    ])
-      if (!data.containsKey(key) && previous?.data.containsKey(key) == true)
-        key: previous!.data[key],
-    ...data,
-  });
+  WorkOrder withCachedHistory(WorkOrder? previous) {
+    if (previous != null &&
+        previous.version != null &&
+        (version == null || version! < previous.version!)) {
+      return previous;
+    }
+    return WorkOrder.fromJson({
+      for (final key in [
+        'assignment_history',
+        'submission_attempts',
+        'ai_review_job',
+      ])
+        if (!data.containsKey(key) && previous?.data.containsKey(key) == true)
+          key: previous!.data[key],
+      ...data,
+    });
+  }
 
   static List<Json> _historyRows(Object? value) => value is List
       ? value
@@ -63,6 +70,11 @@ class WorkOrder {
             .toList()
       : [];
   int get id => (data['id'] as num).toInt();
+  int? get version {
+    final value = data['version'];
+    return value is int && value >= 1 ? value : null;
+  }
+
   String get number => data['number'] as String;
   String get title => data['title'] as String;
   String get description => data['description'] as String? ?? '';

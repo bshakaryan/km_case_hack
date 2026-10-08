@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { OrderHistory } from "./OrderHistory";
 import {
+  advancePhotoFormVersion,
+  isStaleOrderForm,
+  OrderVersionNotice,
+} from "./OrderVersion";
+import {
   AiJobStatus,
   applyAiReviewJob,
   canRetryAiReview,
@@ -55,12 +60,16 @@ import {
 import {
   api,
   ApiError,
+  confirmedOrderVersion,
   formatDate,
   formatTime,
   idValue,
   initials,
+  isOrderVersionConflict,
   number,
   post,
+  postOrder,
+  orderWrite,
   priorityNames,
   statusNames,
 } from "./model";
@@ -802,6 +811,7 @@ export function CreateOrder({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [unknownCreate, setUnknownCreate] = useState(false);
+  const [creationPhotoConflict, setCreationPhotoConflict] = useState(false);
   const [created, setCreated] = useState<OrderDetail | null>(null);
   const [photos, setPhotos] = useState<DraftPhoto[]>([]);
   const nextPhotoId = useRef(0);
@@ -876,7 +886,8 @@ export function CreateOrder({
     setPhotos((current) => [...current, ...additions]);
     setError("");
   }
-  async function sendPhotos(order: OrderDetail) {
+  async function sendPhotos(initialOrder: OrderDetail) {
+    let order = initialOrder;
     for (const photo of photos.filter(
       (item) => item.state === "queued" || item.state === "failed",
     )) {
@@ -894,9 +905,19 @@ export function CreateOrder({
         data.append("file", file);
         data.append("kind", "before");
         requestSent = true;
-        await api(`/orders/${order.id}/photos`, { method: "POST", body: data });
+        const receipt = await orderWrite<{ order_version: number }>(
+          `/orders/${order.id}/photos`,
+          order.version,
+          { method: "POST", body: data },
+        );
+        order = {
+          ...order,
+          version: confirmedOrderVersion(receipt.order_version, order.version),
+        };
+        setCreated(order);
         updatePhoto({ state: "uploaded" });
       } catch (failure) {
+        if (isOrderVersionConflict(failure)) setCreationPhotoConflict(true);
         const unknown =
           requestSent &&
           (!(failure instanceof ApiError) || failure.requestMayHaveSucceeded);
@@ -905,20 +926,23 @@ export function CreateOrder({
           error: (failure as Error).message,
         });
         setError(
-          unknown
-            ? "Наряд создан, но результат загрузки фото неизвестен. Откройте карточку и проверьте снимки; автоматического повтора нет."
-            : "Наряд создан. Неотправленное фото можно загрузить повторно; уже принятые снимки не повторяются.",
+          isOrderVersionConflict(failure)
+            ? "Наряд изменился после выдачи. Откройте актуальную карточку перед отправкой оставшихся фото."
+            : unknown
+              ? "Наряд создан, но результат загрузки фото неизвестен. Откройте карточку и проверьте снимки; автоматического повтора нет."
+              : "Наряд создан. Неотправленное фото можно загрузить повторно; уже принятые снимки не повторяются.",
         );
-        return false;
+        return null;
       }
     }
-    return true;
+    return order;
   }
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (
       requestLock.current ||
       unknownCreate ||
+      creationPhotoConflict ||
       photos.some((photo) => photo.state === "uncertain")
     )
       return;
@@ -980,7 +1004,8 @@ export function CreateOrder({
         creating = false;
         setCreated(order);
       }
-      if (await sendPhotos(order)) onCreated(order);
+      const withPhotos = await sendPhotos(order);
+      if (withPhotos) onCreated(withPhotos);
     } catch (failure) {
       if (
         creating &&
@@ -1384,6 +1409,7 @@ export function CreateOrder({
                 : "Отмена"}
           </button>
           {!unknownCreate &&
+            !creationPhotoConflict &&
             !photos.some((photo) => photo.state === "uncertain") && (
               <button className="button primary" disabled={busy}>
                 {busy ? (
@@ -1450,6 +1476,12 @@ export function OrderDialog({
     useState("");
   const [photoUncertain, setPhotoUncertain] = useState(false);
   const [aiRetryUncertain, setAiRetryUncertain] = useState(false);
+  const [formVersion, setFormVersion] = useState<number | null>(null);
+  const [completionVersion, setCompletionVersion] = useState<number | null>(
+    null,
+  );
+  const [versionConflict, setVersionConflict] = useState(false);
+  const [writeUncertain, setWriteUncertain] = useState(false);
   const [materialSearch, setMaterialSearch] = useState("");
   const mutationLock = useRef(false);
   const revision = useRef(0);
@@ -1505,6 +1537,71 @@ export function OrderDialog({
       "closed",
       "cancelled",
     ].includes(order.status);
+  const staleForm =
+    mode !== "none" && !!order && isStaleOrderForm(formVersion, order.version);
+  const writeBlocked = staleForm || versionConflict || writeUncertain;
+  function beginForm(nextMode: "complete" | "edit" | "action") {
+    if (!order || mutationLock.current || writeBlocked) return;
+    if (
+      nextMode === "complete" &&
+      isStaleOrderForm(completionVersion, order.version)
+    ) {
+      if (
+        (complete.work_done || complete.comment || materials.length) &&
+        !window.confirm(
+          "Прежний отчёт относится к другой версии наряда. Очистить текст и материалы и открыть новую форму?",
+        )
+      )
+        return;
+      setComplete({ work_done: "", fault_code_id: "", comment: "" });
+      setMaterials([]);
+      setCompletionValidationError("");
+    }
+    if (nextMode === "complete") setCompletionVersion(order.version);
+    setFormVersion(order.version);
+    setMode(nextMode);
+  }
+  function handleVersionFailure(failure: unknown) {
+    if (!isOrderVersionConflict(failure)) return false;
+    setVersionConflict(true);
+    onChange();
+    return true;
+  }
+  async function resetFormAndReload() {
+    if (mutationLock.current) return;
+    if (
+      mode !== "none" &&
+      !window.confirm(
+        "Закрыть прежнюю форму и загрузить текущий наряд? Введённые текст, причины и материалы будут потеряны.",
+      )
+    )
+      return;
+    mutationLock.current = true;
+    revision.current++;
+    setBusy(true);
+    try {
+      const latest = await api<OrderDetail>(`/orders/${id}`);
+      setOrder(latest);
+      setMode("none");
+      setFormVersion(null);
+      setVersionConflict(false);
+      setWriteUncertain(false);
+      setAiRetryUncertain(false);
+      setReason("");
+      setScore("");
+      if (!completionUncertain) {
+        setComplete({ work_done: "", fault_code_id: "", comment: "" });
+        setMaterials([]);
+        setCompletionVersion(null);
+      }
+      setError("");
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      mutationLock.current = false;
+      setBusy(false);
+    }
+  }
   function closeDialog() {
     if (mutationLock.current) return;
     if (
@@ -1537,6 +1634,7 @@ export function OrderDialog({
         setCompletionUncertain(false);
         setComplete({ work_done: "", fault_code_id: "", comment: "" });
         setMaterials([]);
+        setCompletionVersion(null);
         setError("");
         notify("На сервере есть сданный отчёт. Проверьте его содержимое.");
       } else
@@ -1556,6 +1654,7 @@ export function OrderDialog({
       mutationLock.current ||
       !order ||
       !canRetryAiReview(order, user.role) ||
+      writeBlocked ||
       aiRetryUncertain
     )
       return;
@@ -1567,6 +1666,7 @@ export function OrderDialog({
       const response = await requestAiReviewRetry(
         id,
         order.ai_review_job!.attempt_id,
+        order.version,
       );
       setOrder((current) =>
         current ? applyAiReviewJob(current, response) : current,
@@ -1574,6 +1674,7 @@ export function OrderDialog({
       notify("Проверка поставлена в очередь. Отчёт сохранён.");
       onChange();
     } catch (failure) {
+      handleVersionFailure(failure);
       setAiRetryUncertain(
         !(failure instanceof ApiError) || failure.requestMayHaveSucceeded,
       );
@@ -1584,7 +1685,7 @@ export function OrderDialog({
     }
   }
   async function execute(actionName: string) {
-    if (mutationLock.current) return;
+    if (mutationLock.current || !order || writeBlocked) return;
     if (actionName === "close" && !score) {
       setError("Выберите итоговую оценку качества.");
       return;
@@ -1601,12 +1702,16 @@ export function OrderDialog({
     setBusy(true);
     setError("");
     try {
-      const o = await post<OrderDetail>(`/orders/${id}/transition`, {
-        action: actionName,
-        reason: reason || undefined,
-        comment: reason || undefined,
-        score: actionName === "close" ? Number(score) : undefined,
-      });
+      const o = await postOrder<OrderDetail>(
+        `/orders/${id}/transition`,
+        mode === "action" ? formVersion! : order.version,
+        {
+          action: actionName,
+          reason: reason || undefined,
+          comment: reason || undefined,
+          score: actionName === "close" ? Number(score) : undefined,
+        },
+      );
       setOrder(o);
       setMode("none");
       setReason("");
@@ -1619,6 +1724,11 @@ export function OrderDialog({
       notify(message);
       onChange();
     } catch (e) {
+      if (
+        !handleVersionFailure(e) &&
+        (!(e instanceof ApiError) || e.requestMayHaveSucceeded)
+      )
+        setWriteUncertain(true);
       setError((e as Error).message);
     } finally {
       mutationLock.current = false;
@@ -1626,15 +1736,18 @@ export function OrderDialog({
     }
   }
   function actionClick(name: string) {
+    if (mutationLock.current || writeBlocked || !order) return;
     if (["pause", "reject", "rework", "cancel", "close"].includes(name)) {
       setAction(name);
       setReason("");
       if (name === "close") setScore("");
-      setMode("action");
+      beginForm("action");
     } else void execute(name);
   }
   async function upload(file: File, kind: string) {
-    if (mutationLock.current || photoUncertain) return;
+    if (mutationLock.current || photoUncertain || writeBlocked || !order)
+      return;
+    const requestedVersion = order.version;
     mutationLock.current = true;
     revision.current++;
     setBusy(true);
@@ -1645,7 +1758,26 @@ export function OrderDialog({
       data.append("file", await compressedPhoto(file));
       data.append("kind", kind);
       sent = true;
-      await api(`/orders/${id}/photos`, { method: "POST", body: data });
+      const receipt = await orderWrite<{ order_version: number }>(
+        `/orders/${id}/photos`,
+        requestedVersion,
+        { method: "POST", body: data },
+      );
+      const receivedVersion = confirmedOrderVersion(
+        receipt.order_version,
+        requestedVersion,
+      );
+      setFormVersion((base) =>
+        advancePhotoFormVersion(base, requestedVersion, receivedVersion),
+      );
+      setCompletionVersion((base) =>
+        advancePhotoFormVersion(base, requestedVersion, receivedVersion),
+      );
+      setOrder((current) =>
+        current && current.version === requestedVersion
+          ? { ...current, version: receivedVersion }
+          : current,
+      );
       onChange();
       notify("Фото добавлено к наряду");
       try {
@@ -1656,6 +1788,7 @@ export function OrderDialog({
         );
       }
     } catch (e) {
+      handleVersionFailure(e);
       const unknown =
         sent && (!(e instanceof ApiError) || e.requestMayHaveSucceeded);
       setPhotoUncertain(unknown);
@@ -1671,7 +1804,8 @@ export function OrderDialog({
   }
   async function submitComplete(e: FormEvent) {
     e.preventDefault();
-    if (mutationLock.current || completionUncertain) return;
+    if (mutationLock.current || completionUncertain || writeBlocked || !order)
+      return;
     setError("");
     const issues = completionValidationIssues({
       workDone: complete.work_done,
@@ -1697,22 +1831,28 @@ export function OrderDialog({
     setBusy(true);
     setError("");
     try {
-      const o = await post<OrderDetail>(`/orders/${id}/complete`, {
-        ...complete,
-        work_done: complete.work_done.trim(),
-        fault_code_id: idValue(complete.fault_code_id),
-        materials: materials.map((m) => ({
-          material_id: idValue(m.material_id),
-          quantity: Number(m.quantity),
-        })),
-      });
+      const o = await postOrder<OrderDetail>(
+        `/orders/${id}/complete`,
+        formVersion!,
+        {
+          ...complete,
+          work_done: complete.work_done.trim(),
+          fault_code_id: idValue(complete.fault_code_id),
+          materials: materials.map((m) => ({
+            material_id: idValue(m.material_id),
+            quantity: Number(m.quantity),
+          })),
+        },
+      );
       setOrder(o);
       setMode("none");
       setComplete({ work_done: "", fault_code_id: "", comment: "" });
       setMaterials([]);
+      setCompletionVersion(null);
       onChange();
       notify("Отчёт сохранён и передан мастеру на приёмку");
     } catch (e) {
+      handleVersionFailure(e);
       if (!(e instanceof ApiError) || e.requestMayHaveSucceeded)
         setCompletionUncertain(true);
       setError((e as Error).message);
@@ -1723,7 +1863,7 @@ export function OrderDialog({
   }
   async function submitEdit(e: FormEvent) {
     e.preventDefault();
-    if (mutationLock.current) return;
+    if (mutationLock.current || writeBlocked) return;
     mutationLock.current = true;
     revision.current++;
     setBusy(true);
@@ -1747,7 +1887,7 @@ export function OrderDialog({
         setMode("none");
         return;
       }
-      const o = await api<OrderDetail>(`/orders/${id}`, {
+      const o = await orderWrite<OrderDetail>(`/orders/${id}`, formVersion!, {
         method: "PATCH",
         body: JSON.stringify(changes),
       });
@@ -1756,6 +1896,11 @@ export function OrderDialog({
       onChange();
       notify("Изменения сохранены");
     } catch (e) {
+      if (
+        !handleVersionFailure(e) &&
+        (!(e instanceof ApiError) || e.requestMayHaveSucceeded)
+      )
+        setWriteUncertain(true);
       setError((e as Error).message);
     } finally {
       mutationLock.current = false;
@@ -1763,7 +1908,7 @@ export function OrderDialog({
     }
   }
   function startEdit() {
-    if (!order) return;
+    if (!order || mutationLock.current || writeBlocked) return;
     setEdit({
       assignee_id: String(order.assignee_id),
       priority: order.priority,
@@ -1772,7 +1917,7 @@ export function OrderDialog({
         .slice(0, 16),
       comment: order.comment || "",
     });
-    setMode("edit");
+    beginForm("edit");
   }
   const actionLabels: Record<string, string> = {
     accept:
@@ -1809,6 +1954,13 @@ export function OrderDialog({
       wide
     >
       <div className="modal-body order-detail-body">
+        <OrderVersionNotice
+          stale={staleForm}
+          conflict={versionConflict}
+          uncertain={writeUncertain}
+          busy={busy}
+          onReset={() => void resetFormAndReload()}
+        />
         {error && (
           <ErrorBox
             message={error}
@@ -1845,6 +1997,7 @@ export function OrderDialog({
                 <button
                   className="icon-button"
                   title="Редактировать наряд"
+                  disabled={busy || writeBlocked}
                   onClick={startEdit}
                 >
                   <Pencil size={17} />
@@ -2070,7 +2223,10 @@ export function OrderDialog({
                       >
                         Отмена
                       </button>
-                      <button className="button primary" disabled={busy}>
+                      <button
+                        className="button primary"
+                        disabled={busy || writeBlocked}
+                      >
                         Сохранить
                       </button>
                     </div>
@@ -2113,12 +2269,14 @@ export function OrderDialog({
                             order.photos.filter((p) => p.kind === kind).length <
                               5 && (
                               <label
-                                className={`photo-add ${busy || photoUncertain ? "disabled" : ""}`}
+                                className={`photo-add ${busy || photoUncertain || writeBlocked ? "disabled" : ""}`}
                               >
                                 <Plus size={20} />
                                 <span>Добавить</span>
                                 <input
-                                  disabled={busy || photoUncertain}
+                                  disabled={
+                                    busy || photoUncertain || writeBlocked
+                                  }
                                   type="file"
                                   accept="image/jpeg,image/png,image/webp"
                                   onChange={(e) => {
@@ -2155,7 +2313,7 @@ export function OrderDialog({
                   busy={busy}
                   uncertain={aiRetryUncertain}
                   onRetry={
-                    canRetryAiReview(order, user.role)
+                    canRetryAiReview(order, user.role) && !writeBlocked
                       ? () => void retryAiReview()
                       : undefined
                   }
@@ -2404,7 +2562,10 @@ export function OrderDialog({
                           Проверить отправку
                         </button>
                       ) : (
-                        <button className="button primary" disabled={busy}>
+                        <button
+                          className="button primary"
+                          disabled={busy || writeBlocked}
+                        >
                           <Send size={16} />
                           Отправить на приёмку
                         </button>
@@ -2477,7 +2638,7 @@ export function OrderDialog({
                       </button>
                       <button
                         className={`button ${action === "cancel" ? "danger" : "primary"}`}
-                        disabled={busy}
+                        disabled={busy || writeBlocked}
                       >
                         {busy ? (
                           <LoaderCircle size={16} className="spin" />
@@ -2550,7 +2711,7 @@ export function OrderDialog({
           <div className="footer-spacer" />
           {manager && !terminal && mode === "none" && (
             <button
-              disabled={busy}
+              disabled={busy || writeBlocked}
               className="text-button muted"
               onClick={() => actionClick("cancel")}
             >
@@ -2566,6 +2727,7 @@ export function OrderDialog({
                     className={`button ${i === 0 && order.status !== "in_progress" ? "primary" : "secondary"}`}
                     disabled={
                       busy ||
+                      writeBlocked ||
                       (a === "start" &&
                         (workerHasActiveOrder ||
                           (order.queue_position != null &&
@@ -2587,8 +2749,8 @@ export function OrderDialog({
               {worker && order.status === "in_progress" && (
                 <button
                   className="button primary"
-                  disabled={busy}
-                  onClick={() => setMode("complete")}
+                  disabled={busy || writeBlocked || completionUncertain}
+                  onClick={() => beginForm("complete")}
                 >
                   <CheckCheck size={16} />
                   Завершить работу
@@ -2598,14 +2760,14 @@ export function OrderDialog({
                 <>
                   <button
                     className="button secondary"
-                    disabled={busy}
+                    disabled={busy || writeBlocked}
                     onClick={() => actionClick("rework")}
                   >
                     На доработку
                   </button>
                   <button
                     className="button primary"
-                    disabled={busy}
+                    disabled={busy || writeBlocked}
                     onClick={() => actionClick("close")}
                   >
                     <CheckCheck size={17} />

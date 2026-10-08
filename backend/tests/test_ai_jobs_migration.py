@@ -8,7 +8,7 @@ from alembic import command
 from app.db import make_engine
 from app.migrations import alembic_config, expected_schema, upgrade_database
 from test_migrations import fill_legacy, revision
-from test_order_history_migration import dump
+from test_order_history_migration import dump, without_versions
 
 
 def fill_previous_revision(engine):
@@ -36,10 +36,10 @@ def check_job_migration(engine):
     assert {row["source"] for row in before["submission_attempts"]} == {"live", "legacy_snapshot"}
     upgrade_database(engine)
     after = dump(engine)
-    assert {name: rows for name, rows in after.items() if name != "ai_review_jobs"} == before
+    assert without_versions({name: rows for name, rows in after.items() if name != "ai_review_jobs"}) == before
     assert after["ai_review_jobs"] == []
     with engine.connect() as connection:
-        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0005_ai_review_jobs"
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0006_order_versions"
     upgrade_database(engine)
     assert dump(engine) == after
     with engine.connect() as connection:

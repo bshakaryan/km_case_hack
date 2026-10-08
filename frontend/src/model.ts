@@ -28,6 +28,7 @@ export type Employee = User & {
 };
 export type Order = {
   id: Id;
+  version: number;
   number: string;
   title: string;
   description: string;
@@ -109,6 +110,7 @@ export type AiReviewJob = {
 };
 export type AttemptAiReview = {
   attempt_id: Id;
+  order_version: number;
   ai_review: OrderDetail["ai_review"];
   job: AiReviewJob | null;
 };
@@ -280,15 +282,24 @@ export const token = () => localStorage.getItem("naryad_token");
 export class ApiError extends Error {
   readonly statusCode: number | undefined;
   readonly requestMayHaveSucceeded: boolean;
+  readonly code: string | undefined;
+  readonly expectedVersion: number | undefined;
+  readonly currentVersion: number | undefined;
   constructor(
     message: string,
     statusCode?: number,
     requestMayHaveSucceeded = false,
+    code?: string,
+    expectedVersion?: number,
+    currentVersion?: number,
   ) {
     super(message);
     this.name = "ApiError";
     this.statusCode = statusCode;
     this.requestMayHaveSucceeded = requestMayHaveSucceeded;
+    this.code = code;
+    this.expectedVersion = expectedVersion;
+    this.currentVersion = currentVersion;
   }
 }
 export async function api<T>(
@@ -345,9 +356,18 @@ export async function api<T>(
         ? detail.map((v: any) => v.msg).join("; ")
         : typeof detail === "string"
           ? detail
-          : `Ошибка запроса (${res.status})`,
+          : typeof detail?.message === "string"
+            ? detail.message
+            : `Ошибка запроса (${res.status})`,
       res.status,
       writing && res.status >= 500,
+      typeof detail?.code === "string" ? detail.code : undefined,
+      Number.isSafeInteger(detail?.expected_version)
+        ? detail.expected_version
+        : undefined,
+      Number.isSafeInteger(detail?.current_version)
+        ? detail.current_version
+        : undefined,
     );
   }
   if (res.status === 204) return undefined as T;
@@ -367,6 +387,45 @@ export async function api<T>(
 }
 export const post = <T>(path: string, body: any) =>
   api<T>(path, { method: "POST", body: JSON.stringify(body) });
+export function isOrderVersionConflict(error: unknown) {
+  return (
+    error instanceof ApiError &&
+    ["order_version_conflict", "order_precondition_unavailable"].includes(
+      error.code || "",
+    )
+  );
+}
+export function orderWrite<T>(
+  path: string,
+  version: number,
+  options: RequestInit,
+): Promise<T> {
+  if (!Number.isSafeInteger(version) || version < 1)
+    throw new ApiError("Обновите наряд перед отправкой действия.");
+  const headers = new Headers(options.headers);
+  headers.set("X-Expected-Order-Version", String(version));
+  return api<T>(path, { ...options, headers });
+}
+export const postOrder = <T>(path: string, version: number, body: any) =>
+  orderWrite<T>(path, version, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export function confirmedOrderVersion(
+  receivedVersion: number,
+  requestedVersion: number,
+) {
+  if (
+    !Number.isSafeInteger(receivedVersion) ||
+    receivedVersion < requestedVersion
+  )
+    throw new ApiError(
+      "Действие отправлено, но версия ответа неизвестна. Обновите наряд перед новым действием.",
+      undefined,
+      true,
+    );
+  return receivedVersion;
+}
 export async function downloadReport(query: string) {
   const res = await fetch(`/api/reports/export?${query}`, {
     headers: { Authorization: `Bearer ${token()}` },

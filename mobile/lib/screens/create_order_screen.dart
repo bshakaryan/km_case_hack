@@ -7,6 +7,7 @@ import 'package:timezone/timezone.dart' as tz;
 
 import '../data/api.dart';
 import '../data/app_controller.dart';
+import '../data/local_store.dart';
 import '../data/models.dart';
 import '../ui.dart' show plantTime;
 
@@ -80,6 +81,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
   bool _creationUncertain = false;
   String? _error;
   WorkOrder? _created;
+  OrderWriteBasis? _photoBasis;
 
   List<Json> _reference(String key) =>
       (widget.controller.reference[key] as List? ?? [])
@@ -453,6 +455,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
           final created = await widget.controller.createOrder(payload);
           if (!mounted) return;
           setState(() => _created = created);
+          _photoBasis = widget.controller.captureOrderBasis(created);
         } on ApiException catch (error) {
           if (!mounted) return;
           setState(() {
@@ -483,12 +486,14 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
           photo.error = null;
         });
         try {
-          await widget.controller.uploadPhoto(
+          final commandId = await widget.controller.uploadPhoto(
             _created!.id,
             photo.bytes,
             photo.filename,
             'before',
+            basis: _photoBasis,
           );
+          _photoBasis = OrderWriteBasis(previousCommandId: commandId);
           if (!mounted) return;
           setState(() {
             photo.state = _PhotoState.uploaded;

@@ -22,7 +22,7 @@ def snapshot(engine):
     metadata = sa.MetaData()
     metadata.reflect(engine)
     with engine.connect() as connection:
-        return {name: [{key: value for key, value in row.items() if key != "assigned_at"}
+        return {name: [{key: value for key, value in row.items() if key not in {"assigned_at", "version"} and (name != "client_commands" or key not in {"order_id", "order_version"})}
                        for row in connection.execute(sa.select(table).order_by(table.c.id)).mappings()]
                 for name, table in metadata.tables.items() if name != "alembic_version"}
 
@@ -85,11 +85,11 @@ def test_filled_legacy_upgrade_preserves_data_and_backfills_current_assignment(t
     upgrade_database(engine)
     after = snapshot(engine)
     assert {name: rows for name, rows in after.items() if name in before} == before
-    schema = expected_schema("0005_ai_review_jobs")
+    schema = expected_schema("0006_order_versions")
     with engine.connect() as connection:
         assigned = dict(connection.execute(sa.select(schema.tables["orders"].c.id, schema.tables["orders"].c.assigned_at)).all())
         assert assigned == {1: created + timedelta(minutes=40), 2: created, 3: created, 4: created + timedelta(minutes=30), 5: created}
-        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0005_ai_review_jobs"
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0006_order_versions"
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
         assert not connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     upgrade_database(engine)

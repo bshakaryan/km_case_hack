@@ -49,6 +49,13 @@ class SnapshotEntry {
   final DateTime updatedAt;
 }
 
+// The form captures this before editing. Reads must never replace its basis.
+class OrderWriteBasis {
+  const OrderWriteBasis({this.expectedVersion, this.previousCommandId});
+  final int? expectedVersion;
+  final String? previousCommandId;
+}
+
 class OutboxCommand {
   const OutboxCommand({
     required this.commandId,
@@ -58,6 +65,8 @@ class OutboxCommand {
     this.serverUrl,
     this.orderId,
     this.localRef,
+    this.expectedVersion,
+    this.previousCommandId,
     this.payload = const {},
     this.photoPath,
     this.photoFilename,
@@ -77,6 +86,10 @@ class OutboxCommand {
     serverUrl: json['server_url'] as String?,
     orderId: (json['order_id'] as num?)?.toInt(),
     localRef: json['local_ref'] as String?,
+    expectedVersion: json['expected_version'] is int
+        ? json['expected_version'] as int
+        : null,
+    previousCommandId: json['previous_command_id'] as String?,
     payload: (json['payload'] as Json?) ?? const {},
     photoPath: json['photo_path'] as String?,
     photoFilename: json['photo_filename'] as String?,
@@ -97,6 +110,8 @@ class OutboxCommand {
   final String? serverUrl;
   final int? orderId;
   final String? localRef;
+  final int? expectedVersion;
+  final String? previousCommandId;
   final Json payload;
   final String? photoPath;
   final String? photoFilename;
@@ -107,6 +122,24 @@ class OutboxCommand {
   final Json? response;
   final String? lastError;
 
+  bool get hasOrderPrecondition =>
+      kind == OutboxKind.createOrder ||
+      kind == OutboxKind.markRead ||
+      (expectedVersion != null &&
+          expectedVersion! >= 1 &&
+          previousCommandId == null) ||
+      (expectedVersion == null &&
+          previousCommandId != null &&
+          RegExp(r'^[A-Za-z0-9._:-]{8,64}$').hasMatch(previousCommandId!));
+
+  bool get canRetry =>
+      hasOrderPrecondition &&
+      !const {
+        'order_version_conflict',
+        'order_precondition_unavailable',
+        'local_order_precondition_unavailable',
+      }.contains(response?['code']);
+
   Json toJson() => <String, dynamic>{
     'command_id': commandId,
     'kind': kind,
@@ -115,6 +148,8 @@ class OutboxCommand {
     'server_url': serverUrl,
     'order_id': orderId,
     'local_ref': localRef,
+    'expected_version': expectedVersion,
+    'previous_command_id': previousCommandId,
     'payload': payload,
     'photo_path': photoPath,
     'photo_filename': photoFilename,
@@ -142,6 +177,8 @@ class OutboxCommand {
     serverUrl: serverUrl,
     orderId: identical(orderId, _undefined) ? this.orderId : orderId as int?,
     localRef: localRef,
+    expectedVersion: expectedVersion,
+    previousCommandId: previousCommandId,
     payload: payload,
     photoPath: identical(photoPath, _undefined)
         ? this.photoPath
@@ -266,6 +303,10 @@ class MemoryLocalStore implements LocalStore {
       if (command['server_url'] == null || command['owner_id'] == null) {
         command['state'] = OutboxState.conflict;
         command['last_error'] = 'Старая команда без подтверждённого сервера и аккаунта изолирована.';
+      } else if (!OutboxCommand.fromJson(command).hasOrderPrecondition) {
+        command['state'] = OutboxState.conflict;
+        command['response'] = {'code': 'local_order_precondition_unavailable'};
+        command['last_error'] = 'Версия наряда для этого действия неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново; удаление этой команды не отменяет уже сохранённое сервером действие.';
       } else if (command['state'] == OutboxState.running) {
         command['state'] = OutboxState.pending;
       }

@@ -14,7 +14,7 @@ class SqfliteLocalStore implements LocalStore {
   Database? _db;
   Directory? _root;
 
-  static const _schemaVersion = 2;
+  static const _schemaVersion = 3;
 
   @override
   Future<void> open() async {
@@ -41,6 +41,26 @@ class SqfliteLocalStore implements LocalStore {
             'last_error': 'Старая команда без подтверждённого сервера и аккаунта изолирована.',
           }, where: 'server_url IS NULL OR owner_id IS NULL');
         }
+        if (oldVersion < 3) {
+          await db.execute(
+            'ALTER TABLE outbox ADD COLUMN expected_version INTEGER',
+          );
+          await db.execute(
+            'ALTER TABLE outbox ADD COLUMN previous_command_id TEXT',
+          );
+          await db.update(
+            'outbox',
+            {
+              'state': OutboxState.conflict,
+              'response': jsonEncode({
+                'code': 'local_order_precondition_unavailable',
+              }),
+              'last_error': 'Версия наряда для старой команды неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново; удаление команды не отменяет уже сохранённое сервером действие.',
+            },
+            where: 'kind NOT IN (?, ?)',
+            whereArgs: [OutboxKind.createOrder, OutboxKind.markRead],
+          );
+        }
       },
     );
     _db = db;
@@ -52,7 +72,7 @@ class SqfliteLocalStore implements LocalStore {
       'CREATE TABLE snapshot (key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)',
     );
     await db.execute(
-      'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, server_url TEXT, order_id INTEGER, local_ref TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
+      'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, server_url TEXT, order_id INTEGER, local_ref TEXT, expected_version INTEGER, previous_command_id TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
     );
     await db.execute(
       'CREATE INDEX ix_outbox_state ON outbox (state, created_at)',
@@ -140,6 +160,8 @@ class SqfliteLocalStore implements LocalStore {
     'server_url': command.serverUrl,
     'order_id': command.orderId,
     'local_ref': command.localRef,
+    'expected_version': command.expectedVersion,
+    'previous_command_id': command.previousCommandId,
     'payload': jsonEncode(command.payload),
     'photo_path': command.photoPath,
     'photo_filename': command.photoFilename,
@@ -160,6 +182,8 @@ class SqfliteLocalStore implements LocalStore {
         'server_url': row['server_url'],
         'order_id': row['order_id'],
         'local_ref': row['local_ref'],
+        'expected_version': row['expected_version'],
+        'previous_command_id': row['previous_command_id'],
         'payload': jsonDecode(row['payload'] as String),
         'photo_path': row['photo_path'],
         'photo_filename': row['photo_filename'],
@@ -236,6 +260,21 @@ class SqfliteLocalStore implements LocalStore {
       'last_error':
           'Старая команда без подтверждённого сервера и аккаунта изолирована.',
     }, where: 'server_url IS NULL OR owner_id IS NULL');
+    final commands = await outbox();
+    for (final command in commands) {
+      if (command.serverUrl == null ||
+          command.ownerId == null ||
+          command.hasOrderPrecondition) {
+        continue;
+      }
+      await updateOutbox(
+        command.copyWith(
+          state: OutboxState.conflict,
+          response: {'code': 'local_order_precondition_unavailable'},
+          lastError: 'Версия наряда для этого действия неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново; удаление команды не отменяет уже сохранённое сервером действие.',
+        ),
+      );
+    }
     await _database.update(
       'outbox',
       {'state': OutboxState.pending},

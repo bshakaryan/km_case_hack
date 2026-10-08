@@ -83,6 +83,7 @@ def apply_success(db, order, attempt, job, result):
     attempt.assessment_id = assessment.id
     order.ai_review = deepcopy(result)
     order.status = "ai_review"
+    order.version += 1
     audit(db, order, "ai_review", attempt.author_id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
     notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
     db.add(IntegrationLog(adapter="ai_stub", operation="review", payload={"order_id": order.id, "attempt_id": attempt.id, "is_stub": True}))
@@ -130,6 +131,7 @@ def retire_exhausted(sessions):
             job.finished_at = utcnow()
             job.lease_token = None
             job.lease_expires_at = None
+            order.version += 1
             changed.append(order_id)
         db.commit()
     return changed
@@ -143,16 +145,21 @@ def claim_job(sessions, job_id=None, retired=None):
     eligible = or_(and_(AIReviewJob.status == "pending", AIReviewJob.next_attempt_at <= now),
         and_(AIReviewJob.status == "running", or_(AIReviewJob.lease_expires_at.is_(None), AIReviewJob.lease_expires_at <= now)))
     with sessions() as db:
-        query = select(AIReviewJob.id).where(eligible, AIReviewJob.attempts < AIReviewJob.max_attempts).order_by(AIReviewJob.id)
+        begin_sqlite_write(db)
+        query = select(AIReviewJob.id, SubmissionAttempt.order_id).join(SubmissionAttempt, SubmissionAttempt.id == AIReviewJob.attempt_id).where(eligible, AIReviewJob.attempts < AIReviewJob.max_attempts).order_by(SubmissionAttempt.order_id, AIReviewJob.id)
         if job_id is not None:
             query = query.where(AIReviewJob.id == job_id)
-        ids = list(db.scalars(query.limit(20)))
-        for candidate in ids:
+        candidates = list(db.execute(query.limit(20)))
+        for candidate, order_id in candidates:
+            # Match finish/retry lock order before mutating the public job
+            # snapshot and its parent optimistic version in one transaction.
+            order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
             token = uuid4().hex
             changed = db.execute(update(AIReviewJob).where(AIReviewJob.id == candidate, eligible, AIReviewJob.attempts < AIReviewJob.max_attempts).values(
                 status="running", attempts=AIReviewJob.attempts + 1, lease_token=token,
                 lease_expires_at=now + timedelta(seconds=LEASE_SECONDS), finished_at=None).returning(AIReviewJob.attempt_id)).scalar_one_or_none()
             if changed is not None:
+                order.version += 1
                 attempt = db.get(SubmissionAttempt, changed)
                 claim = {"job_id": candidate, "token": token, "attempt_id": changed, "order_id": attempt.order_id,
                     "snapshot": review_snapshot(db, attempt)}
@@ -182,6 +189,7 @@ def finish_job(sessions, claim, result=None, error_code=None):
             job.last_error_code = None
             job.lease_token = None
             job.lease_expires_at = None
+            order.version += 1
         elif error_code:
             # Only fixed internal codes enter the database; never exception text.
             job.last_error_code = error_code if error_code in {"invalid_result", "provider_error"} else "provider_error"
@@ -190,6 +198,7 @@ def finish_job(sessions, claim, result=None, error_code=None):
             job.finished_at = utcnow() if job.status == "failed" else None
             job.lease_token = None
             job.lease_expires_at = None
+            order.version += 1
         else:
             apply_success(db, order, attempt, job, result)
         db.commit()

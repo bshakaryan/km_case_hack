@@ -50,16 +50,18 @@ class _CreateController extends AppController {
   ApiException? uploadFailure;
 
   @override
-  Future<void> uploadPhoto(
+  Future<String> uploadPhoto(
     int id,
     Uint8List bytes,
     String filename,
-    String kind,
-  ) async {
+    String kind, {
+    OrderWriteBasis? basis,
+  }) async {
     expect(id, 42);
     expect(kind, 'before');
     uploads.add(filename);
     if (uploadFailure != null && uploads.length == 2) throw uploadFailure!;
+    return 'test-photo-${uploads.length}';
   }
 
   @override
@@ -69,6 +71,7 @@ class _CreateController extends AppController {
     return WorkOrder.fromJson({
       ...data,
       'id': 42,
+      'version': 1,
       'number': 'Н-2026-42',
       'status': 'issued',
       'normal_hours': 2,

@@ -13,6 +13,7 @@ import 'package:naryad_ai/ui.dart';
 
 WorkOrder cachedOrder(String status) => WorkOrder.fromJson({
   'id': 9,
+  'version': 1,
   'number': 'AUDIT-9',
   'title': 'Проверить крепление двигателя',
   'description': 'Проверить крепление и выполнить контрольный запуск.',

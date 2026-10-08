@@ -809,6 +809,21 @@ class AppController extends ChangeNotifier {
             _resolvedIds[command.localRef] == id),
   );
   bool isOrderPending(int id) => hasQueuedWritesForOrder(id);
+  OrderWriteBasis captureOrderBasis(WorkOrder order) {
+    OutboxCommand? predecessor;
+    for (final command in _outboxCache) {
+      if (command.kind != OutboxKind.markRead &&
+          (command.orderId == order.id ||
+              command.localRef == '${order.id}' ||
+              _resolvedIds[command.localRef] == order.id)) {
+        predecessor = command;
+      }
+    }
+    return predecessor == null
+        ? OrderWriteBasis(expectedVersion: order.version)
+        : OrderWriteBasis(previousCommandId: predecessor.commandId);
+  }
+
   bool get hasPendingWrites =>
       _outboxCache.any((command) => command.state != OutboxState.conflict);
   List<OutboxCommand> get conflictCommands => _outboxCache
@@ -874,6 +889,7 @@ class AppController extends ChangeNotifier {
         data.remove('_pending_sync');
         return WorkOrder.fromJson(data);
       }).toList();
+      final blockedOrders = <int>{};
       for (final command in relevant) {
         if (command.kind == OutboxKind.markRead) continue;
         final id =
@@ -891,7 +907,8 @@ class AppController extends ChangeNotifier {
         final data = Map<String, dynamic>.from(existing.data);
         data['_pending_sync'] = true;
         data['_server_status'] ??= data['status'];
-        if (command.state != OutboxState.conflict) {
+        if (command.state == OutboxState.conflict) blockedOrders.add(id);
+        if (!blockedOrders.contains(id)) {
           if (command.kind == OutboxKind.transition) {
             data['status'] = _transitionedStatus(
               command.payload['action'] as String,
@@ -925,7 +942,7 @@ class AppController extends ChangeNotifier {
           break;
         }
       }
-      if (command == null) return;
+      if (command == null || !command.canRetry) return;
       await store.updateOutbox(
         command.copyWith(
           state: OutboxState.pending,
@@ -1136,12 +1153,16 @@ class AppController extends ChangeNotifier {
           : OutboxState.conflict;
       final message = exhausted
           ? 'Не удалось отправить после повторных попыток: ${failure.toString()}'
+          : failure.code == 'order_version_conflict' ||
+                failure.code == 'order_precondition_unavailable'
+          ? '${failure.message} Текст и фото сохранены. Удалите эту цепочку из очереди, обновите наряд и создайте нужное действие заново.'
           : failure.toString();
       await store.updateOutbox(
         command.copyWith(
           state: state,
           attempts: command.attempts + 1,
           responseStatus: failure.statusCode,
+          response: failure.detail,
           lastError: message,
         ),
       );
@@ -1165,6 +1186,13 @@ class AppController extends ChangeNotifier {
     OutboxCommand command,
     int orderId,
   ) async {
+    if (!command.hasOrderPrecondition) {
+      throw const ApiException(
+        'Версия наряда неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново.',
+        428,
+        detail: {'code': 'local_order_precondition_unavailable'},
+      );
+    }
     switch (command.kind) {
       case OutboxKind.createOrder:
         final result = await source.createOrder(
@@ -1185,12 +1213,16 @@ class AppController extends ChangeNotifier {
           reason: command.payload['reason'] as String?,
           score: (command.payload['score'] as num?)?.toDouble(),
           commandId: command.commandId,
+          expectedVersion: command.expectedVersion,
+          previousCommandId: command.previousCommandId,
         );
       case OutboxKind.complete:
         return source.complete(
           orderId,
           command.payload,
           commandId: command.commandId,
+          expectedVersion: command.expectedVersion,
+          previousCommandId: command.previousCommandId,
         );
       case OutboxKind.uploadPhoto:
         final bytes = await store.outboxPhoto(command.commandId);
@@ -1203,8 +1235,10 @@ class AppController extends ChangeNotifier {
           command.photoFilename ?? 'photo.jpg',
           command.photoKind ?? 'before',
           commandId: command.commandId,
+          expectedVersion: command.expectedVersion,
+          previousCommandId: command.previousCommandId,
         );
-        return null;
+        return command.commandId;
       case OutboxKind.markRead:
         await source.markRead(orderId);
         return null;
@@ -1222,6 +1256,7 @@ class AppController extends ChangeNotifier {
     String? photoKind,
     int? orderId,
     String? localRef,
+    OrderWriteBasis? basis,
   }) async {
     if (user == null) throw const ApiException('Войдите в приложение.', 401);
     if (saving) {
@@ -1261,6 +1296,28 @@ class AppController extends ChangeNotifier {
       for (final item in previous) {
         if (item.createdAt >= createdAt) createdAt = item.createdAt + 1;
       }
+      final probe = OutboxCommand(
+        commandId: commandId,
+        kind: kind,
+        createdAt: createdAt,
+        ownerId: ownerId,
+        serverUrl: source.baseUrl,
+        orderId: orderId,
+        localRef: localRef,
+      );
+      final lane = await _lane(store, probe);
+      OutboxCommand? predecessor;
+      if (basis == null &&
+          kind != OutboxKind.createOrder &&
+          kind != OutboxKind.markRead) {
+        for (final item in previous) {
+          if (await _lane(store, item) == lane) predecessor = item;
+        }
+      }
+      final cachedId = orderId ?? int.tryParse(localRef ?? '');
+      final cached = orders.where((order) => order.id == cachedId).firstOrNull;
+      final capturedBasis =
+          basis ?? OrderWriteBasis(expectedVersion: cached?.version);
       // Both the key and media must exist on disk BEFORE any HTTP write.
       // A killed process can then replay the exact same command safely.
       late OutboxCommand command;
@@ -1274,6 +1331,11 @@ class AppController extends ChangeNotifier {
             ownerId: ownerId,
             orderId: orderId,
             localRef: localRef,
+            expectedVersion: predecessor == null
+                ? capturedBasis.expectedVersion
+                : null,
+            previousCommandId:
+                predecessor?.commandId ?? capturedBasis.previousCommandId,
             payload: jsonDecode(jsonEncode(payload)) as Json,
             photoFilename: photoFilename,
             photoKind: photoKind,
@@ -1303,6 +1365,23 @@ class AppController extends ChangeNotifier {
             : result;
       }
 
+      if (!command.hasOrderPrecondition) {
+        await store.updateOutbox(
+          command.copyWith(
+            state: OutboxState.conflict,
+            response: {'code': 'local_order_precondition_unavailable'},
+            lastError: 'Версия наряда неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново.',
+          ),
+        );
+        await _reloadOutbox();
+        await _persistSnapshot(session, force: true);
+        throw const ApiException(
+          'Версия наряда неизвестна. Действие сохранено в очереди как конфликт. Обновите наряд и создайте действие заново.',
+          428,
+          detail: {'code': 'local_order_precondition_unavailable'},
+        );
+      }
+
       var resolvedId = orderId;
       if (resolvedId == null &&
           localRef != null &&
@@ -1311,7 +1390,6 @@ class AppController extends ChangeNotifier {
           _scope(localRef, source: source, ownerId: ownerId),
         );
       }
-      final lane = await _lane(store, command);
       var hasPredecessor = false;
       for (final item in previous) {
         if (await _lane(store, item) == lane) {
@@ -1391,6 +1469,21 @@ class AppController extends ChangeNotifier {
           rethrow;
         }
         if (failure.statusCode != 0 && !failure.requestMayHaveSucceeded) {
+          if (failure.code == 'order_version_conflict' ||
+              failure.code == 'order_precondition_unavailable') {
+            await store.updateOutbox(
+              command.copyWith(
+                state: OutboxState.conflict,
+                responseStatus: failure.statusCode,
+                response: failure.detail,
+                lastError:
+                    '${failure.message} Текст и фото сохранены. Удалите эту цепочку из очереди, обновите наряд и создайте нужное действие заново.',
+              ),
+            );
+            await _reloadOutbox();
+            await _persistSnapshot(session, force: true);
+            rethrow;
+          }
           await store.removeOutbox(commandId);
           await _reloadOutbox();
           rethrow;
@@ -1531,12 +1624,14 @@ class AppController extends ChangeNotifier {
     String action, {
     String? reason,
     double? score,
+    OrderWriteBasis? basis,
   }) async {
     final result = await _save(
       kind: OutboxKind.transition,
       payload: {'action': action, 'reason': reason, 'score': score},
       orderId: id >= 0 ? id : null,
       localRef: id < 0 ? '$id' : null,
+      basis: basis,
       onOffline: (command) {
         final updated = _offlineOrderState(id, score: score);
         final data = Map<String, dynamic>.from(updated.data);
@@ -1559,12 +1654,17 @@ class AppController extends ChangeNotifier {
     return result as WorkOrder;
   }
 
-  Future<WorkOrder> complete(int id, Json data) async {
+  Future<WorkOrder> complete(
+    int id,
+    Json data, {
+    OrderWriteBasis? basis,
+  }) async {
     final result = await _save(
       kind: OutboxKind.complete,
       payload: data,
       orderId: id >= 0 ? id : null,
       localRef: id < 0 ? '$id' : null,
+      basis: basis,
       onOffline: (command) {
         final updated = _offlineOrderState(id);
         final updatedData = Map<String, dynamic>.from(updated.data);
@@ -1580,7 +1680,11 @@ class AppController extends ChangeNotifier {
   }
 
   // This gateway has no client-command key: never enqueue or replay its POST.
-  Future<WorkOrder> retryAiReview(int id, int attemptId) async {
+  Future<WorkOrder> retryAiReview(
+    int id,
+    int attemptId, {
+    OrderWriteBasis? basis,
+  }) async {
     if (user == null) throw const ApiException('Войдите в приложение.', 401);
     final current = orders.where((order) => order.id == id).firstOrNull;
     if (!user!.isMaster ||
@@ -1597,6 +1701,12 @@ class AppController extends ChangeNotifier {
         0,
       );
     }
+    final expectedVersion = basis == null
+        ? current?.version
+        : basis.expectedVersion;
+    if (expectedVersion == null) {
+      throw const ApiException('Обновите наряд перед повтором проверки.', 428);
+    }
     if (saving) {
       throw const ApiException(
         'Дождитесь завершения предыдущего действия.',
@@ -1608,7 +1718,11 @@ class AppController extends ChangeNotifier {
     saving = true;
     _notify();
     try {
-      final response = await source.retryAiReview(id, attemptId);
+      final response = await source.retryAiReview(
+        id,
+        attemptId,
+        expectedVersion: expectedVersion,
+      );
       if (!_current(session)) {
         throw const ApiException(
           'Сессия изменилась. Проверьте результат повтора.',
@@ -1617,6 +1731,21 @@ class AppController extends ChangeNotifier {
         );
       }
       final previous = orders.firstWhere((order) => order.id == id);
+      final replyVersion = response['order_version'];
+      if (replyVersion is! int ||
+          replyVersion < 1 ||
+          replyVersion < expectedVersion) {
+        throw const ApiException(
+          'Сервер не подтвердил версию наряда. Повтор мог сохраниться; обновите карточку перед новым действием.',
+          200,
+          requestMayHaveSucceeded: true,
+        );
+      }
+      if (response['order_version'] is int &&
+          previous.version != null &&
+          (response['order_version'] as int) < previous.version!) {
+        return previous;
+      }
       if (previous.submissionAttempts.isNotEmpty &&
           previous.submissionAttempts.last['id'] != response['attempt_id']) {
         return await loadOrder(id);
@@ -1639,6 +1768,8 @@ class AppController extends ChangeNotifier {
       }
       final updated = WorkOrder.fromJson({
         ...previous.data,
+        if (response['order_version'] is int)
+          'version': response['order_version'],
         'ai_review': response['ai_review'],
         'ai_review_job': response['job'],
         'submission_attempts': previous.submissionAttempts
@@ -1675,28 +1806,31 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> uploadPhoto(
+  Future<String> uploadPhoto(
     int id,
     Uint8List bytes,
     String filename,
-    String kind,
-  ) async {
+    String kind, {
+    OrderWriteBasis? basis,
+  }) async {
     if (!['before', 'after'].contains(kind)) {
       throw const ApiException('Неизвестный тип фотографии.', 422);
     }
     if (bytes.length > 10 * 1024 * 1024) {
       throw const ApiException('Фотография больше допустимых 10 МБ.', 413);
     }
-    await _save(
+    final result = await _save(
       kind: OutboxKind.uploadPhoto,
       payload: {'order_id': id},
       orderId: id >= 0 ? id : null,
       localRef: id < 0 ? '$id' : null,
+      basis: basis,
       photoBytes: bytes,
       photoFilename: filename,
       photoKind: kind,
-      onOffline: (_) => null,
+      onOffline: (command) => command.commandId,
     );
+    return result as String;
   }
 
   Future<void> markRead(int id) async {

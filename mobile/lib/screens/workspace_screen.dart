@@ -553,11 +553,12 @@ class SyncQueueDialog extends StatelessWidget {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        IconButton(
-                          onPressed: () => _retry(context, command),
-                          tooltip: 'Отправить снова',
-                          icon: const Icon(Icons.replay),
-                        ),
+                        if (command.canRetry)
+                          IconButton(
+                            onPressed: () => _retry(context, command),
+                            tooltip: 'Отправить снова',
+                            icon: const Icon(Icons.replay),
+                          ),
                         IconButton(
                           onPressed: () => _discard(context, command),
                           tooltip: 'Удалить команду',

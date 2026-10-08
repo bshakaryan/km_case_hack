@@ -80,8 +80,10 @@ class Order(Base):
         CheckConstraint("work_type IN ('planned','unplanned')", name="ck_order_work_type"),
         CheckConstraint("normal_hours > 0", name="ck_order_hours"),
         CheckConstraint("score IS NULL OR (score >= 1 AND score <= 5)", name="ck_order_score"),
+        CheckConstraint("version > 0", name="ck_order_version"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(default=1)
     number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
@@ -146,7 +148,10 @@ class Notification(Base):
 
 class ClientCommand(Base):
     __tablename__ = "client_commands"
-    __table_args__ = (UniqueConstraint("employee_id", "client_id", name="uq_client_command_employee_client"),)
+    __table_args__ = (
+        UniqueConstraint("employee_id", "client_id", name="uq_client_command_employee_client"),
+        CheckConstraint("(order_id IS NULL AND order_version IS NULL) OR (order_id IS NOT NULL AND order_version IS NOT NULL AND order_version > 0)", name="ck_client_command_order_receipt"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
     client_id: Mapped[str] = mapped_column(String(64))
@@ -154,6 +159,8 @@ class ClientCommand(Base):
     request_hash: Mapped[str] = mapped_column(String(64))
     response_status: Mapped[int | None] = mapped_column(Integer)
     response_body: Mapped[dict | None] = mapped_column(JSON)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"))
+    order_version: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

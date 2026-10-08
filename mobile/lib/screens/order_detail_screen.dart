@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../data/app_controller.dart';
 import '../data/api.dart';
+import '../data/local_store.dart';
 import '../data/models.dart';
 import '../ui.dart' as app_ui;
 import '../widgets/order_photo.dart';
@@ -108,6 +109,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       final updated = await widget.controller.retryAiReview(
         order.id,
         (order.aiReviewJob!['attempt_id'] as num).toInt(),
+        basis: OrderWriteBasis(expectedVersion: order.version),
       );
       if (!mounted) return;
       setState(() {
@@ -171,7 +173,12 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     });
   }
 
-  Future<void> _act(String action, {String? reason, double? score}) async {
+  Future<void> _act(
+    String action, {
+    String? reason,
+    double? score,
+    OrderWriteBasis? basis,
+  }) async {
     if (_busy) return;
     _revision++;
     setState(() {
@@ -184,6 +191,11 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         action,
         reason: reason,
         score: score,
+        basis:
+            basis ??
+            (_order == null
+                ? const OrderWriteBasis()
+                : widget.controller.captureOrderBasis(_order!)),
       );
       if (!mounted) return;
       setState(() {
@@ -211,6 +223,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   }
 
   Future<void> _reason(String action, String title) async {
+    final basis = _order == null
+        ? const OrderWriteBasis()
+        : widget.controller.captureOrderBasis(_order!);
     final controller = TextEditingController();
     final key = GlobalKey<FormState>();
     final result = await showDialog<String>(
@@ -252,10 +267,15 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       ),
     );
     // The dialog route may still animate; the controller is no longer modified.
-    if (result != null && mounted) await _act(action, reason: result);
+    if (result != null && mounted) {
+      await _act(action, reason: result, basis: basis);
+    }
   }
 
   Future<void> _closeOrder() async {
+    final basis = _order == null
+        ? const OrderWriteBasis()
+        : widget.controller.captureOrderBasis(_order!);
     double? selected;
     final score = await showDialog<double>(
       context: context,
@@ -316,7 +336,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
       ),
     );
-    if (score != null && mounted) await _act('close', score: score);
+    if (score != null && mounted) {
+      await _act('close', score: score, basis: basis);
+    }
   }
 
   Future<void> _complete() async {

@@ -22,6 +22,14 @@ def dump(engine):
                 for name, table in metadata.tables.items() if name != "alembic_version"}
 
 
+def without_versions(state):
+    """Compare older snapshots while separately testing new version columns."""
+    return {name: [{key: value for key, value in row.items()
+        if not (name == "orders" and key == "version")
+        and not (name == "client_commands" and key in {"order_id", "order_version"})} for row in rows]
+        for name, rows in state.items()}
+
+
 def check_preservation(engine):
     revision(engine, "0002_client_commands")
     fill_legacy(engine, True)
@@ -39,7 +47,7 @@ def check_preservation(engine):
     before = dump(engine)
     upgrade_database(engine)
     after = dump(engine)
-    assert {name: rows for name, rows in after.items() if name not in HISTORY | {"ai_review_jobs"}} == before
+    assert without_versions({name: rows for name, rows in after.items() if name not in HISTORY | {"ai_review_jobs"}}) == before
     assert not after["ai_review_jobs"]
     assignments = after["order_assignments"]
     assert len(assignments) == 5

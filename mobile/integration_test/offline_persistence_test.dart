@@ -63,6 +63,7 @@ void main() {
       try {
         if (saved == null) {
           await _verifyLegacyUpgrade('$directory-legacy');
+          await _verifyLegacyUpgrade('$directory-legacy-v2', fromVersion: 2);
           await const FlutterSecureStorage().delete(
             key: 'naryad.native.session.v1',
           );
@@ -408,20 +409,20 @@ Uint8List _picture(int green) {
   return Uint8List.fromList(img.encodePng(image));
 }
 
-Future<void> _verifyLegacyUpgrade(String path) async {
+Future<void> _verifyLegacyUpgrade(String path, {int fromVersion = 1}) async {
   await Directory(path).create(recursive: true);
   final bytes = _picture(120);
   final photoPath = '$path/legacy.photo';
   await File(photoPath).writeAsBytes(bytes, flush: true);
   final database = await openDatabase(
     '$path/local_store.db',
-    version: 1,
+    version: fromVersion,
     onCreate: (db, version) async {
       await db.execute(
         'CREATE TABLE snapshot (key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)',
       );
       await db.execute(
-        'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, order_id INTEGER, local_ref TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
+        'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, ${fromVersion >= 2 ? "server_url TEXT," : ""} order_id INTEGER, local_ref TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
       );
       await db.execute(
         'CREATE INDEX ix_outbox_state ON outbox (state, created_at)',
@@ -448,8 +449,9 @@ Future<void> _verifyLegacyUpgrade(String path) async {
     'kind': OutboxKind.uploadPhoto,
     'created_at': 1,
     'owner_id': 6,
+    if (fromVersion >= 2) 'server_url': NaryadApi.normalizeBaseUrl(_baseUrl),
     'order_id': 9,
-    'payload': '{}',
+    'payload': jsonEncode({'work_done': 'Preserve the legacy draft text'}),
     'photo_path': photoPath,
     'photo_filename': 'legacy.png',
     'photo_kind': 'after',
@@ -461,15 +463,22 @@ Future<void> _verifyLegacyUpgrade(String path) async {
   try {
     await migrated.open();
     final legacy = (await migrated.outbox()).single;
-    expect(legacy.serverUrl, isNull);
+    expect(
+      legacy.serverUrl,
+      fromVersion == 1 ? null : NaryadApi.normalizeBaseUrl(_baseUrl),
+    );
     expect(legacy.state, OutboxState.conflict);
+    expect(legacy.expectedVersion, isNull);
+    expect(legacy.previousCommandId, isNull);
+    expect(legacy.canRetry, isFalse);
+    expect(legacy.payload['work_done'], 'Preserve the legacy draft text');
     expect(await migrated.outboxPhoto(legacy.commandId), orderedEquals(bytes));
     expect((await migrated.getSnapshot('profile'))?.data, isNotNull);
     await migrated.open();
     expect((await migrated.outbox()).single.state, OutboxState.conflict);
     _step('STORE_UPGRADE_PASS', {
-      'from': 1,
-      'to': 2,
+      'from': fromVersion,
+      'to': 3,
       'quarantined': 1,
       'mediaPreserved': true,
     });

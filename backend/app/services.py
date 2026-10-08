@@ -91,7 +91,7 @@ def order_dict(db, order, detail=False, refs=None, positions=None, statuses=None
     area = refs.get("areas", {}).get(order.area_id) or db.get(Area, order.area_id)
     equipment = refs.get("equipment", {}).get(order.equipment_id) or db.get(Equipment, order.equipment_id)
     employee = refs.get("employees", {}).get(order.assignee_id) or db.get(Employee, order.assignee_id)
-    result = {key: getattr(order, key) for key in ["id", "number", "title", "description", "work_type", "area_id", "equipment_id", "assignee_id", "brigade_id", "master_id", "priority", "status", "comment", "normal_hours", "downtime_minutes", "score"]}
+    result = {key: getattr(order, key) for key in ["id", "version", "number", "title", "description", "work_type", "area_id", "equipment_id", "assignee_id", "brigade_id", "master_id", "priority", "status", "comment", "normal_hours", "downtime_minutes", "score"]}
     if order.status == "accepted":
         statuses = statuses if statuses is not None else effective_queue_statuses(db)
         if order.id in statuses:

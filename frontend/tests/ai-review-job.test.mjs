@@ -45,6 +45,7 @@ const job = (status, overrides = {}) => ({
 });
 const order = {
   id: 9,
+  version: 4,
   status: "completed",
   ai_review: { explanation: "OLD_RESULT" },
   ai_review_job: job("failed"),
@@ -156,7 +157,12 @@ test("retry uses one authenticated POST and only replaces AI metadata for its at
   });
   globalThis.localStorage = { getItem: () => "synthetic-bearer" };
   const calls = [];
-  const response = { attempt_id: 2, ai_review: null, job: job("pending") };
+  const response = {
+    attempt_id: 2,
+    order_version: 5,
+    ai_review: null,
+    job: job("pending"),
+  };
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options });
     return new Response(JSON.stringify(response), {
@@ -164,7 +170,7 @@ test("retry uses one authenticated POST and only replaces AI metadata for its at
       headers: { "content-type": "application/json" },
     });
   };
-  const pending = applyAiReviewJob(order, await requestAiReviewRetry(9, 2));
+  const pending = applyAiReviewJob(order, await requestAiReviewRetry(9, 2, 4));
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "/api/orders/9/submissions/2/ai-review/retry");
   assert.equal(calls[0].options.method, "POST");
@@ -173,8 +179,10 @@ test("retry uses one authenticated POST and only replaces AI metadata for its at
     "Bearer synthetic-bearer",
   );
   assert.equal(calls[0].options.headers.has("X-Client-Command-Id"), false);
+  assert.equal(calls[0].options.headers.get("X-Expected-Order-Version"), "4");
   assert.equal(calls[0].options.body, "{}");
   assert.equal(pending.ai_review_job.status, "pending");
+  assert.equal(pending.version, 5);
   assert.equal(pending.ai_review, null);
   assert.equal(
     pending.submission_attempts[0].ai_review.explanation,
@@ -219,7 +227,7 @@ test("unknown retry outcome is surfaced once without automatic replay", async (t
     throw new TypeError("Synthetic disconnect");
   };
   await assert.rejects(
-    requestAiReviewRetry(9, 2),
+    requestAiReviewRetry(9, 2, 4),
     (failure) => failure.requestMayHaveSucceeded === true,
   );
   assert.equal(calls, 1);
@@ -227,4 +235,41 @@ test("unknown retry outcome is surfaced once without automatic replay", async (t
     render({ job: job("failed"), onRetry() {}, uncertain: true }),
     /disabled=""/,
   );
+});
+
+test("a retry receipt for an older order version cannot restore an old job", () => {
+  const current = { ...order, version: 6 };
+  assert.equal(
+    applyAiReviewJob(current, {
+      attempt_id: 2,
+      order_version: 5,
+      ai_review: null,
+      job: job("pending"),
+    }),
+    current,
+  );
+});
+
+test("a retry success without a usable version remains an unknown write outcome", async (t) => {
+  const previousFetch = globalThis.fetch;
+  const previousStorage = globalThis.localStorage;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    globalThis.localStorage = previousStorage;
+  });
+  globalThis.localStorage = { getItem: () => "synthetic-bearer" };
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({
+      attempt_id: 2,
+      ai_review: null,
+      job: job("pending"),
+    });
+  };
+  await assert.rejects(
+    requestAiReviewRetry(9, 2, 4),
+    (failure) => failure.requestMayHaveSucceeded === true,
+  );
+  assert.equal(calls, 1);
 });

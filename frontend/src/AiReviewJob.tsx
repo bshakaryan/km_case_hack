@@ -1,5 +1,5 @@
 import type { AiReviewJob, AttemptAiReview, OrderDetail } from "./model";
-import { post } from "./model";
+import { confirmedOrderVersion, postOrder } from "./model";
 
 export function showAiReview(job?: AiReviewJob | null) {
   return !job || job.status === "succeeded";
@@ -20,14 +20,18 @@ export function canRetryAiReview(order: OrderDetail, role: string) {
   );
 }
 
-export function requestAiReviewRetry(
+export async function requestAiReviewRetry(
   orderId: OrderDetail["id"],
   attemptId: AiReviewJob["attempt_id"],
+  version: number,
 ) {
-  return post<AttemptAiReview>(
+  const response = await postOrder<AttemptAiReview>(
     `/orders/${orderId}/submissions/${attemptId}/ai-review/retry`,
+    version,
     {},
   );
+  confirmedOrderVersion(response.order_version, version);
+  return response;
 }
 
 export function applyAiReviewJob(
@@ -35,6 +39,7 @@ export function applyAiReviewJob(
   response: AttemptAiReview,
 ): OrderDetail {
   const latest = order.submission_attempts?.at(-1);
+  if (response.order_version < order.version) return order;
   if (latest && String(latest.id) !== String(response.attempt_id)) return order;
   const advancedStates = ["running", "succeeded", "superseded"];
   if (
@@ -48,6 +53,7 @@ export function applyAiReviewJob(
     return order;
   return {
     ...order,
+    version: response.order_version ?? order.version,
     ai_review: response.ai_review,
     ai_review_job: response.job,
     submission_attempts: order.submission_attempts?.map((attempt) =>

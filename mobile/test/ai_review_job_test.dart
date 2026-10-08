@@ -34,6 +34,7 @@ Json review(String explanation) => {
 };
 Json detail(String status, {String orderStatus = 'completed'}) => {
   'id': 9,
+  'version': 1,
   'number': 'AI-JOB-9',
   'title': 'Проверить насос',
   'description': 'Осмотреть насос и проверить крепление.',
@@ -80,7 +81,14 @@ Json detail(String status, {String orderStatus = 'completed'}) => {
   ],
 };
 http.Response jsonResponse(Object payload) => http.Response(
-  jsonEncode(payload),
+  jsonEncode(
+    payload is Json &&
+            payload.containsKey('attempt_id') &&
+            payload.containsKey('job') &&
+            !payload.containsKey('order_version')
+        ? {'order_version': 2, ...payload}
+        : payload,
+  ),
   200,
   headers: {'content-type': 'application/json'},
 );
@@ -112,6 +120,44 @@ Future<void> openDetail(WidgetTester tester, AppController controller) async {
 }
 
 void main() {
+  test('an unusable AI retry version leaves the outcome uncertain and the previous order intact', () async {
+    for (final invalidVersion in <Object?>[null, 0, -1, '8', 8.5, 6]) {
+      final store = MemoryLocalStore();
+      var requests = 0;
+      final controller =
+          controllerFor(
+              store,
+              MockClient((request) async {
+                requests++;
+                expect(request.headers['x-expected-order-version'], '7');
+                return jsonResponse({
+                  'attempt_id': 2,
+                  'ai_review': null,
+                  'job': job('pending'),
+                  'order_version': invalidVersion,
+                });
+              }),
+            )
+            ..orders = [
+              WorkOrder.fromJson({...detail('failed'), 'version': 7}),
+            ];
+      addTearDown(controller.dispose);
+      await expectLater(
+        controller.retryAiReview(9, 2),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.requestMayHaveSucceeded,
+            'uncertain result',
+            isTrue,
+          ),
+        ),
+      );
+      expect(requests, 1);
+      expect(controller.orders.single.version, 7);
+      expect(controller.orders.single.aiReviewJob?['status'], 'failed');
+      expect(await store.outbox(), isEmpty);
+    }
+  });
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});

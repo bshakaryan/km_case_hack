@@ -14,6 +14,7 @@ WorkOrder _order({
   bool previous = true,
 }) => WorkOrder.fromJson({
   'id': 1,
+  'version': 1,
   'number': 'Н-2026-001',
   'title': 'Замена подшипника привода',
   'description': 'Заменить подшипник и проверить конвейер под нагрузкой.',
@@ -71,7 +72,11 @@ class _Controller extends AppController {
   Json? payload;
 
   @override
-  Future<WorkOrder> complete(int id, Json data) async {
+  Future<WorkOrder> complete(
+    int id,
+    Json data, {
+    OrderWriteBasis? basis,
+  }) async {
     submissions++;
     payload = data;
     if (uncertain) {

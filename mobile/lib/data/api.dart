@@ -11,12 +11,16 @@ class ApiException implements Exception {
     this.message,
     this.statusCode, {
     this.requestMayHaveSucceeded = false,
+    this.detail,
   });
 
   final String message;
   // Zero means that no usable HTTP response was received.
   final int statusCode;
   final bool requestMayHaveSucceeded;
+  final Json? detail;
+  String? get code =>
+      detail?['code'] is String ? detail!['code'] as String : null;
 
   @override
   String toString() => message;
@@ -65,6 +69,7 @@ class NaryadApi {
           _errorMessage(response),
           response.statusCode,
           requestMayHaveSucceeded: changesData && response.statusCode >= 500,
+          detail: _errorDetail(response),
         );
       }
       return response;
@@ -94,6 +99,9 @@ class NaryadApi {
       final body = jsonDecode(utf8.decode(response.bodyBytes));
       final detail = body is Map ? body['detail'] : null;
       if (detail is String && detail.isNotEmpty) return detail;
+      if (detail is Map && detail['message'] is String) {
+        return detail['message'] as String;
+      }
       if (detail is List) {
         final messages = detail
             .whereType<Map>()
@@ -122,14 +130,47 @@ class NaryadApi {
     };
   }
 
+  static Json? _errorDetail(http.Response response) {
+    try {
+      final body = jsonDecode(utf8.decode(response.bodyBytes));
+      final detail = body is Map ? body['detail'] : null;
+      return detail is Map ? Map<String, dynamic>.from(detail) : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  static void _orderPrecondition(
+    http.BaseRequest request, {
+    int? expectedVersion,
+    String? previousCommandId,
+  }) {
+    if (expectedVersion != null && previousCommandId != null) {
+      throw const ApiException('У действия два несовместимых основания.', 422);
+    }
+    if (expectedVersion != null) {
+      request.headers['X-Expected-Order-Version'] = '$expectedVersion';
+    }
+    if (previousCommandId != null) {
+      request.headers['X-Previous-Client-Command-Id'] = previousCommandId;
+    }
+  }
+
   Future<dynamic> _json(
     String path, {
     String method = 'GET',
     Json? body,
     String? commandId,
+    int? expectedVersion,
+    String? previousCommandId,
   }) async {
     final request = http.Request(method, Uri.parse('$baseUrl$path'));
     request.headers.addAll(_headers);
+    _orderPrecondition(
+      request,
+      expectedVersion: expectedVersion,
+      previousCommandId: previousCommandId,
+    );
     if (commandId != null) {
       request.headers['X-Client-Command-Id'] = commandId;
     }
@@ -154,12 +195,16 @@ class NaryadApi {
     String method = 'GET',
     Json? body,
     String? commandId,
+    int? expectedVersion,
+    String? previousCommandId,
   }) async {
     final result = await _json(
       path,
       method: method,
       body: body,
       commandId: commandId,
+      expectedVersion: expectedVersion,
+      previousCommandId: previousCommandId,
     );
     if (result is Map<String, dynamic>) return result;
     throw ApiException(
@@ -201,8 +246,22 @@ class NaryadApi {
   Future<Json> analytics() => _object('/analytics');
   Future<WorkOrder> order(int id) async =>
       WorkOrder.fromJson(await _object('/orders/$id'));
+
+  static WorkOrder _orderReceipt(Json data, {int? expectedVersion}) {
+    final result = WorkOrder.fromJson(data);
+    if (result.version == null ||
+        (expectedVersion != null && result.version! < expectedVersion)) {
+      throw const ApiException(
+        'Сервер не подтвердил версию сохранённого действия. Обновите карточку; действие могло сохраниться.',
+        200,
+        requestMayHaveSucceeded: true,
+      );
+    }
+    return result;
+  }
+
   Future<WorkOrder> createOrder(Json data, {String? commandId}) async =>
-      WorkOrder.fromJson(
+      _orderReceipt(
         await _object(
           '/orders',
           method: 'POST',
@@ -216,38 +275,58 @@ class NaryadApi {
     String? reason,
     double? score,
     String? commandId,
-  }) async => WorkOrder.fromJson(
+    int? expectedVersion,
+    String? previousCommandId,
+  }) async => _orderReceipt(
     await _object(
       '/orders/$id/transition',
       method: 'POST',
       body: {'action': action, 'reason': ?reason, 'score': ?score},
       commandId: commandId,
+      expectedVersion: expectedVersion,
+      previousCommandId: previousCommandId,
     ),
+    expectedVersion: expectedVersion,
   );
-  Future<WorkOrder> complete(int id, Json data, {String? commandId}) async =>
-      WorkOrder.fromJson(
-        await _object(
-          '/orders/$id/complete',
-          method: 'POST',
-          body: data,
-          commandId: commandId,
-        ),
-      );
+  Future<WorkOrder> complete(
+    int id,
+    Json data, {
+    String? commandId,
+    int? expectedVersion,
+    String? previousCommandId,
+  }) async => _orderReceipt(
+    await _object(
+      '/orders/$id/complete',
+      method: 'POST',
+      body: data,
+      commandId: commandId,
+      expectedVersion: expectedVersion,
+      previousCommandId: previousCommandId,
+    ),
+    expectedVersion: expectedVersion,
+  );
 
   Future<Json> attemptAiReview(int orderId, int attemptId) =>
       _object('/orders/$orderId/submissions/$attemptId/ai-review');
-  Future<Json> retryAiReview(int orderId, int attemptId) => _object(
+  Future<Json> retryAiReview(
+    int orderId,
+    int attemptId, {
+    int? expectedVersion,
+  }) => _object(
     '/orders/$orderId/submissions/$attemptId/ai-review/retry',
     method: 'POST',
     body: <String, dynamic>{},
+    expectedVersion: expectedVersion,
   );
 
-  Future<void> uploadPhoto(
+  Future<Json> uploadPhoto(
     int id,
     Uint8List bytes,
     String filename,
     String kind, {
     String? commandId,
+    int? expectedVersion,
+    String? previousCommandId,
   }) async {
     if (!['before', 'after'].contains(kind)) {
       throw const ApiException('Неизвестный тип фотографии.', 422);
@@ -265,7 +344,29 @@ class NaryadApi {
     if (commandId != null) {
       request.headers['X-Client-Command-Id'] = commandId;
     }
-    await _send(request);
+    _orderPrecondition(
+      request,
+      expectedVersion: expectedVersion,
+      previousCommandId: previousCommandId,
+    );
+    final response = await _send(request);
+    try {
+      final result = jsonDecode(utf8.decode(response.bodyBytes));
+      final version = result is Map ? result['order_version'] : null;
+      if (result is Json &&
+          version is int &&
+          version >= 1 &&
+          (expectedVersion == null || version >= expectedVersion)) {
+        return result;
+      }
+    } on FormatException {
+      // The upload may already have committed even when the reply is unusable.
+    }
+    throw const ApiException(
+      'Сервер не подтвердил версию после загрузки. Фотография могла сохраниться; обновите карточку.',
+      200,
+      requestMayHaveSucceeded: true,
+    );
   }
 
   Future<Uint8List> photo(int id) async {

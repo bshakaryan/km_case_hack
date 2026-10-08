@@ -35,12 +35,15 @@ class _CompletionScreenState extends State<CompletionScreen> {
   bool _checking = false;
   bool _dirty = false;
   bool _uncertain = false;
+  bool _stale = false;
   bool _done = false;
   String? _error;
+  late OrderWriteBasis _basis;
 
   @override
   void initState() {
     super.initState();
+    _basis = widget.controller.captureOrderBasis(widget.order);
     _serverPhotos = _maps(widget.order.data['photos'])
         .where((photo) => photo['kind'] == 'after')
         .toList();
@@ -194,12 +197,14 @@ class _CompletionScreenState extends State<CompletionScreen> {
       photo.error = null;
     });
     try {
-      await widget.controller.uploadPhoto(
+      final commandId = await widget.controller.uploadPhoto(
         widget.order.id,
         photo.bytes,
         photo.filename,
         'after',
+        basis: _basis,
       );
+      _basis = OrderWriteBasis(previousCommandId: commandId);
       if (!mounted) return;
       setState(() {
         photo.uploaded = true;
@@ -281,7 +286,11 @@ class _CompletionScreenState extends State<CompletionScreen> {
   }
 
   Future<void> _submit() async {
-    if (_locked || _uncertain || _done || !_form.currentState!.validate()) {
+    if (_locked ||
+        _uncertain ||
+        _stale ||
+        _done ||
+        !_form.currentState!.validate()) {
       return;
     }
     if (_photos.any((photo) => !photo.uploaded)) {
@@ -315,7 +324,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
             )
             .toList(),
         'comment': _comment.text.trim(),
-      });
+      }, basis: _basis);
       if (!mounted) return;
       if (result.status != 'ai_review' && result.status != 'completed') {
         setState(() {
@@ -329,6 +338,13 @@ class _CompletionScreenState extends State<CompletionScreen> {
       if (mounted) {
         setState(() {
           _error = '$error\nЗаполненные поля остаются в этой форме.';
+          _stale =
+              error is ApiException &&
+              const {
+                'order_version_conflict',
+                'order_precondition_unavailable',
+                'local_order_precondition_unavailable',
+              }.contains(error.code);
           _uncertain = error is ApiException
               ? error.requestMayHaveSucceeded
               : true;
@@ -582,7 +598,7 @@ class _CompletionScreenState extends State<CompletionScreen> {
                 minimumSize: const Size(double.infinity, 56),
                 backgroundColor: const Color(0xFF173E68),
               ),
-              onPressed: _locked
+              onPressed: _locked || _stale
                   ? null
                   : _done
                   ? _exit
