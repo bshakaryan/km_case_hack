@@ -8,6 +8,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 node_modules/
+*.hprof
 dist/
 *.tsbuildinfo
 .DS_Store

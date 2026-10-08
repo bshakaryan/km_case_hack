@@ -49,6 +49,13 @@ class SnapshotEntry {
   final DateTime updatedAt;
 }
 
+// The form captures this before editing. Reads must never replace its basis.
+class OrderWriteBasis {
+  const OrderWriteBasis({this.expectedVersion, this.previousCommandId});
+  final int? expectedVersion;
+  final String? previousCommandId;
+}
+
 class OutboxCommand {
   const OutboxCommand({
     required this.commandId,
@@ -58,6 +65,8 @@ class OutboxCommand {
     this.serverUrl,
     this.orderId,
     this.localRef,
+    this.expectedVersion,
+    this.previousCommandId,
     this.payload = const {},
     this.photoPath,
     this.photoFilename,
@@ -77,6 +86,10 @@ class OutboxCommand {
     serverUrl: json['server_url'] as String?,
     orderId: (json['order_id'] as num?)?.toInt(),
     localRef: json['local_ref'] as String?,
+    expectedVersion: json['expected_version'] is int
+        ? json['expected_version'] as int
+        : null,
+    previousCommandId: json['previous_command_id'] as String?,
     payload: (json['payload'] as Json?) ?? const {},
     photoPath: json['photo_path'] as String?,
     photoFilename: json['photo_filename'] as String?,
@@ -97,6 +110,8 @@ class OutboxCommand {
   final String? serverUrl;
   final int? orderId;
   final String? localRef;
+  final int? expectedVersion;
+  final String? previousCommandId;
   final Json payload;
   final String? photoPath;
   final String? photoFilename;
@@ -107,6 +122,24 @@ class OutboxCommand {
   final Json? response;
   final String? lastError;
 
+  bool get hasOrderPrecondition =>
+      kind == OutboxKind.createOrder ||
+      kind == OutboxKind.markRead ||
+      (expectedVersion != null &&
+          expectedVersion! >= 1 &&
+          previousCommandId == null) ||
+      (expectedVersion == null &&
+          previousCommandId != null &&
+          RegExp(r'^[A-Za-z0-9._:-]{8,64}$').hasMatch(previousCommandId!));
+
+  bool get canRetry =>
+      hasOrderPrecondition &&
+      !const {
+        'order_version_conflict',
+        'order_precondition_unavailable',
+        'local_order_precondition_unavailable',
+      }.contains(response?['code']);
+
   Json toJson() => <String, dynamic>{
     'command_id': commandId,
     'kind': kind,
@@ -115,6 +148,8 @@ class OutboxCommand {
     'server_url': serverUrl,
     'order_id': orderId,
     'local_ref': localRef,
+    'expected_version': expectedVersion,
+    'previous_command_id': previousCommandId,
     'payload': payload,
     'photo_path': photoPath,
     'photo_filename': photoFilename,
@@ -142,6 +177,8 @@ class OutboxCommand {
     serverUrl: serverUrl,
     orderId: identical(orderId, _undefined) ? this.orderId : orderId as int?,
     localRef: localRef,
+    expectedVersion: expectedVersion,
+    previousCommandId: previousCommandId,
     payload: payload,
     photoPath: identical(photoPath, _undefined)
         ? this.photoPath
@@ -164,6 +201,16 @@ class OutboxCommand {
 
 const int maxPhotoCacheBytes = 50 * 1024 * 1024;
 
+enum OutboxRecoveryCommitStatus { committed, changed, busy }
+
+class OutboxRecoveryCommit {
+  const OutboxRecoveryCommit(this.status, {this.cleanupWarning});
+
+  final OutboxRecoveryCommitStatus status;
+  final String? cleanupWarning;
+  bool get committed => status == OutboxRecoveryCommitStatus.committed;
+}
+
 abstract class LocalStore {
   Future<void> open();
   Future<void> close();
@@ -176,10 +223,22 @@ abstract class LocalStore {
   Future<SnapshotEntry?> getSnapshot(String key);
   Future<void> clearSnapshots({String? prefix});
 
+  Future<void> putFormDraft(String key, Json data);
+  Future<Json?> getFormDraft(String key);
+  Future<void> removeFormDraft(String key);
+
   Future<OutboxCommand> enqueue(OutboxCommand command, {Uint8List? photoBytes});
   Future<List<OutboxCommand>> outbox();
   Future<void> updateOutbox(OutboxCommand command);
   Future<void> removeOutbox(String commandId);
+  // Compare the reviewed rows and mutate them as one unit. The guard must throw
+  // if the original session is no longer active; no media is touched precommit.
+  Future<OutboxRecoveryCommit> recoverOutbox(
+    List<OutboxCommand> expectedCommands, {
+    OutboxCommand? replacement,
+    List<String> serverIdKeys = const [],
+    required void Function() ensureCurrent,
+  });
   Future<Uint8List?> outboxPhoto(String commandId);
   Future<void> resetRunningOutbox();
 
@@ -198,6 +257,23 @@ class MemoryLocalStore implements LocalStore {
   final Map<String, Json> _outbox = {};
   final Map<String, int> _serverIds = {};
   final Map<String, Uint8List> _photos = {};
+  final Map<String, String> _drafts = {};
+
+  @override
+  Future<void> putFormDraft(String key, Json data) async {
+    _drafts[key] = jsonEncode(data);
+  }
+
+  @override
+  Future<Json?> getFormDraft(String key) async {
+    final value = _drafts[key];
+    return value == null ? null : jsonDecode(value) as Json;
+  }
+
+  @override
+  Future<void> removeFormDraft(String key) async {
+    _drafts.remove(key);
+  }
 
   @override
   Future<void> open() async {
@@ -240,8 +316,10 @@ class MemoryLocalStore implements LocalStore {
 
   @override
   Future<List<OutboxCommand>> outbox() async =>
-      _outbox.values.map(OutboxCommand.fromJson).toList()
-        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      _outbox.values.map(OutboxCommand.fromJson).toList()..sort((a, b) {
+        final time = a.createdAt.compareTo(b.createdAt);
+        return time == 0 ? a.commandId.compareTo(b.commandId) : time;
+      });
 
   @override
   Future<void> updateOutbox(OutboxCommand command) async {
@@ -257,6 +335,45 @@ class MemoryLocalStore implements LocalStore {
   }
 
   @override
+  Future<OutboxRecoveryCommit> recoverOutbox(
+    List<OutboxCommand> expectedCommands, {
+    OutboxCommand? replacement,
+    List<String> serverIdKeys = const [],
+    required void Function() ensureCurrent,
+  }) async {
+    validateRecoverySelection(expectedCommands, replacement, serverIdKeys);
+    final expected = {
+      for (final command in expectedCommands)
+        command.commandId: jsonEncode(command.toJson()),
+    };
+    ensureCurrent();
+    for (final entry in expected.entries) {
+      final current = _outbox[entry.key];
+      if (current?['state'] == OutboxState.running) {
+        return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.busy);
+      }
+      if (current == null || jsonEncode(current) != entry.value) {
+        return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.changed);
+      }
+    }
+    // Synchronous from guard to commit: neither another command nor a session
+    // change can interleave with this memory-store mutation.
+    ensureCurrent();
+    if (replacement != null) {
+      _outbox[replacement.commandId] = replacement.toJson();
+    } else {
+      for (final id in expected.keys) {
+        _outbox.remove(id);
+        _photos.remove('outbox:$id');
+      }
+      for (final key in serverIdKeys) {
+        _serverIds.remove(key);
+      }
+    }
+    return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.committed);
+  }
+
+  @override
   Future<Uint8List?> outboxPhoto(String commandId) async =>
       _photos['outbox:$commandId'];
 
@@ -266,6 +383,10 @@ class MemoryLocalStore implements LocalStore {
       if (command['server_url'] == null || command['owner_id'] == null) {
         command['state'] = OutboxState.conflict;
         command['last_error'] = 'Старая команда без подтверждённого сервера и аккаунта изолирована.';
+      } else if (!OutboxCommand.fromJson(command).hasOrderPrecondition) {
+        command['state'] = OutboxState.conflict;
+        command['response'] = {'code': 'local_order_precondition_unavailable'};
+        command['last_error'] = 'Версия наряда для этого действия неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново; удаление этой команды не отменяет уже сохранённое сервером действие.';
       } else if (command['state'] == OutboxState.running) {
         command['state'] = OutboxState.pending;
       }
@@ -323,5 +444,56 @@ class MemoryLocalStore implements LocalStore {
       if (!key.startsWith('outbox:')) total += value.length;
     });
     return total;
+  }
+}
+
+// Fail closed for malformed or mixed-account selections, even when called
+// directly by storage clients. Recovery never derives ownership from live UI.
+void validateRecoverySelection(
+  List<OutboxCommand> commands,
+  OutboxCommand? replacement,
+  List<String> serverIdKeys,
+) {
+  if (commands.isEmpty ||
+      commands.first.ownerId == null ||
+      commands.first.serverUrl == null ||
+      commands.map((command) => command.commandId).toSet().length !=
+          commands.length ||
+      commands.any(
+        (command) =>
+            command.ownerId != commands.first.ownerId ||
+            command.serverUrl != commands.first.serverUrl,
+      )) {
+    throw ArgumentError('Recovery requires one confirmed account and server.');
+  }
+  final allowedMappingKeys = commands
+      .where((command) => command.localRef != null)
+      .map(
+        (command) => localScopeKey(
+          command.serverUrl!,
+          command.ownerId!,
+          command.localRef!,
+        ),
+      )
+      .toSet();
+  if (serverIdKeys.any((key) => !allowedMappingKeys.contains(key))) {
+    throw ArgumentError('Recovery cannot remove another scope mapping.');
+  }
+  if (replacement != null) {
+    final original = commands
+        .where((command) => command.commandId == replacement.commandId)
+        .firstOrNull;
+    Json immutableFields(OutboxCommand command) => command.toJson()
+      ..remove('state')
+      ..remove('attempts')
+      ..remove('response_status')
+      ..remove('response')
+      ..remove('last_error');
+    if (original == null ||
+        serverIdKeys.isNotEmpty ||
+        jsonEncode(immutableFields(original)) !=
+            jsonEncode(immutableFields(replacement))) {
+      throw ArgumentError('Recovery cannot rewrite a command or its basis.');
+    }
   }
 }

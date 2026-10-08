@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 BACKEND = Path(__file__).resolve().parents[1]
-REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push")
+REVISIONS = ("0001_initial", "0002_client_commands", "0003_assignment_time", "0003_push", "0004_order_history", "0005_ai_review_jobs", "0006_order_versions", "0007_assignment_participants")
 
 
 class SchemaCompatibilityError(RuntimeError):
@@ -44,7 +44,7 @@ def expected_schema(revision):
         )
     if revision in REVISIONS[2:]:
         metadata.tables["orders"].append_column(sa.Column("assigned_at", sa.DateTime(timezone=True), nullable=False))
-    if revision == REVISIONS[3]:
+    if revision in REVISIONS[3:]:
         # Exact DDL of immutable 0003_push.
         sa.Table("device_tokens", metadata,
             sa.Column("id", sa.Integer(), primary_key=True),
@@ -75,7 +75,27 @@ def expected_schema(revision):
             sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
             sa.Index("ix_push_tasks_status_next", "status", "next_attempt_at"),
         )
+    if revision in REVISIONS[4:]:
+        history = ScriptDirectory.from_config(alembic_config()).get_revision("0004_order_history").module
+        history.schema(metadata)
+    if revision in REVISIONS[5:]:
+        jobs = ScriptDirectory.from_config(alembic_config()).get_revision("0005_ai_review_jobs").module
+        jobs.schema(metadata)
+    if revision in REVISIONS[6:]:
+        versions = ScriptDirectory.from_config(alembic_config()).get_revision("0006_order_versions").module
+        versions.schema(metadata)
+    if revision in REVISIONS[7:]:
+        participants = ScriptDirectory.from_config(alembic_config()).get_revision("0007_assignment_participants").module
+        participants.schema(metadata)
     return metadata
+
+
+def seed_legacy_history(connection):
+    """Use the same frozen snapshot rules for historical demonstration data."""
+    history = ScriptDirectory.from_config(alembic_config()).get_revision("0004_order_history").module
+    history.backfill_legacy(connection)
+    participants = ScriptDirectory.from_config(alembic_config()).get_revision("0007_assignment_participants").module
+    participants.backfill_legacy(connection)
 
 
 def check_expression(expression):
@@ -87,7 +107,9 @@ def check_expression(expression):
     expression = re.sub(r"::(?:character varying|double precision|text|integer|numeric)(?:\[\])?", "", expression, flags=re.I)
     expression = re.sub(r"\bARRAY\s*\[", "[", expression, flags=re.I)
     expression = re.sub(r"=\s*ANY\s*\(", " in (", expression, flags=re.I)
-    for sql, python in [("AND", "and"), ("OR", "or"), ("IS", "is"), ("NULL", "None"), ("IN", "in")]:
+    expression = expression.replace("<>", "!=")
+    expression = re.sub(r"(?<![<>=!])=(?!=)", "==", expression)
+    for sql, python in [("AND", "and"), ("OR", "or"), ("IS", "is"), ("NOT", "not"), ("NULL", "None"), ("IN", "in")]:
         expression = re.sub(rf"\b{sql}\b", python, expression, flags=re.I)
     expression = re.sub(r'"([a-z_]+)"', r"\1", expression)
     try:

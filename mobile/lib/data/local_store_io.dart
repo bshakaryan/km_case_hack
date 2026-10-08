@@ -6,15 +6,17 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'local_store.dart';
+import 'models.dart';
 
 class SqfliteLocalStore implements LocalStore {
-  SqfliteLocalStore({this.directoryPath});
+  SqfliteLocalStore({this.directoryPath, this.dbFactory});
 
   final String? directoryPath;
+  final DatabaseFactory? dbFactory;
   Database? _db;
   Directory? _root;
 
-  static const _schemaVersion = 2;
+  static const _schemaVersion = 4;
 
   @override
   Future<void> open() async {
@@ -25,8 +27,7 @@ class SqfliteLocalStore implements LocalStore {
     final root = Directory(path);
     await root.create(recursive: true);
     _root = root;
-    final db = await openDatabase(
-      '${root.path}/local_store.db',
+    final options = OpenDatabaseOptions(
       version: _schemaVersion,
       onCreate: (db, version) async {
         await _createSchema(db);
@@ -41,18 +42,45 @@ class SqfliteLocalStore implements LocalStore {
             'last_error': 'Старая команда без подтверждённого сервера и аккаунта изолирована.',
           }, where: 'server_url IS NULL OR owner_id IS NULL');
         }
+        if (oldVersion < 3) {
+          await db.execute(
+            'ALTER TABLE outbox ADD COLUMN expected_version INTEGER',
+          );
+          await db.execute(
+            'ALTER TABLE outbox ADD COLUMN previous_command_id TEXT',
+          );
+          await db.update(
+            'outbox',
+            {
+              'state': OutboxState.conflict,
+              'response': jsonEncode({
+                'code': 'local_order_precondition_unavailable',
+              }),
+              'last_error': 'Версия наряда для старой команды неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново; удаление команды не отменяет уже сохранённое сервером действие.',
+            },
+            where: 'kind NOT IN (?, ?)',
+            whereArgs: [OutboxKind.createOrder, OutboxKind.markRead],
+          );
+        }
+        if (oldVersion < 4) {
+          await _createDraftSchema(db);
+        }
       },
     );
-    _db = db;
+    _db = await (dbFactory ?? databaseFactory).openDatabase(
+      '${root.path}/local_store.db',
+      options: options,
+    );
     await resetRunningOutbox();
   }
 
   Future<void> _createSchema(Database db) async {
+    await _createDraftSchema(db);
     await db.execute(
       'CREATE TABLE snapshot (key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)',
     );
     await db.execute(
-      'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, server_url TEXT, order_id INTEGER, local_ref TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
+      'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, server_url TEXT, order_id INTEGER, local_ref TEXT, expected_version INTEGER, previous_command_id TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
     );
     await db.execute(
       'CREATE INDEX ix_outbox_state ON outbox (state, created_at)',
@@ -63,6 +91,37 @@ class SqfliteLocalStore implements LocalStore {
     await db.execute(
       'CREATE TABLE photo_cache (url TEXT PRIMARY KEY, path TEXT NOT NULL, size INTEGER NOT NULL, last_used_at INTEGER NOT NULL)',
     );
+  }
+
+  Future<void> _createDraftSchema(Database db) => db.execute(
+    'CREATE TABLE form_drafts (key TEXT PRIMARY KEY, payload TEXT NOT NULL)',
+  );
+
+  @override
+  Future<void> putFormDraft(String key, Json data) async {
+    await _database.insert('form_drafts', {
+      'key': key,
+      'payload': jsonEncode(data),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  @override
+  Future<Json?> getFormDraft(String key) async {
+    final rows = await _database.query(
+      'form_drafts',
+      columns: ['payload'],
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    return rows.isEmpty
+        ? null
+        : jsonDecode(rows.first['payload'] as String) as Json;
+  }
+
+  @override
+  Future<void> removeFormDraft(String key) async {
+    await _database.delete('form_drafts', where: 'key = ?', whereArgs: [key]);
   }
 
   Database get _database {
@@ -140,6 +199,8 @@ class SqfliteLocalStore implements LocalStore {
     'server_url': command.serverUrl,
     'order_id': command.orderId,
     'local_ref': command.localRef,
+    'expected_version': command.expectedVersion,
+    'previous_command_id': command.previousCommandId,
     'payload': jsonEncode(command.payload),
     'photo_path': command.photoPath,
     'photo_filename': command.photoFilename,
@@ -160,6 +221,8 @@ class SqfliteLocalStore implements LocalStore {
         'server_url': row['server_url'],
         'order_id': row['order_id'],
         'local_ref': row['local_ref'],
+        'expected_version': row['expected_version'],
+        'previous_command_id': row['previous_command_id'],
         'payload': jsonDecode(row['payload'] as String),
         'photo_path': row['photo_path'],
         'photo_filename': row['photo_filename'],
@@ -230,12 +293,150 @@ class SqfliteLocalStore implements LocalStore {
   }
 
   @override
+  Future<OutboxRecoveryCommit> recoverOutbox(
+    List<OutboxCommand> expectedCommands, {
+    OutboxCommand? replacement,
+    List<String> serverIdKeys = const [],
+    required void Function() ensureCurrent,
+  }) async {
+    validateRecoverySelection(expectedCommands, replacement, serverIdKeys);
+    final expected = {
+      for (final command in expectedCommands)
+        command.commandId: jsonEncode(command.toJson()),
+    };
+    final original = expectedCommands.first;
+    final mediaPaths = <String, String>{};
+    ensureCurrent();
+    final result = await _database.transaction((transaction) async {
+      ensureCurrent();
+      final rows = await transaction.query(
+        'outbox',
+        where: 'owner_id = ? AND server_url = ?',
+        whereArgs: [original.ownerId, original.serverUrl],
+      );
+      ensureCurrent();
+      final selected = {
+        for (final row in rows)
+          if (expected.containsKey(row['command_id']))
+            row['command_id'] as String: row,
+      };
+      for (final entry in expected.entries) {
+        final row = selected[entry.key];
+        if (row?['state'] == OutboxState.running) {
+          return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.busy);
+        }
+        if (row == null ||
+            jsonEncode(_commandFromRow(row).toJson()) != entry.value) {
+          return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.changed);
+        }
+      }
+      if (replacement != null) {
+        await transaction.update(
+          'outbox',
+          _outboxRow(replacement),
+          where: 'command_id = ? AND owner_id = ? AND server_url = ?',
+          whereArgs: [
+            replacement.commandId,
+            original.ownerId,
+            original.serverUrl,
+          ],
+        );
+        ensureCurrent();
+      } else {
+        for (final entry in selected.entries) {
+          await transaction.delete(
+            'outbox',
+            where: 'command_id = ? AND owner_id = ? AND server_url = ?',
+            whereArgs: [entry.key, original.ownerId, original.serverUrl],
+          );
+          ensureCurrent();
+          final path = entry.value['photo_path'] as String?;
+          if (path != null) mediaPaths[entry.key] = path;
+        }
+        for (final key in serverIdKeys) {
+          await transaction.delete(
+            'id_map',
+            where: 'local_ref = ?',
+            whereArgs: [key],
+          );
+          ensureCurrent();
+        }
+      }
+      ensureCurrent();
+      return const OutboxRecoveryCommit(OutboxRecoveryCommitStatus.committed);
+    });
+    // The SQL transaction has committed. File failures cannot roll it back and
+    // must not be reported as though the reviewed commands were still queued.
+    if (!result.committed) return result;
+    var cleanupFailed = false;
+    String comparablePath(String path) {
+      final normalized = path.replaceAll('\\', '/');
+      return Platform.isWindows ? normalized.toLowerCase() : normalized;
+    }
+
+    for (final entry in mediaPaths.entries) {
+      try {
+        ensureCurrent();
+        final file = File(entry.value);
+        final exists = await file.exists();
+        ensureCurrent();
+        if (exists) {
+          if (!RegExp(r'^[A-Za-z0-9._:-]{8,64}$').hasMatch(entry.key)) {
+            cleanupFailed = true;
+            continue;
+          }
+          final root = await _directory.resolveSymbolicLinks();
+          ensureCurrent();
+          final folder = await Directory('${_directory.path}/outbox_photos')
+              .resolveSymbolicLinks();
+          ensureCurrent();
+          final actual = await file.resolveSymbolicLinks();
+          ensureCurrent();
+          // A corrupt row, path traversal or symlink must never turn queue
+          // recovery into deletion of another document or another scope's file.
+          if (comparablePath(folder) != comparablePath('$root/outbox_photos') ||
+              comparablePath(actual) !=
+                  comparablePath('$folder/${entry.key}.photo')) {
+            cleanupFailed = true;
+            continue;
+          }
+          await File('$folder/${entry.key}.photo').delete();
+          ensureCurrent();
+        }
+      } catch (_) {
+        cleanupFailed = true;
+      }
+    }
+    return OutboxRecoveryCommit(
+      OutboxRecoveryCommitStatus.committed,
+      cleanupWarning: cleanupFailed
+          ? 'Цепочка удалена из очереди. Не удалось очистить часть её локальных фото.'
+          : null,
+    );
+  }
+
+  @override
   Future<void> resetRunningOutbox() async {
     await _database.update('outbox', {
       'state': OutboxState.conflict,
       'last_error':
           'Старая команда без подтверждённого сервера и аккаунта изолирована.',
     }, where: 'server_url IS NULL OR owner_id IS NULL');
+    final commands = await outbox();
+    for (final command in commands) {
+      if (command.serverUrl == null ||
+          command.ownerId == null ||
+          command.hasOrderPrecondition) {
+        continue;
+      }
+      await updateOutbox(
+        command.copyWith(
+          state: OutboxState.conflict,
+          response: {'code': 'local_order_precondition_unavailable'},
+          lastError: 'Версия наряда для этого действия неизвестна. Текст и фото сохранены. Обновите наряд и создайте действие заново; удаление команды не отменяет уже сохранённое сервером действие.',
+        ),
+      );
+    }
     await _database.update(
       'outbox',
       {'state': OutboxState.pending},

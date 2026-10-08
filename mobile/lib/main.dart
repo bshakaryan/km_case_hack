@@ -6,6 +6,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'data/app_controller.dart';
 import 'data/push_service.dart';
+import 'domain/navigation_scope.dart';
 import 'screens/login_screen.dart';
 import 'screens/order_detail_screen.dart';
 import 'screens/workspace_screen.dart';
@@ -26,36 +27,70 @@ class NaryadApp extends StatefulWidget {
 class _NaryadAppState extends State<NaryadApp> {
   late final AppController controller;
   final navigatorKey = GlobalKey<NavigatorState>();
+  final orderRoutes = _OrderRouteObserver();
   PushService? push;
   StreamSubscription<int>? pushTaps;
-  bool hadSession = false;
+  NavigationScope? displayedScope;
+  int navigationRevision = 0;
+  Object? scheduledPush;
 
   void sessionChanged() {
     final active = controller.user != null;
-    if (hadSession && !active) {
+    final previous = displayedScope;
+    if (previous == null ? active : !previous.isCurrent) {
+      displayedScope = active ? controller.captureNavigationScope() : null;
+      scheduledPush = null;
+      final revision = ++navigationRevision;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
+        // An old logout callback must not pop a newer account's routes.
+        if (mounted && revision == navigationRevision) {
           navigatorKey.currentState?.popUntil((route) => route.isFirst);
         }
       });
     }
-    hadSession = active;
     if (active) _openPushOrderIfAny();
   }
 
   // Opens a notification tapped before the session was ready; consumed once.
   void _openPushOrderIfAny() {
+    final scope = displayedScope;
+    if (scheduledPush != null ||
+        scope == null ||
+        !scope.isCurrent ||
+        controller.referenceWriteBusy) {
+      return;
+    }
     final orderId = controller.consumePendingPushOrder();
     if (orderId == null) return;
+    final ticket = Object();
+    scheduledPush = ticket;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || !identical(scheduledPush, ticket)) return;
+      scheduledPush = null;
+      if (!scope.isCurrent) return;
+      if (controller.referenceWriteBusy) {
+        // A write began after scheduling: retain this target in the same scope.
+        controller.openOrderFromPush(orderId);
+        return;
+      }
+      if (orderRoutes.hasOrder(orderId)) {
+        _openPushOrderIfAny();
+        return;
+      }
       navigatorKey.currentState?.push<void>(
         MaterialPageRoute(
-          builder: (_) =>
-              OrderDetailScreen(controller: controller, orderId: orderId),
+          settings: RouteSettings(name: 'order:$orderId'),
+          builder: (_) => OrderDetailScreen(
+            controller: controller,
+            orderId: orderId,
+            notificationEntry: true,
+          ),
         ),
       );
+      // A second, different tap can arrive while the first callback is pending.
+      _openPushOrderIfAny();
     });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   @override
@@ -75,9 +110,12 @@ class _NaryadAppState extends State<NaryadApp> {
         }),
       );
     }
-    hadSession = controller.user != null;
+    displayedScope = controller.user == null
+        ? null
+        : controller.captureNavigationScope();
     controller.addListener(sessionChanged);
     controller.restoreSession();
+    if (displayedScope != null) _openPushOrderIfAny();
   }
 
   @override
@@ -91,6 +129,7 @@ class _NaryadAppState extends State<NaryadApp> {
   @override
   Widget build(BuildContext context) => MaterialApp(
     navigatorKey: navigatorKey,
+    navigatorObservers: [orderRoutes],
     title: 'НарядAI',
     debugShowCheckedModeBanner: false,
     theme: appTheme(),
@@ -111,6 +150,35 @@ class _NaryadAppState extends State<NaryadApp> {
   );
 }
 
+/// Includes detail routes opened inside the workspace as well as push routes.
+class _OrderRouteObserver extends NavigatorObserver {
+  final Set<Route<dynamic>> _routes = {};
+
+  bool hasOrder(int id) =>
+      _routes.any((route) => route.settings.name == 'order:$id');
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _routes.add(route);
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _routes.remove(route);
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _routes.remove(route);
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    _routes.remove(oldRoute);
+    if (newRoute != null) _routes.add(newRoute);
+  }
+}
+
 class _RestoringScreen extends StatelessWidget {
   const _RestoringScreen();
   @override
@@ -126,9 +194,8 @@ class _RestoringScreen extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               'НарядAI',
-              style: Theme.of(
-                context,
-              ).textTheme.headlineMedium?.copyWith(color: colors.primary),
+              style: Theme.of(context).textTheme.headlineMedium
+                  ?.copyWith(color: colors.primary),
             ),
             const SizedBox(height: 24),
             const SizedBox(

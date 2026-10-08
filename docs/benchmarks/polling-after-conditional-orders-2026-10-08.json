@@ -1,0 +1,657 @@
+{
+  "schema": 1,
+  "kind": "naryad-live-polling-baseline",
+  "run_marker": "20261008-cond-5a082371",
+  "complete": true,
+  "nominal_transport_healthy": true,
+  "nominal_application_healthy": true,
+  "method": {
+    "binding": "LiveTestWidgetsFlutterBinding.fullyLive",
+    "time": "monotonic Stopwatch, real Timer/Future.delayed; no FakeAsync or timed pump",
+    "phase_boundary": "requests enrolled at send; late full responses retained in originating phase; drain excluded",
+    "network": "genuine loopback HTTP through injected IOClient; external authenticated PATCH excluded",
+    "conditional_orders": "only /orders?limit=5000 uses per-API/current-authority immutable ETag body; actual 304 bytes counted as received, cached bytes not network bytes; five-second cadence unchanged",
+    "orders_return_evidence": "test-only API subclass counts successful full orders() returns and list lengths; together with consumed 304 and global refresh observations, not an independently correlated per-request cache-use counter",
+    "bytes": "logical received response body bytes after IOClient decompression; not wire/TLS/request bytes",
+    "latency": "send entry to complete response stream consumption; excludes JSON decode and controller apply",
+    "display": "50ms real sampling of version-bound RenderParagraph after live frame, no pending layout/paint, inside view/scroll clips",
+    "lag": "client full-body 200 ACK to sampled first visible scene; last-absent/first-present interval, signed early observation retained",
+    "snapshot": "MemoryLocalStore.putSnapshot call counts only; no physical I/O/fsync/durability claims",
+    "application": "50ms sampled offline/error/outbox state; successful global refresh observed from lastUpdated changes inside phase, not individual GET success",
+    "warmup_excluded": true,
+    "target_phase_seconds": 60,
+    "target_edit_second": 31,
+    "target_sampling_ms": 50
+  },
+  "environment": {
+    "platform": "windows",
+    "dart_version": "3.13.0",
+    "viewport_logical_width": 480.0,
+    "viewport_logical_height": 1000.0,
+    "device_pixel_ratio": 1,
+    "role": "master",
+    "local_store": "counted memory platform double",
+    "secure_storage": "platform double",
+    "shared_preferences": "platform double",
+    "push": "NoopPushService",
+    "overview_position": "scrolled to existing emergency order card before phase",
+    "detail_background_overview_polling": true
+  },
+  "fixture": {
+    "orders": 500,
+    "status_distribution": {
+      "issued": 42,
+      "queued": 8,
+      "cancelled": 100,
+      "closed": 350
+    },
+    "reference_counts": {
+      "areas": 1,
+      "equipment": 1,
+      "employees": 2,
+      "brigades": 0,
+      "fault_codes": 1,
+      "materials": 1,
+      "time_norms": 1
+    },
+    "worker_count": 1
+  },
+  "limitations": [
+    "One isolated synthetic master and two phases; not load testing or a worst-case freshness SLA.",
+    "Flutter scene/layout/paint witness, not physical screen pixels, GPU presentation or Android device proof.",
+    "Loopback HTTP logical body bytes do not measure mobile radio, wire traffic or battery.",
+    "Local storage/session plugins and push are platform doubles; snapshot counts are controller calls only."
+  ],
+  "phases": [
+    {
+      "name": "master_overview",
+      "duration_ms": 60027.931,
+      "requests_started": 72,
+      "responses_fully_consumed": 72,
+      "transport_failures": 0,
+      "not_modified_responses": 11,
+      "not_modified_received_body_bytes": 0,
+      "peak_concurrency": 6,
+      "in_flight_at_end": 0,
+      "unfinished_after_drain": 0,
+      "logical_response_body_bytes": 553696,
+      "snapshot_put_calls": {
+        "orders": 1,
+        "reference": 1,
+        "employees": 1,
+        "dashboard": 1,
+        "notifications": 1,
+        "analytics": 1
+      },
+      "orders_application_returns": {
+        "completed_successful_calls": 12,
+        "returned_list_lengths": [
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500
+        ]
+      },
+      "routes": {
+        "GET /api/reference": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 8820,
+          "request_start_ms": [
+            3520.497,
+            8520.957,
+            13521.184,
+            18521.195,
+            23520.998,
+            28521.041,
+            33521.428,
+            38521.123,
+            43520.986,
+            48520.935,
+            53520.567,
+            58521.271
+          ],
+          "full_response_latency_ms": {
+            "min": 36.82,
+            "mean": 42.75383333333334,
+            "p50": 39.753,
+            "p95": 56.893,
+            "max": 56.893
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/employees": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 2736,
+          "request_start_ms": [
+            3521.528,
+            8521.402,
+            13521.897,
+            18522.058,
+            23521.406,
+            28521.466,
+            33521.873,
+            38521.502,
+            43521.411,
+            48521.354,
+            53521.027,
+            58521.826
+          ],
+          "full_response_latency_ms": {
+            "min": 288.644,
+            "mean": 454.3035,
+            "p50": 455.412,
+            "p95": 551.347,
+            "max": 551.347
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/orders": {
+          "requests": 12,
+          "status_counts": {
+            "304": 11,
+            "200": 1
+          },
+          "not_modified_responses": 11,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 473776,
+          "request_start_ms": [
+            3522.158,
+            8521.753,
+            13522.679,
+            18522.632,
+            23521.691,
+            28521.782,
+            33522.158,
+            38521.833,
+            43521.728,
+            48521.629,
+            53521.444,
+            58522.17
+          ],
+          "full_response_latency_ms": {
+            "min": 339.716,
+            "mean": 512.2936666666667,
+            "p50": 535.207,
+            "p95": 595.626,
+            "max": 595.626
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/dashboard": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 1896,
+          "request_start_ms": [
+            3522.451,
+            8522.066,
+            13523.133,
+            18523.235,
+            23522.031,
+            28522.144,
+            33522.416,
+            38522.181,
+            43522.016,
+            48521.893,
+            53521.795,
+            58522.58
+          ],
+          "full_response_latency_ms": {
+            "min": 286.813,
+            "mean": 404.2468333333333,
+            "p50": 390.03,
+            "p95": 534.111,
+            "max": 534.111
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/notifications": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 24,
+          "request_start_ms": [
+            3522.748,
+            8522.692,
+            13523.535,
+            18523.842,
+            23522.287,
+            28522.388,
+            33522.691,
+            38522.459,
+            43522.517,
+            48522.334,
+            53522.034,
+            58523.047
+          ],
+          "full_response_latency_ms": {
+            "min": 27.09,
+            "mean": 35.0875,
+            "p50": 33.206,
+            "p95": 51.743,
+            "max": 51.743
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/analytics": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 66444,
+          "request_start_ms": [
+            3523.04,
+            8523.185,
+            13523.839,
+            18524.229,
+            23522.555,
+            28522.605,
+            33522.927,
+            38522.767,
+            43523.104,
+            48522.687,
+            53522.287,
+            58523.598
+          ],
+          "full_response_latency_ms": {
+            "min": 132.095,
+            "mean": 410.14508333333333,
+            "p50": 412.23,
+            "p95": 544.319,
+            "max": 544.319
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        }
+      },
+      "live_frames_completed": 3558,
+      "render_samples": 1140,
+      "max_sample_gap_ms": 132.171,
+      "application": {
+        "initial_offline": false,
+        "initial_has_error": false,
+        "offline_samples": 0,
+        "error_samples": 0,
+        "sampled_offline_transitions": 0,
+        "successful_global_refresh_observations": 12,
+        "refresh_last_updated_change_observed_at_phase_ms": [
+          4156.262,
+          9137.158,
+          14121.36,
+          18939.31,
+          24189.079,
+          29041.809,
+          34103.79,
+          39148.488,
+          44124.016,
+          49057.551,
+          54075.58,
+          58998.008
+        ],
+        "final_offline": false,
+        "final_has_error": false,
+        "initial_outbox_count": 0,
+        "final_outbox_count": 0,
+        "outbox_count_changed": false,
+        "nominal_application_healthy": true
+      },
+      "external_edit": {
+        "started_at_phase_ms": 31033.196,
+        "ack_at_phase_ms": 31136.989,
+        "ack_status": 200,
+        "ack_version": 2,
+        "last_absent_sample_at_phase_ms": 33984.81,
+        "first_present_sample_at_phase_ms": 34103.79,
+        "first_present_last_completed_frame_at_phase_ms": 34103.643,
+        "observed_present_at_or_before_ack": false,
+        "ack_to_first_observation_ms_signed": 2966.801,
+        "ack_to_render_interval_ms": {
+          "lower": 2847.821,
+          "upper": 2966.801
+        }
+      }
+    },
+    {
+      "name": "master_open_order_detail",
+      "duration_ms": 60026.043,
+      "requests_started": 84,
+      "responses_fully_consumed": 84,
+      "transport_failures": 0,
+      "not_modified_responses": 11,
+      "not_modified_received_body_bytes": 0,
+      "peak_concurrency": 6,
+      "in_flight_at_end": 0,
+      "unfinished_after_drain": 0,
+      "logical_response_body_bytes": 575311,
+      "snapshot_put_calls": {
+        "orders": 12,
+        "reference": 12,
+        "employees": 12,
+        "dashboard": 12,
+        "notifications": 12,
+        "analytics": 12
+      },
+      "orders_application_returns": {
+        "completed_successful_calls": 12,
+        "returned_list_lengths": [
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500,
+          500
+        ]
+      },
+      "routes": {
+        "GET /api/reference": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 8820,
+          "request_start_ms": [
+            2201.278,
+            7200.985,
+            12200.109,
+            17200.669,
+            22200.093,
+            27200.736,
+            32199.141,
+            37200.187,
+            42200.15,
+            47200.043,
+            52200.272,
+            57200.478
+          ],
+          "full_response_latency_ms": {
+            "min": 35.743,
+            "mean": 46.527583333333325,
+            "p50": 46.697,
+            "p95": 58.694,
+            "max": 58.694
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/employees": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 2736,
+          "request_start_ms": [
+            2203.749,
+            7201.79,
+            12200.548,
+            17201.081,
+            22200.626,
+            27201.31,
+            32199.527,
+            37200.554,
+            42200.716,
+            47200.541,
+            52200.729,
+            57201.181
+          ],
+          "full_response_latency_ms": {
+            "min": 301.415,
+            "mean": 418.7164166666667,
+            "p50": 425.924,
+            "p95": 502.094,
+            "max": 502.094
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/orders": {
+          "requests": 12,
+          "status_counts": {
+            "304": 11,
+            "200": 1
+          },
+          "not_modified_responses": 11,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 473815,
+          "request_start_ms": [
+            2204.72,
+            7202.577,
+            12200.853,
+            17201.423,
+            22200.929,
+            27201.62,
+            32199.803,
+            37200.834,
+            42201.045,
+            47200.793,
+            52201.014,
+            57201.67
+          ],
+          "full_response_latency_ms": {
+            "min": 279.482,
+            "mean": 511.3161666666667,
+            "p50": 538.582,
+            "p95": 578.139,
+            "max": 578.139
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/dashboard": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 1896,
+          "request_start_ms": [
+            2205.649,
+            7203.484,
+            12201.153,
+            17201.884,
+            22201.235,
+            27201.929,
+            32200.123,
+            37201.062,
+            42201.374,
+            47201.043,
+            52201.244,
+            57202.1
+          ],
+          "full_response_latency_ms": {
+            "min": 116.958,
+            "mean": 419.04175000000004,
+            "p50": 447.846,
+            "p95": 492.019,
+            "max": 492.019
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/notifications": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 24,
+          "request_start_ms": [
+            2206.609,
+            7204.575,
+            12201.549,
+            17202.237,
+            22201.535,
+            27202.195,
+            32200.385,
+            37201.341,
+            42201.705,
+            47201.27,
+            52201.494,
+            57202.438
+          ],
+          "full_response_latency_ms": {
+            "min": 28.867,
+            "mean": 37.74325,
+            "p50": 35.751,
+            "p95": 47.204,
+            "max": 47.204
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/analytics": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 66444,
+          "request_start_ms": [
+            2207.235,
+            7205.25,
+            12201.837,
+            17202.511,
+            22201.805,
+            27202.486,
+            32200.612,
+            37201.657,
+            42201.94,
+            47201.655,
+            52201.72,
+            57202.907
+          ],
+          "full_response_latency_ms": {
+            "min": 306.551,
+            "mean": 456.94075000000004,
+            "p50": 486.89,
+            "p95": 539.545,
+            "max": 539.545
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/orders/:id": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "not_modified_responses": 0,
+          "not_modified_received_body_bytes": 0,
+          "logical_response_body_bytes": 21576,
+          "request_start_ms": [
+            3741.929,
+            8741.346,
+            13741.88,
+            18741.82,
+            23741.485,
+            28741.158,
+            33742.574,
+            38742.212,
+            43741.836,
+            48741.505,
+            53742.056,
+            58742.582
+          ],
+          "full_response_latency_ms": {
+            "min": 15.479,
+            "mean": 19.391083333333334,
+            "p50": 17.772,
+            "p95": 33.647,
+            "max": 33.647
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        }
+      },
+      "live_frames_completed": 3523,
+      "render_samples": 1146,
+      "max_sample_gap_ms": 144.023,
+      "application": {
+        "initial_offline": false,
+        "initial_has_error": false,
+        "offline_samples": 0,
+        "error_samples": 0,
+        "sampled_offline_transitions": 0,
+        "successful_global_refresh_observations": 12,
+        "refresh_last_updated_change_observed_at_phase_ms": [
+          2812.389,
+          7771.084,
+          12797.388,
+          17834.984,
+          22834.283,
+          27588.634,
+          32806.352,
+          37762.955,
+          42722.944,
+          47727.612,
+          52809.789,
+          57780.005
+        ],
+        "final_offline": false,
+        "final_has_error": false,
+        "initial_outbox_count": 0,
+        "final_outbox_count": 0,
+        "outbox_count_changed": false,
+        "nominal_application_healthy": true
+      },
+      "external_edit": {
+        "started_at_phase_ms": 31042.589,
+        "ack_at_phase_ms": 31076.294,
+        "ack_status": 200,
+        "ack_version": 2,
+        "last_absent_sample_at_phase_ms": 33748.495,
+        "first_present_sample_at_phase_ms": 33827.555,
+        "first_present_last_completed_frame_at_phase_ms": 33827.199,
+        "observed_present_at_or_before_ack": false,
+        "ack_to_first_observation_ms_signed": 2751.261,
+        "ack_to_render_interval_ms": {
+          "lower": 2672.201,
+          "upper": 2751.261
+        }
+      }
+    }
+  ]
+}

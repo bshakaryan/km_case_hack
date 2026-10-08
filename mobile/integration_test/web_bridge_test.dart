@@ -31,6 +31,8 @@ import 'package:naryad_ai/screens/order_detail_screen.dart';
 import 'package:naryad_ai/screens/workspace_screen.dart';
 import 'package:naryad_ai/widgets/order_photo.dart';
 
+import '../test/support/ai_review_wait.dart';
+
 const _title = String.fromEnvironment('BRIDGE_TITLE');
 const _baseUrl = String.fromEnvironment(
   'API_BASE_URL',
@@ -252,7 +254,7 @@ void main() {
         _step('PHOTOS_AND_PERMISSIONS_OK', {'orderId': orderId});
 
         await _submitReport(tester, fault, material, _firstReport, '2');
-        var submitted = await controller.loadOrder(order.id);
+        var submitted = await waitForAiReview(controller.api, order.id);
         expect(
           (submitted.data['completion'] as Json)['work_done'],
           _firstReport,
@@ -293,7 +295,7 @@ void main() {
           '1',
           rework: true,
         );
-        submitted = await controller.loadOrder(order.id);
+        submitted = await waitForAiReview(controller.api, order.id);
         expect(
           (submitted.data['completion'] as Json)['work_done'],
           _secondReport,

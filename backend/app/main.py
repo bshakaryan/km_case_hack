@@ -12,9 +12,10 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
+from anyio import from_thread
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -24,18 +25,51 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
+from .conditional_response import conditional_json_response
+from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
 from .migrations import upgrade_database
-from .models import AIAssessment, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, TimeNorm, utcnow
+from .models import AIAssessment, AIReviewJob, Area, AuthSession, Brigade, ClientCommand, DeviceToken, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Notification, Order, OrderEvent, Photo, SubmissionAttempt, TimeNorm, utcnow
 from .push import StubSender, dispatch_push, env_int, get_sender
-from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPatch, Transition
+from .schemas import Completion, DeviceRegistration, DeviceUnregister, Login, OrderCreate, OrderPage, OrderPatch, Transition
+from .order_paging import after_cursor, apply_scope, broad_search, decode_cursor, encode_cursor, fingerprint, order_tuple, sort_columns
 from .security import check_pin, hash_pin, token_hash
 from .seed import seed_database
-from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, audit, aware, downtime_minutes, effective_queue_statuses, employee_dict, iso, monitor_deadlines, notify, order_dict, photo_dict, queue_positions, shift_start, waiting_orders
+from .services import AIReviewStub, EXECUTION_FINISHED, TERMINAL, analytics, append_assignment, append_submission, append_submission_decision, audit, aware, current_participants, downtime_minutes, effective_queue_statuses, employee_dict, end_current_assignment, iso, monitor_deadlines, notify, order_dict, participant_ids, photo_dict, queue_positions, shift_start, waiting_orders, worker_order_access
 
 log = logging.getLogger(__name__)
 STATUS = {"issued", "accepted", "queued", "rejected", "in_progress", "paused", "completed", "ai_review", "rework", "closed", "cancelled"}
 PRIORITY = {"emergency", "high", "normal", "planned"}
 WS_AUTH_RECHECK_SECONDS = 30
+ORDER_NUMBER_ATTEMPTS = 5
+
+
+def order_number(assigned):
+    return f"Н-{assigned.year}-{secrets.token_hex(3).upper()}"
+
+
+def number_collision(error):
+    """Retry only the unique constraint on our generated order number."""
+    original = error.orig
+    if getattr(original, "sqlstate", None) == "23505":
+        return getattr(getattr(original, "diag", None), "constraint_name", None) == "ix_orders_number"
+    return str(original) == "UNIQUE constraint failed: orders.number"
+
+
+def prepare_photo(data):
+    """Decode and compress outside the transaction holding the order lock."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as original:
+                original.verify()
+            with Image.open(io.BytesIO(data)) as original:
+                photo_image = ImageOps.exif_transpose(original).convert("RGB")
+                photo_image.thumbnail((1920, 1920))
+                output = io.BytesIO()
+                photo_image.save(output, format="JPEG", quality=82, optimize=True)
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise HTTPException(422, "Файл не является допустимым изображением")
+    return output.getvalue()
 
 
 class Realtime:
@@ -54,12 +88,29 @@ class Realtime:
 
 
 def create_app(database_url=None, seed=True, monitor=True):
+    ai_mode = os.getenv("AI_REVIEW_MODE", "queued_stub").strip()
+    if ai_mode not in {"queued_stub", "inline_stub"}:
+        raise ValueError("AI_REVIEW_MODE must be queued_stub or inline_stub")
     engine = make_engine(database_url)
     sessions = session_factory(engine)
     realtime = Realtime()
     attempts = defaultdict(deque)
     # One sender instance keeps the OAuth2 access token cached across dispatches.
     push_sender = get_sender()
+
+    async def ai_loop():
+        while True:
+            try:
+                changed_orders = await asyncio.to_thread(dispatch_ai_jobs, sessions)
+                for order_id in changed_orders:
+                    await realtime.publish("orders.updated", order_id)
+                    await realtime.publish("notifications.updated")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # No provider exception text or submitted data enters logs.
+                log.warning("AI job dispatch unavailable; retrying")
+            await asyncio.sleep(1)
 
     def run_monitor():
         with sessions() as db:
@@ -99,7 +150,12 @@ def create_app(database_url=None, seed=True, monitor=True):
                 seed_database(db)
         task = asyncio.create_task(deadline_loop()) if monitor else None
         push_task = asyncio.create_task(push_loop()) if monitor and not isinstance(push_sender, StubSender) else None
+        ai_task = asyncio.create_task(ai_loop()) if monitor and ai_mode == "queued_stub" else None
         yield
+        if ai_task:
+            ai_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await ai_task
         if push_task:
             push_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -117,7 +173,9 @@ def create_app(database_url=None, seed=True, monitor=True):
     app.state.engine = engine
     app.state.sessions = sessions
     app.state.realtime = realtime
-    app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id"])
+    app.state.ai_review_mode = ai_mode
+    app.state.run_ai_jobs = lambda provider=None, limit=10: dispatch_ai_jobs(sessions, provider=provider, limit=limit)
+    app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Client-Command-Id", "X-Expected-Order-Version", "X-Previous-Client-Command-Id", "If-None-Match"], expose_headers=["ETag"])
 
     def get_db():
         with sessions() as db:
@@ -151,37 +209,49 @@ def create_app(database_url=None, seed=True, monitor=True):
             raise HTTPException(403, "Недостаточно прав для этого действия")
 
     def get_order(db, id_, user, lock=False):
+        if lock:
+            begin_sqlite_write(db)
         query = select(Order).where(Order.id == id_)
         if lock:
             query = query.with_for_update()
         order = db.scalar(query)
         if not order:
             raise HTTPException(404, "Наряд не найден")
-        if user.role == "worker" and order.assignee_id != user.id:
-            raise HTTPException(403, "Доступны только назначенные вам наряды")
+        if user.role == "worker" and not db.scalar(select(Order.id).where(Order.id == order.id, worker_order_access(user.id))):
+            raise HTTPException(403, "Доступны только наряды вашего текущего назначения")
         return order
 
-    def resolve_assignee(db, assignee_id, brigade_id):
+    def require_responsible(user, order):
+        if user.role == "worker" and order.assignee_id != user.id:
+            raise HTTPException(403, "Действие доступно только ответственному за наряд")
+
+    def lock_roster(db):
+        # Employee inserts/moves/shift changes and assignment snapshots share
+        # this lock: locking existing members alone misses new brigade members.
+        begin_sqlite_write(db)
+        if db.bind.dialect.name == "postgresql":
+            db.execute(sql_text("SELECT pg_advisory_xact_lock(1095648841, 2)"))
+
+    def resolve_assignment(db, assignee_id, brigade_id, responsible_id=None):
+        lock_roster(db)
         if brigade_id:
-            if not db.get(Brigade, brigade_id):
+            if not db.scalar(select(Brigade).where(Brigade.id == brigade_id).with_for_update()):
                 raise HTTPException(422, "Бригада не найдена")
             workers = list(db.scalars(select(Employee).where(Employee.role == "worker", Employee.brigade_id == brigade_id, Employee.on_shift.is_(True)).order_by(Employee.id).with_for_update()))
             if not workers:
                 raise HTTPException(422, "В бригаде нет работников на смене")
+            if responsible_id is not None:
+                if responsible_id not in {worker.id for worker in workers}:
+                    raise HTTPException(422, "Ответственный должен быть работником выбранной бригады на смене")
+                return responsible_id, workers
             counts = {w.id: db.scalar(select(func.count()).select_from(Order).where(Order.assignee_id == w.id, Order.status.notin_(TERMINAL))) for w in workers}
-            return min(workers, key=lambda w: counts[w.id]).id
-        person = db.get(Employee, assignee_id)
+            return min(workers, key=lambda w: (counts[w.id], w.id)).id, workers
+        person = db.scalar(select(Employee).where(Employee.id == assignee_id).with_for_update())
         if not person or person.role != "worker":
             raise HTTPException(422, "Исполнителем должен быть рабочий")
         if not person.on_shift:
             raise HTTPException(422, "Работник вне смены")
-        return person.id
-
-    async def changed(db, order):
-        db.commit()
-        await realtime.publish("orders.updated", order.id)
-        await realtime.publish("notifications.updated")
-        return order_dict(db, order, detail=True)
+        return person.id, [person]
 
     CLIENT_COMMAND_ID = re.compile(r"[A-Za-z0-9._:-]{8,64}")
 
@@ -191,8 +261,42 @@ def create_app(database_url=None, seed=True, monitor=True):
     def json_hash(payload):
         return request_hash(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str))
 
-    async def run_idempotent(db, user, request, kind, command_hash, status, perform, order_id=None):
+    def command_basis(request):
+        expected = request.headers.get("X-Expected-Order-Version")
+        previous = request.headers.get("X-Previous-Client-Command-Id")
+        if expected is not None and previous is not None:
+            raise HTTPException(422, "Укажите только одну основу версии наряда")
+        if expected is not None:
+            expected = expected.strip()
+            if not re.fullmatch(r"[1-9][0-9]{0,9}", expected) or int(expected) > 2_147_483_647:
+                raise HTTPException(422, "Некорректный X-Expected-Order-Version")
+            return "version", int(expected)
+        if previous is not None:
+            previous = previous.strip()
+            client_id = (request.headers.get("X-Client-Command-Id") or "").strip()
+            if not CLIENT_COMMAND_ID.fullmatch(previous) or not CLIENT_COMMAND_ID.fullmatch(client_id):
+                raise HTTPException(422, "X-Previous-Client-Command-Id требует корректный текущий X-Client-Command-Id")
+            return "previous", previous
+        return None, None
+
+    def check_order_version(db, user, request, order):
+        basis, value = command_basis(request)
+        expected = value
+        if basis == "previous":
+            receipt = db.scalar(select(ClientCommand).where(ClientCommand.employee_id == user.id, ClientCommand.client_id == value))
+            if receipt is None or receipt.response_status is None or not 200 <= receipt.response_status < 300 or receipt.order_id != order.id or receipt.order_version is None:
+                raise HTTPException(409, {"code": "order_precondition_unavailable", "message": "Нет подтверждённой предыдущей команды для этого наряда"})
+            expected = receipt.order_version
+        if basis is not None and order.version != expected:
+            raise HTTPException(409, {"code": "order_version_conflict", "message": "Наряд изменён. Сохранённое действие требует проверки.", "expected_version": expected, "current_version": order.version})
+
+    def run_idempotent(db, user, request, kind, command_hash, status, perform, order_id=None):
         scoped_hash = request_hash("client-command-v2", kind, "" if order_id is None else str(order_id), command_hash)
+        basis, value = command_basis(request)
+        if basis is not None:
+            if order_id is None:
+                raise HTTPException(422, "Основа версии доступна только для существующего наряда")
+            scoped_hash = request_hash("client-command-v3", kind, str(order_id), command_hash, basis, str(value))
         client_id = (request.headers.get("X-Client-Command-Id") or "").strip()
         if client_id:
             if not CLIENT_COMMAND_ID.fullmatch(client_id):
@@ -200,11 +304,11 @@ def create_app(database_url=None, seed=True, monitor=True):
             existing = db.scalar(select(ClientCommand).where(ClientCommand.employee_id == user.id, ClientCommand.client_id == client_id))
             if existing:
                 matches_request = existing.request_hash == scoped_hash
-                if existing.request_hash == command_hash:
+                if basis is None and existing.request_hash == command_hash:
                     # Legacy transition/completion hashes omitted the URL target.
                     # Replay only when the stored order response proves that target;
                     # an ambiguous record must never execute the command again.
-                    matches_request = kind not in {"transition", "complete"} or (
+                    matches_request = kind not in {"transition", "complete", "order_update"} or (
                         isinstance(existing.response_body, dict)
                         and type(existing.response_body.get("id")) is int
                         and existing.response_body["id"] == order_id
@@ -223,19 +327,23 @@ def create_app(database_url=None, seed=True, monitor=True):
             except IntegrityError:
                 db.rollback()
                 raise HTTPException(409, "Команда с таким идентификатором уже выполняется")
-        body, events = await perform()
+        body, events = perform()
         if claim is not None:
             claim.response_status = status
             claim.response_body = body
+            receipt_order_id = order_id if order_id is not None else body.get("id")
+            receipt_order = db.get(Order, receipt_order_id)
+            claim.order_id = receipt_order.id
+            claim.order_version = receipt_order.version
         db.commit()
         for type_, order_id in events:
-            await realtime.publish(type_, order_id)
+            from_thread.run(realtime.publish, type_, order_id)
         return JSONResponse(status_code=status, content=body)
 
-    def filtered(db, user, area_id=None, equipment_id=None, assignee_id=None, brigade_id=None, priority=None, status=None, search=None, from_date=None, to_date=None):
+    def filtered(db, user, area_id=None, equipment_id=None, assignee_id=None, brigade_id=None, priority=None, status=None, search=None, from_date=None, to_date=None, participant_access=False):
         query = select(Order)
         if user.role == "worker":
-            query = query.where(Order.assignee_id == user.id)
+            query = query.where(worker_order_access(user.id) if participant_access else Order.assignee_id == user.id)
         for key, value in [("area_id", area_id), ("equipment_id", equipment_id), ("assignee_id", assignee_id), ("brigade_id", brigade_id), ("priority", priority), ("status", status)]:
             if value is not None and value != "":
                 if key == "status":
@@ -318,7 +426,9 @@ def create_app(database_url=None, seed=True, monitor=True):
             allowed.add("pin")
         if not payload or set(payload) - allowed:
             raise HTTPException(422, "Неизвестные поля или пустое изменение")
-        existing = db.get(model, id_) if id_ else None
+        if model is Employee:
+            lock_roster(db)
+        existing = db.scalar(select(model).where(model.id == id_).with_for_update().execution_options(populate_existing=True)) if id_ else None
         if id_ and existing is None:
             raise HTTPException(404, "Запись не найдена")
         clean = {}
@@ -395,69 +505,212 @@ def create_app(database_url=None, seed=True, monitor=True):
         return result
 
     @app.get("/api/orders")
-    def orders(db: DB, user: User, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, priority: str | None = None, status: str | None = None, search: str | None = Query(None, max_length=200), from_date: str | None = None, to_date: str | None = None, limit: int = Query(1000, ge=1, le=5000)):
-        query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id, priority, status, search, from_date, to_date)
+    def orders(request: Request, db: DB, user: User, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, priority: str | None = None, status: str | None = None, search: str | None = Query(None, max_length=200), from_date: str | None = None, to_date: str | None = None, limit: int = Query(1000, ge=1, le=5000)):
+        require_role(user, "worker", "master", "manager", "admin")
+        query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id, priority, status, search, from_date, to_date, participant_access=True)
         refs = {"areas": {a.id: a for a in db.scalars(select(Area))}, "equipment": {e.id: e for e in db.scalars(select(Equipment))}, "employees": {p.id: p for p in db.scalars(select(Employee))}}
         positions = queue_positions(db)
         statuses = effective_queue_statuses(db)
-        return [order_dict(db, o, refs=refs, positions=positions, statuses=statuses) for o in db.scalars(query.order_by(Order.created_at.desc()).limit(limit))]
+        selected = list(db.scalars(query.order_by(Order.created_at.desc()).limit(limit)))
+        participants = current_participants(db, selected)
+        body = [order_dict(db, o, refs=refs, positions=positions, statuses=statuses, participants=participants[o.id]) for o in selected]
+        scope = {"user_id": user.id, "role": user.role,
+            "session": token_hash(request.headers["Authorization"][7:]),
+            "query": {"area_id": area_id, "equipment_id": equipment_id,
+                "assignee_id": assignee_id, "brigade_id": brigade_id,
+                "priority": priority or None, "status": status or None,
+                "search": search or None, "limit": limit,
+                "from_date": iso(parse_date(from_date)) if from_date else None,
+                "to_date": iso(parse_date(to_date, end=True)) if to_date else None}}
+        return conditional_json_response(body, scope=scope,
+            if_none_match=request.headers.getlist("If-None-Match"))
+
+    @app.get("/api/orders/page", response_model=OrderPage)
+    def orders_page(request: Request, db: DB, user: User,
+        area_id: int | None = None, equipment_id: int | None = None,
+        assignee_id: int | None = None, brigade_id: int | None = None,
+        priority: str | None = None, status: str | None = None,
+        search: str | None = Query(None, max_length=200),
+        from_date: str | None = None, to_date: str | None = None,
+        scope: Literal["all", "active", "closed"] = "all",
+        focus: Literal["all", "overdue", "emergency", "issued", "ai_review", "rejected"] = "all",
+        sort: Literal["newest", "deadline", "priority"] = "newest",
+        limit: int = Query(100, ge=1, le=200), cursor: str | None = Query(None, max_length=4096)):
+        require_role(user, "master", "worker", "manager", "admin")
+        canonical = {"area_id": area_id, "equipment_id": equipment_id,
+            "assignee_id": assignee_id, "brigade_id": brigade_id,
+            "priority": priority or None, "status": status or None,
+            "search": search.strip().lower() or None if search is not None else None,
+            "from_date": iso(parse_date(from_date).astimezone(timezone.utc)) if from_date else None,
+            "to_date": iso(parse_date(to_date, end=True).astimezone(timezone.utc)) if to_date else None,
+            "scope": scope, "focus": focus, "sort": sort}
+        query = filtered(db, user, area_id, equipment_id, assignee_id, brigade_id,
+            canonical["priority"], canonical["status"], from_date=canonical["from_date"],
+            to_date=canonical["to_date"], participant_access=True)
+        query = broad_search(db, query, canonical["search"])
+        query = apply_scope(query, scope, focus, utcnow())
+        query_fingerprint = fingerprint(user, canonical)
+        # Derive the signing key from the current persisted session identity.
+        # No bearer/hash is included in payloads, logs or error diagnostics.
+        session_hash = token_hash(request.headers["Authorization"][7:])
+        last = None
+        if cursor is not None:
+            ceiling, last = decode_cursor(cursor, query_fingerprint, sort, session_hash)
+        else:
+            ceiling = db.scalar(query.with_only_columns(func.max(Order.id), maintain_column_froms=True)) or 0
+        window = query.where(Order.id <= ceiling)
+        total = db.scalar(select(func.count()).select_from(window.subquery()))
+        columns, descending = sort_columns(sort)
+        selected_query = after_cursor(window, columns, descending, last) if last is not None else window
+        selected = list(db.scalars(selected_query.order_by(*[
+            column.desc() if descending else column.asc() for column in columns]).limit(limit + 1)))
+        more = len(selected) > limit
+        selected = selected[:limit]
+        refs = {"areas": {a.id: a for a in db.scalars(select(Area))},
+            "equipment": {e.id: e for e in db.scalars(select(Equipment))},
+            "employees": {p.id: p for p in db.scalars(select(Employee))}}
+        participants = current_participants(db, selected)
+        positions, statuses = queue_positions(db), effective_queue_statuses(db)
+        return {"items": [order_dict(db, order, refs=refs, positions=positions,
+                statuses=statuses, participants=participants[order.id]) for order in selected],
+            "next_cursor": encode_cursor(query_fingerprint, ceiling, order_tuple(selected[-1], sort), session_hash) if more else None,
+            "total": total}
+
+    @app.get("/api/equipment/{id_}")
+    def equipment_detail(id_: int, db: DB, user: User):
+        require_role(user, "master", "manager", "admin")
+        equipment = db.get(Equipment, id_)
+        if equipment is None:
+            raise HTTPException(404, "Оборудование не найдено")
+        area = db.get(Area, equipment.area_id)
+        return {key: getattr(equipment, key) for key in
+            ["id", "name", "inventory_number", "area_id", "type", "criticality"]} | {"area_name": area.name}
 
     @app.get("/api/orders/{id_}")
     def order_detail(id_: int, db: DB, user: User):
-        return order_dict(db, get_order(db, id_, user), detail=True)
+        return order_dict(db, get_order(db, id_, user), detail=True, user=user)
+
+    def submission_for_order(db, order, attempt_id):
+        attempt = db.get(SubmissionAttempt, attempt_id)
+        if attempt is None or attempt.order_id != order.id:
+            raise HTTPException(404, "Попытка сдачи не найдена")
+        return attempt
+
+    @app.get("/api/orders/{id_}/submissions/{attempt_id}/ai-review")
+    def get_ai_review(id_: int, attempt_id: int, db: DB, user: User):
+        order = get_order(db, id_, user)
+        attempt = submission_for_order(db, order, attempt_id)
+        job = db.scalar(select(AIReviewJob).where(AIReviewJob.attempt_id == attempt.id))
+        latest = db.scalar(select(SubmissionAttempt.id).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
+        retry_allowed = bool(user.role in {"master", "admin"} and job and job.status == "failed" and latest == attempt.id and order.status == "completed" and attempt.ai_review is None and attempt.assessment_id is None)
+        return {"attempt_id": attempt.id, "order_version": order.version, "ai_review": attempt.ai_review, "job": job_dict(job, retry_allowed)}
+
+    @app.post("/api/orders/{id_}/submissions/{attempt_id}/ai-review/retry")
+    def retry_ai_review(id_: int, attempt_id: int, db: DB, user: User, request: Request):
+        require_role(user, "master", "admin")
+        begin_sqlite_write(db)
+        order = get_order(db, id_, user, lock=True)
+        attempt = submission_for_order(db, order, attempt_id)
+        job = db.scalar(select(AIReviewJob).where(AIReviewJob.attempt_id == attempt.id).with_for_update())
+        def perform():
+            check_order_version(db, user, request, order)
+            latest = db.scalar(select(SubmissionAttempt.id).where(SubmissionAttempt.order_id == order.id).order_by(SubmissionAttempt.sequence.desc()).limit(1))
+            if job is None or job.status != "failed" or order.status != "completed" or latest != attempt.id or attempt.ai_review is not None or attempt.assessment_id is not None:
+                raise HTTPException(409, "Повтор доступен только для последней неудачной проверки завершённой работы")
+            job.status = "pending"
+            job.attempts = 0
+            job.next_attempt_at = utcnow()
+            job.finished_at = None
+            job.last_error_code = None
+            job.lease_token = None
+            job.lease_expires_at = None
+            order.version += 1
+            audit(db, order, "ai_review_retry", user.id, order.status, "Повтор формальной проверки ИИ")
+            db.flush()
+            return {"attempt_id": attempt.id, "order_version": order.version, "ai_review": None, "job": job_dict(job)}, [("orders.updated", order.id)]
+        return run_idempotent(db, user, request, "ai_review_retry", request_hash(str(attempt_id)), 200, perform, order_id=id_)
 
     @app.post("/api/orders", status_code=201)
-    async def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
+    def order_create(payload: OrderCreate, db: DB, user: User, request: Request):
         require_role(user, "master", "admin")
-        command_hash = json_hash(payload.model_dump())
+        command_payload = payload.model_dump()
+        if payload.responsible_id is None:
+            # New optional selection must not invalidate receipts produced
+            # before this field existed for otherwise identical old requests.
+            command_payload.pop("responsible_id")
+        command_hash = json_hash(command_payload)
 
-        async def perform():
+        def perform():
             equipment = db.get(Equipment, payload.equipment_id)
             if not equipment or equipment.area_id != payload.area_id:
                 raise HTTPException(422, "Оборудование не принадлежит выбранному участку")
             if payload.deadline <= utcnow():
                 raise HTTPException(422, "Срок нового наряда должен быть в будущем")
             data = payload.model_dump()
-            data["assignee_id"] = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
+            data.pop("responsible_id")
+            data["assignee_id"], participants = resolve_assignment(db, payload.assignee_id, payload.brigade_id, payload.responsible_id)
             assigned = utcnow()
-            order = Order(**data, number=f"Н-{assigned.year}-{secrets.token_hex(3).upper()}", status="issued", master_id=user.id, created_at=assigned, assigned_at=assigned)
-            db.add(order)
-            db.flush()
+            if db.bind.dialect.name == "sqlite" and not db.connection().connection.driver_connection.in_transaction:
+                # sqlite3's legacy transaction mode does not BEGIN for SELECT.
+                # A first SAVEPOINT must not become an independently committed
+                # transaction when it is released before audit/notifications.
+                db.connection().exec_driver_sql("BEGIN")
+            for attempt in range(ORDER_NUMBER_ATTEMPTS):
+                order = Order(**data, number=order_number(assigned), status="issued", master_id=user.id, created_at=assigned, assigned_at=assigned)
+                try:
+                    # Preserve the command claim and any assignment locks while
+                    # rolling back only a collided candidate, on either backend.
+                    with db.begin_nested():
+                        db.add(order)
+                        db.flush()
+                except IntegrityError as error:
+                    if not number_collision(error):
+                        raise
+                    if attempt == ORDER_NUMBER_ATTEMPTS - 1:
+                        raise HTTPException(503, "Не удалось выделить номер наряда. Повторите запрос позже.", headers={"Retry-After": "1"})
+                else:
+                    break
+            append_assignment(db, order, user.id, participants)
             audit(db, order, "issue", user.id, comment=payload.comment)
-            notify(db, [order.assignee_id], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
-            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+            notify(db, [person.id for person in participants], "Вам назначен наряд", f"{order.number}: {order.title}", "assigned", order.id)
+            return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "order_create", command_hash, 201, perform)
+        return run_idempotent(db, user, request, "order_create", command_hash, 201, perform)
 
     @app.patch("/api/orders/{id_}")
-    async def order_update(id_: int, payload: OrderPatch, db: DB, user: User):
+    def order_update(id_: int, payload: OrderPatch, db: DB, user: User, request: Request):
         require_role(user, "master", "admin")
         order = get_order(db, id_, user, lock=True)
-        if order.status in TERMINAL:
-            raise HTTPException(409, "Закрытый или отменённый наряд нельзя изменить")
-        changes = payload.model_dump(exclude_unset=True)
-        old_status = order.status
-        audit_fields = []
-        if "assignee_id" in changes or "brigade_id" in changes:
-            if order.status in ["in_progress", "paused", "completed", "ai_review"]:
-                raise HTTPException(409, "Переназначение доступно до начала работы или после возврата")
-            order.assignee_id = resolve_assignee(db, payload.assignee_id, payload.brigade_id)
-            order.brigade_id = payload.brigade_id
-            order.status = "issued"
-            assigned = utcnow()
-            order.assigned_at = max(assigned, aware(order.assigned_at) + timedelta(microseconds=1))
-            notify(db, [order.assignee_id], "Наряд переназначен вам", order.number, "assigned", order.id)
-        if payload.deadline is not None and payload.deadline <= utcnow():
-            raise HTTPException(422, "Новый срок должен быть в будущем")
-        for key, value in changes.items():
-            if key not in ["assignee_id", "brigade_id"]:
-                setattr(order, key, value)
-            audit_fields.append(f"{key}={iso(value) if isinstance(value, datetime) else value}")
-        audit(db, order, "edit", user.id, old_status, "; ".join(audit_fields))
-        return await changed(db, order)
+        def perform():
+            check_order_version(db, user, request, order)
+            if order.status in TERMINAL:
+                raise HTTPException(409, "Закрытый или отменённый наряд нельзя изменить")
+            changes = payload.model_dump(exclude_unset=True)
+            old_status = order.status
+            audit_fields = []
+            if "assignee_id" in changes or "brigade_id" in changes:
+                if order.status in ["in_progress", "paused", "completed", "ai_review"]:
+                    raise HTTPException(409, "Переназначение доступно до начала работы или после возврата")
+                order.assignee_id, participants = resolve_assignment(db, payload.assignee_id, payload.brigade_id, payload.responsible_id)
+                order.brigade_id = payload.brigade_id
+                order.status = "issued"
+                assigned = utcnow()
+                order.assigned_at = max(assigned, aware(order.assigned_at) + timedelta(microseconds=1))
+                append_assignment(db, order, user.id, participants)
+                notify(db, [person.id for person in participants], "Наряд переназначен вам", order.number, "assigned", order.id)
+            if payload.deadline is not None and payload.deadline <= utcnow():
+                raise HTTPException(422, "Новый срок должен быть в будущем")
+            for key, value in changes.items():
+                if key not in ["assignee_id", "brigade_id", "responsible_id"]:
+                    setattr(order, key, value)
+                audit_fields.append(f"{key}={iso(value) if isinstance(value, datetime) else value}")
+            order.version += 1
+            audit(db, order, "edit", user.id, old_status, "; ".join(audit_fields))
+            return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
+        return run_idempotent(db, user, request, "order_update", json_hash(payload.model_dump(exclude_unset=True)), 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/transition")
-    async def transition(id_: int, payload: Transition, db: DB, user: User, request: Request):
+    def transition(id_: int, payload: Transition, db: DB, user: User, request: Request):
         require_role(user, "worker", "master", "admin")
         action = payload.action
         if action in ["accept", "start", "pause", "resume", "reject"]:
@@ -469,11 +722,13 @@ def create_app(database_url=None, seed=True, monitor=True):
         else:
             raise HTTPException(422, "Неизвестное действие с нарядом")
         order = get_order(db, id_, user, lock=True)
+        require_responsible(user, order)
         command_hash = json_hash(payload.model_dump())
 
-        async def perform():
+        def perform():
+            check_order_version(db, user, request, order)
             if action == "queue" and order.status == "queued":
-                return order_dict(db, order, detail=True), [("orders.updated", order.id)]
+                return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id)]
             if action in ["reject", "pause", "rework", "cancel"] and not payload.reason:
                 raise HTTPException(422, "Укажите причину действия")
             transitions = {"accept": ({"issued", "rework"}, "accepted"), "queue": ({"issued", "rework", "accepted"}, "queued"), "reject": ({"issued", "accepted", "queued"}, "rejected"), "start": ({"accepted", "queued"}, "in_progress"), "pause": ({"in_progress"}, "paused"), "resume": ({"paused"}, "in_progress"), "close": ({"ai_review"}, "closed"), "rework": ({"ai_review"}, "rework"), "cancel": (STATUS - TERMINAL, "cancelled")}
@@ -506,6 +761,7 @@ def create_app(database_url=None, seed=True, monitor=True):
             if action == "cancel" and order.work_type == "unplanned":
                 order.downtime_minutes = downtime_minutes(order)
             order.status = target
+            order.version += 1
             if action == "close":
                 if payload.score is None:
                     raise HTTPException(422, "Мастер должен поставить итоговую оценку от 1 до 5")
@@ -520,20 +776,26 @@ def create_app(database_url=None, seed=True, monitor=True):
                 order.score = None
             if action == "cancel":
                 order.closed_at = utcnow()
+            if action in {"close", "cancel"}:
+                end_current_assignment(db, order, order.closed_at)
+            if action in {"close", "rework"}:
+                append_submission_decision(db, order, user.id, action, payload.score if action == "close" else None, payload.reason or payload.comment)
             audit(db, order, action, user.id, old_status, payload.reason or payload.comment)
             notice = "Наряд добавлен в очередь" if action == "queue" else "Статус наряда изменён"
-            notify(db, [order.assignee_id, order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
-            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+            notify(db, participant_ids(db, order) + [order.master_id], notice, f"{order.number}: {old_status} → {target}", "status", order.id)
+            return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
+        return run_idempotent(db, user, request, "transition", command_hash, 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/complete")
-    async def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
+    def complete(id_: int, payload: Completion, db: DB, user: User, request: Request):
         require_role(user, "worker")
         order = get_order(db, id_, user, lock=True)
+        require_responsible(user, order)
         command_hash = json_hash(payload.model_dump())
 
-        async def perform():
+        def perform():
+            check_order_version(db, user, request, order)
             if order.status != "in_progress":
                 raise HTTPException(409, "Завершить можно только наряд в работе")
             if not db.get(FaultCode, payload.fault_code_id):
@@ -541,12 +803,16 @@ def create_app(database_url=None, seed=True, monitor=True):
             if order.work_type == "unplanned" and not db.scalar(select(Photo.id).where(Photo.order_id == order.id, Photo.kind == "after")):
                 raise HTTPException(422, "Для внеплановой работы добавьте фото после выполнения")
             materials = []
+            writeoffs = []
             for usage in payload.materials:
                 material = db.get(Material, usage.material_id)
                 if not material:
                     raise HTTPException(422, f"Материал {usage.material_id} не найден")
                 materials.append({"material_id": material.id, "name": material.name, "unit": material.unit, "quantity": usage.quantity})
-                db.add(MaterialWriteoff(order_id=order.id, material_id=material.id, quantity=usage.quantity, author_id=user.id))
+                writeoff = MaterialWriteoff(order_id=order.id, material_id=material.id, quantity=usage.quantity, author_id=user.id)
+                db.add(writeoff)
+                writeoffs.append(writeoff)
+            submission_payload = {**payload.model_dump(exclude={"materials"}), "materials": [dict(material) for material in materials]}
             previous_materials = (order.completion or {}).get("materials", [])
             accumulated = {m["material_id"]: dict(m) for m in previous_materials}
             for material in materials:
@@ -559,53 +825,56 @@ def create_app(database_url=None, seed=True, monitor=True):
             if order.work_type == "unplanned":
                 order.downtime_minutes = round((order.completed_at - aware(order.created_at)).total_seconds() / 60, 1)
             order.status = "completed"
+            order.version += 1
             audit(db, order, "complete", user.id, "in_progress", payload.work_done)
-            order.ai_review = AIReviewStub.review(db, order)
-            db.add(AIAssessment(order_id=order.id, **order.ai_review))
-            order.status = "ai_review"
-            audit(db, order, "ai_review", user.id, "completed", "Автоматическая проверка заглушкой ИИ. Ожидается решение мастера.")
-            notify(db, [order.master_id], "Наряд ожидает приёмки", order.number, "review", order.id)
-            return order_dict(db, order, detail=True), [("orders.updated", order.id), ("notifications.updated", None)]
+            notify(db, participant_ids(db, order) + [order.master_id], "Статус наряда изменён", f"{order.number}: in_progress → completed", "status", order.id)
+            order.ai_review = None
+            attempt = append_submission(db, order, user.id, submission_payload, writeoffs)
+            job = enqueue_job(db, attempt)
+            if ai_mode == "inline_stub":
+                run_inline(db, order, attempt, job)
+            return order_dict(db, order, detail=True, user=user), [("orders.updated", order.id), ("notifications.updated", None)]
 
-        return await run_idempotent(db, user, request, "complete", command_hash, 200, perform, order_id=id_)
+        return run_idempotent(db, user, request, "complete", command_hash, 200, perform, order_id=id_)
 
     @app.post("/api/orders/{id_}/photos", status_code=201)
-    async def upload_photo(id_: int, db: DB, user: User, request: Request, file: UploadFile = File(...), kind: str = Form(...)):
+    def upload_photo(id_: int, db: DB, user: User, request: Request, file: UploadFile = File(...), kind: str = Form(...)):
         require_role(user, "worker", "master", "admin")
-        order = get_order(db, id_, user, lock=True)
+        get_order(db, id_, user)
+        # Release the read transaction/connection before potentially slow file
+        # IO and decoding. No row lock is held during either operation.
+        db.rollback()
         if kind not in ["before", "after"]:
             raise HTTPException(422, "Тип фото: before или after")
-        data = await file.read(10 * 1024 * 1024 + 1)
-        await file.close()
+        try:
+            data = file.file.read(10 * 1024 * 1024 + 1)
+        finally:
+            file.file.close()
         if len(data) > 10 * 1024 * 1024:
             raise HTTPException(413, "Размер фото не должен превышать 10 МБ")
         command_hash = request_hash(str(id_), kind, hashlib.sha256(data).hexdigest())
+        prepared = prepare_photo(data)
+        # A logout, reassignment or completion may have happened while the file
+        # was processed. Authenticate and authorize again against current data.
+        user = lookup_user(db, request.headers.get("Authorization", "")[7:])
+        require_role(user, "worker", "master", "admin")
+        order = get_order(db, id_, user, lock=True)
 
-        async def perform():
+        def perform():
+            check_order_version(db, user, request, order)
             if order.status in TERMINAL or order.status == "ai_review":
                 raise HTTPException(409, "Фотографии нельзя менять после сдачи или закрытия наряда")
             count = db.scalar(select(func.count()).select_from(Photo).where(Photo.order_id == id_, Photo.kind == kind))
             if count >= 5:
                 raise HTTPException(422, "Можно загрузить не более 5 фотографий каждого типа")
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", Image.DecompressionBombWarning)
-                    with Image.open(io.BytesIO(data)) as original:
-                        original.verify()
-                    with Image.open(io.BytesIO(data)) as original:
-                        photo_image = ImageOps.exif_transpose(original).convert("RGB")
-                        photo_image.thumbnail((1920, 1920))
-                        output = io.BytesIO()
-                        photo_image.save(output, format="JPEG", quality=82, optimize=True)
-            except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-                raise HTTPException(422, "Файл не является допустимым изображением")
-            photo = Photo(order_id=id_, kind=kind, data=output.getvalue(), author_id=user.id)
+            photo = Photo(order_id=id_, kind=kind, data=prepared, author_id=user.id)
             db.add(photo)
+            order.version += 1
             audit(db, order, "photo", user.id, order.status, f"Добавлена фотография: {kind}")
             db.flush()
-            return photo_dict(db, photo), [("orders.updated", id_)]
+            return {**photo_dict(db, photo), "order_version": order.version}, [("orders.updated", id_)]
 
-        return await run_idempotent(db, user, request, "photo_upload", command_hash, 201, perform, order_id=id_)
+        return run_idempotent(db, user, request, "photo_upload", command_hash, 201, perform, order_id=id_)
 
     @app.get("/api/photos/{id_}")
     def get_photo(id_: int, db: DB, user: User):
@@ -630,13 +899,13 @@ def create_app(database_url=None, seed=True, monitor=True):
         return [{"id": n.id, "title": n.title, "message": n.message, "kind": n.kind, "order_id": n.order_id, "created_at": iso(n.created_at), "read": n.read} for n in db.scalars(select(Notification).where(Notification.employee_id == user.id).order_by(Notification.created_at.desc(), Notification.id.desc()).limit(200))]
 
     @app.post("/api/notifications/{id_}/read")
-    async def mark_read(id_: int, db: DB, user: User):
+    def mark_read(id_: int, db: DB, user: User):
         notification = db.get(Notification, id_)
         if not notification or notification.employee_id != user.id:
             raise HTTPException(404, "Уведомление не найдено")
         notification.read = True
         db.commit()
-        await realtime.publish("notifications.updated")
+        from_thread.run(realtime.publish, "notifications.updated")
         return {"ok": True}
 
     @app.post("/api/devices", status_code=201)

@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -15,10 +16,12 @@ from datetime import datetime, timedelta, timezone
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8000").rstrip("/")
 
 
-def request(path, token=None, data=None, expected=200, raw=False, method=None, content_type=None):
+def request(path, token=None, data=None, expected=200, raw=False, method=None, content_type=None, expected_version=None):
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if expected_version is not None:
+        headers["X-Expected-Order-Version"] = str(expected_version)
     if data is not None:
         if not isinstance(data, bytes):
             data = json.dumps(data).encode()
@@ -69,27 +72,35 @@ def main():
     path = f"/api/orders/{order['id']}"
     assert order["status"] == "issued"
     request(path, users["worker3"]["token"], expected=403)
-    request(path + "/transition", worker, {"action": "accept"})
-    request(path + "/transition", worker, {"action": "start"})
+    order = request(path + "/transition", worker, {"action": "accept"}, expected_version=order["version"])
+    order = request(path + "/transition", worker, {"action": "start"}, expected_version=order["version"])
     completion = {
         "work_done": "Заменили уплотнение, очистили корпус и проверили соединения под нагрузкой. Течь устранена.",
         "fault_code_id": refs["fault_codes"][0]["id"],
         "materials": [{"material_id": refs["materials"][0]["id"], "quantity": 1}],
         "comment": "Автоматическая проверка HTTP API",
     }
-    request(path + "/complete", worker, completion, expected=422)
+    request(path + "/complete", worker, completion, expected=422, expected_version=order["version"])
     boundary = "naryad-smoke-photo-boundary"
     png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAK0lEQVR4nGPUDXVkIBcwka2TYVQzyYCJdC0IMKqZRMBEqgZkMKqZRECRZgAEAgDrVmwbbAAAAABJRU5ErkJggg==")
     body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"kind\"\r\n\r\nafter\r\n"
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.png\"\r\n"
             "Content-Type: image/png\r\n\r\n").encode() + png + f"\r\n--{boundary}--\r\n".encode()
-    photo = request(path + "/photos", worker, body, expected=(200, 201), content_type=f"multipart/form-data; boundary={boundary}")
+    photo = request(path + "/photos", worker, body, expected=(200, 201), content_type=f"multipart/form-data; boundary={boundary}", expected_version=order["version"])
+    order["version"] = photo["order_version"]
     request(f"/api/photos/{photo['id']}", expected=401)
     assert request(f"/api/photos/{photo['id']}", worker, raw=True).startswith(b"\xff\xd8")
-    order = request(path + "/complete", worker, completion)
+    order = request(path + "/complete", worker, completion, expected_version=order["version"])
+    # The queued mode acknowledges the report before its background review.
+    review_deadline = time.monotonic() + 60
+    while order["status"] == "completed" and time.monotonic() < review_deadline:
+        job = order.get("ai_review_job") or {}
+        assert job.get("status") not in ("failed", "superseded"), "Review could not finish; the report remains saved"
+        time.sleep(1)
+        order = request(path, worker)
     assert order["status"] == "ai_review" and order["ai_review"]["is_stub"] is True
-    request(path + "/transition", worker, {"action": "close", "score": 5}, expected=403)
-    order = request(path + "/transition", master, {"action": "close", "score": 5})
+    request(path + "/transition", worker, {"action": "close", "score": 5}, expected=403, expected_version=order["version"])
+    order = request(path + "/transition", master, {"action": "close", "score": 5}, expected_version=order["version"])
     assert order["status"] == "closed" and len(order["events"]) >= 6
     report = request("/api/reports/export?format=xlsx", master, raw=True)
     assert zipfile.is_zipfile(io.BytesIO(report)), "Excel export must be a real XLSX archive"
@@ -97,7 +108,7 @@ def main():
     assert analytics["summary"]["total"] >= 500 and analytics["is_stub"] is True
     request("/api/notifications", worker)
     integrations = request("/api/integrations", master)
-    assert integrations["ai"]["mode"] == "stub" and integrations["native"]["mode"] in ("stub", "fcm")
+    assert integrations["ai"]["mode"] in ("stub", "queued_stub", "inline_stub") and integrations["native"]["mode"] in ("stub", "fcm")
     print(f"PASS: auth, RBAC, seed, full lifecycle, mandatory photo, protected media, audit, Excel, analytics. Order {order['number']}.")
 
 

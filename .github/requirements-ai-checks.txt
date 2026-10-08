@@ -1,0 +1,7 @@
+# Imports used by runtime-policy, data-source and external-LLM boundary tests.
+# Keep these pins aligned with ai_service/requirements.txt; no CV/model runtime.
+httpx==0.28.1
+pydantic==2.11.3
+python-dotenv==1.0.1
+pytest==8.3.5
+SQLAlchemy==2.0.40

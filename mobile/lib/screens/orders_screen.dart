@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/app_controller.dart';
 import '../data/models.dart';
 import '../ui.dart';
+import 'order_journal_screen.dart';
 
 class OrdersScreen extends StatefulWidget {
   const OrdersScreen({
@@ -35,7 +36,10 @@ class _OrdersScreenState extends State<OrdersScreen> {
         'all' => true,
         'active' => !terminal(o),
         'history' => terminal(o),
-        'queue' => {'accepted', 'queued'}.contains(o.status),
+        'queue' =>
+          {'accepted', 'queued'}.contains(o.status) &&
+              (!widget.controller.user!.isWorker ||
+                  o.isResponsible(widget.controller.user!.id)),
         'emergency' => o.priority == 'emergency' && !terminal(o),
         'overdue' => o.isOverdue,
         _ => o.status == filter,
@@ -44,7 +48,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
           (widget.assigneeId == null ||
               o.data['assignee_id'] == widget.assigneeId) &&
           (area == null || o.data['area_id'] == area) &&
-          '${o.number} ${o.title} ${o.description} ${o.equipmentName} ${o.assigneeName}'
+          '${o.number} ${o.title} ${o.description} ${o.equipmentName} ${o.assigneeName} ${o.participants.map((p) => p.name).join(' ')}'
               .toLowerCase()
               .contains(query.toLowerCase());
     }).toList();
@@ -56,6 +60,24 @@ class _OrdersScreenState extends State<OrdersScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (_) => OrderJournalScreen(
+                    controller: widget.controller,
+                    assigneeId: widget.assigneeId,
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.manage_search),
+              label: const Text('Полный журнал'),
+            ),
+          ),
+        ),
         TextField(
           decoration: const InputDecoration(
             hintText: 'Номер, оборудование, проблема',

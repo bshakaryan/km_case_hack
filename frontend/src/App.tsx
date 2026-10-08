@@ -35,6 +35,7 @@ import {
   number,
   post,
   roleNames,
+  setToken,
   token,
 } from "./model";
 import type {
@@ -48,6 +49,11 @@ import type {
 } from "./model";
 import { Empty, ErrorBox, Loading, Priority, SectionTitle, Status } from "./ui";
 import { OrderBoard, CreateOrder, OrderDialog } from "./Orders";
+import { workerOrderGroups } from "./brigade";
+import { WorkerOrderSections } from "./WorkerOrderSections";
+import { OrderJournal } from "./OrderJournal";
+import { EquipmentHistory } from "./EquipmentHistory";
+import { canViewEquipmentHistory } from "./journal";
 import {
   AnalyticsPage,
   ReferencePage,
@@ -128,7 +134,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         login: demo || login.trim(),
         pin: demo ? "1234" : pin,
       });
-      localStorage.setItem("naryad_token", res.token);
+      setToken(res.token);
       onLogin(res.user);
     } catch (error) {
       setError((error as Error).message);
@@ -257,6 +263,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Id | null>(null);
+  const [equipmentHistory, setEquipmentHistory] = useState<Id | null>(null);
+  const [equipmentShowing, setEquipmentShowing] = useState(false);
+  const [workerHistoryOpen, setWorkerHistoryOpen] = useState(false);
+  const [journalInvalidation, setJournalInvalidation] = useState(0);
+  const operationalSignature = useRef("");
   const [create, setCreate] = useState(false);
   const [createContext, setCreateContext] = useState<CreateContext>({});
   const [boardContext, setBoardContext] = useState<BoardContext>({
@@ -283,7 +294,7 @@ export default function App() {
     ++session.current;
     pending.current = null;
     refreshAgain.current = false;
-    localStorage.removeItem("naryad_token");
+    setToken(null);
     setUser(null);
     setOrders([]);
     setEmployees([]);
@@ -291,6 +302,10 @@ export default function App() {
     setReference(emptyReference);
     setDashboard(null);
     setSelected(null);
+    setEquipmentHistory(null);
+    setEquipmentShowing(false);
+    setWorkerHistoryOpen(false);
+    operationalSignature.current = "";
     setCreate(false);
     setCreateContext({});
     setMenu(false);
@@ -357,6 +372,20 @@ export default function App() {
               api<Notice[]>("/notifications"),
             ]);
             if (!current()) return;
+            const signature = JSON.stringify(
+              o.map((item) => [
+                item.id,
+                item.version,
+                item.status,
+                item.queue_position,
+              ]),
+            );
+            if (
+              operationalSignature.current &&
+              signature !== operationalSignature.current
+            )
+              setJournalInvalidation((value) => value + 1);
+            operationalSignature.current = signature;
             setReference(r);
             setOrders(o);
             setEmployees(e);
@@ -418,7 +447,10 @@ export default function App() {
       socket.onmessage = (e) => {
         if (disposed) return;
         try {
-          if (JSON.parse(e.data).type !== "connected") void refresh();
+          const event = JSON.parse(e.data);
+          if (event.type === "orders.updated")
+            setJournalInvalidation((value) => value + 1);
+          if (event.type !== "connected") void refresh();
         } catch {
           /* Ignore non-event heartbeats. */
         }
@@ -455,18 +487,21 @@ export default function App() {
   const unread = notices.filter((n) => !n.read).length;
   const attention = attentionCounts(orders);
   const team = shiftTeam(employees);
-  const currentWork = orders.filter((o) =>
-    ["in_progress", "paused"].includes(o.status),
-  );
-  const incoming = orders
-    .filter((o) => ["issued", "accepted", "rework"].includes(o.status))
-    .sort(
-      (a, b) =>
-        Number(b.priority === "emergency") - Number(a.priority === "emergency"),
-    );
+  const workerGroups = workerOrderGroups(orders, user?.id ?? "");
+  const currentWork = workerGroups.current;
+  const incoming = workerGroups.incoming;
   function openCreate(context: CreateContext = {}) {
     setCreateContext(context);
     setCreate(true);
+  }
+  function openEquipmentHistory(id: Id) {
+    if (!user || !canViewEquipmentHistory(user.role)) return;
+    setEquipmentHistory(id);
+    setEquipmentShowing(true);
+  }
+  function closeOrder() {
+    setSelected(null);
+    if (equipmentHistory !== null) setEquipmentShowing(true);
   }
   function navigate(next: Page) {
     if (!user || !canOpenPage(user.role, next)) return;
@@ -833,6 +868,11 @@ export default function App() {
                         </div>
                       </section>
                     )}
+                    <WorkerOrderSections
+                      queue={workerGroups.queue}
+                      assisting={workerGroups.assisting}
+                      onSelect={setSelected}
+                    />
                   </>
                 ) : (
                   <>
@@ -931,32 +971,64 @@ export default function App() {
                     </div>
                   </>
                 ))}
-              {orders.length >= 5000 && (
+              {currentPage === "dashboard" && orders.length >= 5000 && (
                 <div className="simulation-banner">
                   <TriangleAlert size={18} />
                   <span>
                     Загружены последние 5000 нарядов. Счётчики групп и фильтры
-                    относятся к этой выборке; полная серверная пагинация ещё не
-                    подключена.
+                    относятся к этой выборке. Полная история доступна в журнале
+                    с серверной загрузкой страниц.
                   </span>
                 </div>
               )}
-              <OrderBoard
-                key={`${currentPage}-${boardContext.revision}`}
-                orders={orders}
-                reference={reference}
-                onSelect={setSelected}
-                compact={currentPage === "dashboard"}
-                initialFocus={boardContext.focus}
-                initialAssignee={boardContext.assigneeId}
-                initialEquipment={boardContext.equipmentId}
-                initialArea={boardContext.areaId}
-                initialBrigade={boardContext.brigadeId}
-                initialFromDate={boardContext.fromDate}
-                initialToDate={boardContext.toDate}
-                user={user}
-                onCreate={() => openCreate()}
-              />
+              {currentPage === "orders" ? (
+                <OrderJournal
+                  key={`${user.id}:${boardContext.revision}`}
+                  user={user}
+                  reference={reference}
+                  onSelect={setSelected}
+                  context={boardContext}
+                  initialScope={boardContext.focus === "all" ? "all" : "active"}
+                  invalidation={journalInvalidation}
+                  active={selected === null && !equipmentShowing}
+                />
+              ) : (
+                <OrderBoard
+                  key={`${currentPage}-${boardContext.revision}`}
+                  orders={orders}
+                  reference={reference}
+                  onSelect={setSelected}
+                  compact={currentPage === "dashboard"}
+                  initialFocus={boardContext.focus}
+                  initialAssignee={boardContext.assigneeId}
+                  initialEquipment={boardContext.equipmentId}
+                  initialArea={boardContext.areaId}
+                  initialBrigade={boardContext.brigadeId}
+                  initialFromDate={boardContext.fromDate}
+                  initialToDate={boardContext.toDate}
+                  user={user}
+                  onCreate={() => openCreate()}
+                />
+              )}
+              {currentPage === "dashboard" && user.role === "worker" && (
+                <details
+                  className="worker-full-history"
+                  onToggle={(event) =>
+                    setWorkerHistoryOpen(event.currentTarget.open)
+                  }
+                >
+                  <summary>Полная история доступных нарядов</summary>
+                  <OrderJournal
+                    key={String(user.id)}
+                    user={user}
+                    reference={reference}
+                    onSelect={setSelected}
+                    initialScope="closed"
+                    invalidation={journalInvalidation}
+                    active={workerHistoryOpen && selected === null}
+                  />
+                </details>
+              )}
               {currentPage === "dashboard" && user.role !== "worker" && (
                 <section className="workforce-section">
                   <SectionTitle
@@ -997,9 +1069,7 @@ export default function App() {
                           <span>
                             {employee.current_order || "Нет текущей работы"}
                           </span>
-                          <small>
-                            Ожидают начала: {employee.queue_count}
-                          </small>
+                          <small>Ожидают начала: {employee.queue_count}</small>
                         </div>
                         <div className="team-actions">
                           <button
@@ -1065,6 +1135,7 @@ export default function App() {
               refresh={refresh}
               notify={notify}
               onCreate={canManage ? openCreate : undefined}
+              onEquipment={openEquipmentHistory}
             />
           ) : (
             <IntegrationsPage />
@@ -1077,6 +1148,8 @@ export default function App() {
       </div>
       {create && (
         <CreateOrder
+          key={String(user.id)}
+          user={user}
           reference={reference}
           employees={employees}
           initialAssigneeId={createContext.assigneeId}
@@ -1092,6 +1165,7 @@ export default function App() {
       )}
       {selected !== null && (
         <OrderDialog
+          key={`${user.id}:${selected}`}
           id={selected}
           reference={reference}
           user={user}
@@ -1116,9 +1190,33 @@ export default function App() {
               order.status === "in_progress",
           )}
           version={version}
-          onClose={() => setSelected(null)}
+          active={!equipmentShowing}
+          onEquipment={
+            canViewEquipmentHistory(user.role)
+              ? openEquipmentHistory
+              : undefined
+          }
+          onClose={closeOrder}
           onChange={() => void refresh()}
           notify={notify}
+        />
+      )}
+      {equipmentHistory !== null && (
+        <EquipmentHistory
+          key={`${user.id}:${equipmentHistory}`}
+          id={equipmentHistory}
+          user={user}
+          reference={reference}
+          active={equipmentShowing}
+          invalidation={journalInvalidation}
+          onSelect={(id) => {
+            setSelected(id);
+            setEquipmentShowing(false);
+          }}
+          onClose={() => {
+            setEquipmentHistory(null);
+            setEquipmentShowing(false);
+          }}
         />
       )}
       {toast && (

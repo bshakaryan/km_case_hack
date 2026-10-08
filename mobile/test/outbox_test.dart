@@ -37,12 +37,14 @@ OutboxCommand queuedCommand(
   ownerId: ownerId,
   serverUrl: serverUrl,
   orderId: 9,
+  expectedVersion: 1,
   state: state,
   payload: payload,
 );
 
 Json orderJson(int id) => {
   'id': id,
+  'version': 1,
   'number': 'Н-$id',
   'title': 'Проверить двигатель',
   'description': 'Перегрев двигателя',
@@ -51,6 +53,7 @@ Json orderJson(int id) => {
   'work_type': 'unplanned',
   'area_name': 'Цех',
   'equipment_name': 'Двигатель',
+  'assignee_id': 7,
   'assignee_name': 'Исполнитель',
   'deadline': '2026-10-06T10:00:00Z',
   'is_overdue': false,
@@ -160,7 +163,7 @@ void main() {
               (request.method == 'POST' &&
                   request.url.path.endsWith('/photos'))) {
             photoPaths.add(request.url.path);
-            return jsonResponse({'ok': true}, 201);
+            return jsonResponse({'ok': true, 'order_version': 1}, 201);
           }
           return snapshotResponse(request, id: 42);
         }),
@@ -215,6 +218,7 @@ void main() {
     )..user = const User(id: 7, name: 'Исполнитель', role: 'worker');
     addTearDown(controller.dispose);
 
+    controller.orders = [WorkOrder.fromJson(orderJson(9))];
     final queued = await controller.transition(9, 'close', score: 4);
     expect(queued.id, 9);
     expect(controller.hasPendingWrites, isTrue);
@@ -508,6 +512,7 @@ void main() {
         ),
       )..user = const User(id: 7, name: 'Worker', role: 'worker');
       addTearDown(controller.dispose);
+      controller.orders = [WorkOrder.fromJson(orderJson(9))];
       await controller.uploadPhoto(9, bytes, 'after.jpg', 'after');
       expect((await store.outbox()).single.state, OutboxState.pending);
       var calls = 0;

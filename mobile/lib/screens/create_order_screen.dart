@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as imaging;
@@ -7,6 +10,8 @@ import 'package:timezone/timezone.dart' as tz;
 
 import '../data/api.dart';
 import '../data/app_controller.dart';
+import '../data/form_draft.dart';
+import '../data/local_store.dart';
 import '../data/models.dart';
 import '../ui.dart' show plantTime;
 
@@ -37,12 +42,14 @@ class CreateOrderScreen extends StatefulWidget {
     this.assigneeId,
     this.equipmentId,
     this.imagePicker,
+    this.photoPreparer,
   });
 
   final AppController controller;
   final int? assigneeId;
   final int? equipmentId;
   final ImagePicker? imagePicker;
+  final Future<Uint8List> Function(Uint8List)? photoPreparer;
 
   @override
   State<CreateOrderScreen> createState() => _CreateOrderScreenState();
@@ -51,15 +58,17 @@ class CreateOrderScreen extends StatefulWidget {
 enum _PhotoState { ready, uploading, uploaded, failed, uncertain }
 
 class _DraftPhoto {
-  _DraftPhoto(this.bytes, this.filename);
+  _DraftPhoto(this.bytes, this.filename) : encodedBytes = base64Encode(bytes);
   final Uint8List bytes;
+  final String encodedBytes;
   final String filename;
   _PhotoState state = _PhotoState.ready;
   bool queued = false;
   String? error;
 }
 
-class _CreateOrderScreenState extends State<CreateOrderScreen> {
+class _CreateOrderScreenState extends State<CreateOrderScreen>
+    with WidgetsBindingObserver {
   final _taskForm = GlobalKey<FormState>();
   final _title = TextEditingController();
   final _description = TextEditingController();
@@ -71,15 +80,380 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
   int? _equipmentId;
   int? _assigneeId;
   int? _brigadeId;
+  int? _responsibleId;
   bool _byBrigade = false;
   String _workType = 'unplanned';
   String _priority = 'normal';
   DateTime _deadline = DateTime.now().toUtc().add(const Duration(hours: 2));
   bool _busy = false;
+  bool _leaving = false;
   bool _picking = false;
   bool _creationUncertain = false;
   String? _error;
   WorkOrder? _created;
+  OrderWriteBasis? _photoBasis;
+  FormDraftSession? _draftSession;
+  late final NaryadApi _draftApi;
+  late final int? _draftOwnerId;
+  bool _draftLoading = true;
+  bool _draftSaving = false;
+  bool _draftSaved = false;
+  bool _draftClosed = false;
+  bool _acknowledgedMutation = false;
+  bool _autosaveRunning = false;
+  bool _autosaveRequested = false;
+  bool _disposing = false;
+  bool _draftUncertain = false;
+  int _draftRevision = 0;
+  String? _draftError;
+  String _draftState = FormDraftState.editing;
+  String? _operation;
+
+  Json _draftData() => {
+    'form_schema': 1,
+    'title': _title.text,
+    'description': _description.text,
+    'comment': _comment.text,
+    'step': _step,
+    'area_id': _areaId,
+    'equipment_id': _equipmentId,
+    'assignee_id': _assigneeId,
+    'brigade_id': _brigadeId,
+    'responsible_id': _responsibleId,
+    'by_brigade': _byBrigade,
+    'work_type': _workType,
+    'priority': _priority,
+    'deadline': _deadline.toUtc().toIso8601String(),
+    'created': _created?.toJson(),
+    'creation_uncertain': _creationUncertain,
+    'operation': _operation,
+    'error': _error,
+    'photos': _photos
+        .map(
+          (photo) => {
+            'bytes': photo.encodedBytes,
+            'filename': photo.filename,
+            'state': photo.state.name,
+            'queued': photo.queued,
+            'error': photo.error,
+          },
+        )
+        .toList(),
+  };
+
+  void _ensureDraftContext() {
+    if (!identical(widget.controller.api, _draftApi) ||
+        widget.controller.user?.id != _draftOwnerId) {
+      throw const ApiException(
+        'Контекст формы изменился. Черновик принадлежит исходному аккаунту и серверу.',
+        401,
+      );
+    }
+  }
+
+  List<_DraftPhoto> _parsePhotos(Json data) {
+    final requiredKeys = {
+      'form_schema',
+      'title',
+      'description',
+      'comment',
+      'step',
+      'area_id',
+      'equipment_id',
+      'assignee_id',
+      'brigade_id',
+      'by_brigade',
+      'work_type',
+      'priority',
+      'deadline',
+      'created',
+      'creation_uncertain',
+      'operation',
+      'error',
+      'photos',
+    };
+    if (!data.keys.toSet().containsAll(requiredKeys) ||
+        data['form_schema'] != 1 ||
+        data['title'] is! String ||
+        data['description'] is! String ||
+        data['comment'] is! String ||
+        !const {0, 1}.contains(data['step']) ||
+        data['by_brigade'] is! bool ||
+        data['creation_uncertain'] is! bool ||
+        !const {'planned', 'unplanned'}.contains(data['work_type']) ||
+        !const {
+          'normal',
+          'high',
+          'emergency',
+          'planned',
+        }.contains(data['priority']) ||
+        data['deadline'] is! String ||
+        DateTime.tryParse(data['deadline'] as String) == null ||
+        !const {null, 'create', 'photo'}.contains(data['operation']) ||
+        (data['error'] != null && data['error'] is! String) ||
+        data['photos'] is! List ||
+        (data['photos'] as List).length > 5) {
+      throw const FormatException(
+        'Сохранённая форма повреждена. Исходный черновик оставлен без изменений.',
+      );
+    }
+    for (final key in [
+      'area_id',
+      'equipment_id',
+      'assignee_id',
+      'brigade_id',
+      'responsible_id',
+    ]) {
+      if (data[key] != null && data[key] is! int) {
+        throw const FormatException('Выбор в черновике повреждён.');
+      }
+    }
+    final created = data['created'];
+    if (created != null &&
+        (created is! Map ||
+            created['id'] is! int ||
+            created['id'] == 0 ||
+            created['status'] is! String)) {
+      throw const FormatException(
+        'Подтверждение выдачи в черновике повреждено.',
+      );
+    }
+    return (data['photos'] as List).map((row) {
+      if (row is! Map ||
+          row['bytes'] is! String ||
+          row['filename'] is! String ||
+          row['queued'] is! bool ||
+          !row.containsKey('error') ||
+          (row['error'] != null && row['error'] is! String) ||
+          !_PhotoState.values.any((value) => value.name == row['state'])) {
+        throw const FormatException('Снимок в черновике повреждён.');
+      }
+      final bytes = base64Decode(row['bytes'] as String);
+      if (bytes.length > 10 * 1024 * 1024 ||
+          imaging.decodeImage(bytes) == null) {
+        throw const FormatException('Снимок в черновике невозможно прочитать.');
+      }
+      final photo = _DraftPhoto(bytes, row['filename'] as String);
+      photo.state = _PhotoState.values.firstWhere(
+        (value) => value.name == row['state'],
+      );
+      if (photo.state == _PhotoState.uploading) {
+        photo.state = _PhotoState.uncertain;
+      }
+      photo.queued = row['queued'] as bool;
+      photo.error = row['error'] as String?;
+      return photo;
+    }).toList();
+  }
+
+  Future<void> _restoreDraft() async {
+    try {
+      final session = await widget.controller.openFormDraft(
+        FormDraftKind.create,
+      );
+      final draft = await session.read();
+      _ensureDraftContext();
+      if (!mounted) return;
+      if (draft != null) {
+        final data = draft.data;
+        final restoredPhotos = _parsePhotos(data);
+        _title.text = data['title'] as String? ?? '';
+        _description.text = data['description'] as String? ?? '';
+        _comment.text = data['comment'] as String? ?? '';
+        _step = data['step'] == 1 ? 1 : 0;
+        _areaId = data['area_id'] as int?;
+        _equipmentId = data['equipment_id'] as int?;
+        _assigneeId = data['assignee_id'] as int?;
+        _brigadeId = data['brigade_id'] as int?;
+        _responsibleId = data['responsible_id'] as int?;
+        _byBrigade = data['by_brigade'] == true;
+        _workType = data['work_type'] as String? ?? 'unplanned';
+        _priority = data['priority'] as String? ?? 'normal';
+        _deadline = DateTime.parse(data['deadline'] as String);
+        if (data['created'] is Map) {
+          _created = WorkOrder.fromJson(
+            Map<String, dynamic>.from(data['created'] as Map),
+          );
+        }
+        _photoBasis = draft.basis;
+        _creationUncertain = data['creation_uncertain'] == true;
+        _operation = data['operation'] as String?;
+        _error = data['error'] as String?;
+        _draftState = draft.state;
+        _draftUncertain =
+            draft.state != FormDraftState.editing ||
+            _creationUncertain ||
+            restoredPhotos.any((photo) => photo.state == _PhotoState.uncertain);
+        if (_draftUncertain) _draftState = FormDraftState.uncertain;
+        _photos
+          ..clear()
+          ..addAll(restoredPhotos);
+        if (_draftUncertain) {
+          if (_created == null) _creationUncertain = true;
+          _error = 'Предыдущая отправка прервалась. Наряд или фото могли попасть на сервер либо в очередь. Проверьте карточку и очередь; новая отправка из черновика заблокирована.';
+        }
+        _draftSaved = true;
+      }
+      _draftSession = session;
+    } catch (error) {
+      if (mounted) _draftError = 'Не удалось открыть черновик: $error';
+    } finally {
+      if (mounted) setState(() => _draftLoading = false);
+    }
+  }
+
+  Future<bool> _saveDraft({
+    String? state,
+    bool acknowledgeSubmission = false,
+    bool updateUi = true,
+  }) async {
+    if (_draftClosed || _draftLoading) return false;
+    final session = _draftSession;
+    if (session == null) return false;
+    if (state != null) _draftState = state;
+    final revision = ++_draftRevision;
+    if (mounted && updateUi && !_disposing) {
+      setState(() {
+        _draftSaving = true;
+        _draftSaved = false;
+      });
+    }
+    try {
+      final draft = FormDraft(
+        kind: FormDraftKind.create,
+        data: _draftData(),
+        basis: _photoBasis,
+        state: _draftState,
+      );
+      if (acknowledgeSubmission) _acknowledgedMutation = true;
+      final acknowledged =
+          _acknowledgedMutation && _draftState == FormDraftState.editing;
+      await session.save(draft, acknowledgeSubmission: acknowledged);
+      if (acknowledged) _acknowledgedMutation = false;
+      if (mounted && updateUi && !_disposing && revision == _draftRevision) {
+        setState(() {
+          _draftSaving = false;
+          _draftSaved = !_autosaveRequested;
+          _draftError = null;
+        });
+      }
+      return true;
+    } catch (error) {
+      if (mounted && updateUi && !_disposing && revision == _draftRevision) {
+        setState(() {
+          _draftSaving = false;
+          _draftSaved = false;
+          _draftError = 'Черновик не сохранён: $error';
+        });
+      }
+      return false;
+    }
+  }
+
+  void _draftChanged() {
+    if (_draftLoading || _draftClosed || _disposing) return;
+    _autosaveRequested = true;
+    if (!_autosaveRunning) unawaited(_autosave());
+  }
+
+  Future<void> _autosave() async {
+    _autosaveRunning = true;
+    try {
+      while (_autosaveRequested && mounted && !_disposing && !_draftClosed) {
+        _autosaveRequested = false;
+        await _saveDraft();
+      }
+    } finally {
+      _autosaveRunning = false;
+    }
+  }
+
+  void _edit(VoidCallback change) {
+    setState(change);
+    _draftChanged();
+  }
+
+  Future<void> _closeUnavailable() async {
+    final close = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Черновик недоступен'),
+        content: const Text(
+          'Сохранённый черновик не изменён. Можно закрыть форму и повторить открытие позже.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Остаться'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Закрыть форму'),
+          ),
+        ],
+      ),
+    );
+    if (close == true && mounted) {
+      setState(() => _draftClosed = true);
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) Navigator.pop(context);
+    }
+  }
+
+  Future<void> _leave({bool delete = false}) async {
+    if (_busy || _leaving || _picking || _draftLoading) return;
+    if (_draftSession == null) {
+      await _closeUnavailable();
+      return;
+    }
+    if (delete) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Удалить черновик?'),
+          content: Text(
+            _draftUncertain || _creationUncertain || _created != null
+                ? 'Сначала проверьте карточку наряда и очередь отправки. Удаление черновика не отменяет уже выданный наряд, загруженные фото или команды в очереди. После удаления форма закроется.'
+                : 'Введённые поля и неотправленные снимки будут удалены с устройства.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Отмена'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(
+                _draftUncertain || _creationUncertain
+                    ? 'Проверил, удалить черновик'
+                    : 'Удалить черновик',
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      try {
+        await _draftSession!.delete();
+        _draftClosed = true;
+      } catch (error) {
+        if (mounted) {
+          setState(() => _draftError = 'Не удалось удалить черновик: $error');
+        }
+        return;
+      }
+    } else {
+      setState(() => _leaving = true);
+      if (!await _saveDraft()) {
+        if (mounted) setState(() => _leaving = false);
+        return;
+      }
+    }
+    if (!mounted) return;
+    setState(() => _draftClosed = true);
+    await WidgetsBinding.instance.endOfFrame;
+    if (mounted) Navigator.pop(context, _created);
+  }
 
   List<Json> _reference(String key) =>
       (widget.controller.reference[key] as List? ?? [])
@@ -96,12 +470,19 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _draftApi = widget.controller.api;
+    _draftOwnerId = widget.controller.user?.id;
     _picker = widget.imagePicker ?? ImagePicker();
     _assigneeId = widget.assigneeId;
     _equipmentId = widget.equipmentId;
     final equipment = _find(_reference('equipment'), _equipmentId);
     _areaId = equipment?['area_id'] as int?;
     widget.controller.addListener(_controllerChanged);
+    _title.addListener(_draftChanged);
+    _description.addListener(_draftChanged);
+    _comment.addListener(_draftChanged);
+    unawaited(_restoreDraft());
   }
 
   void _controllerChanged() {
@@ -116,7 +497,27 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      if (!_draftClosed && !_draftLoading && _draftSession != null) {
+        unawaited(_saveDraft());
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _disposing = true;
+    _autosaveRequested = false;
+    // Capture the latest edit while text controllers still exist. The frozen
+    // session prevents a late write from moving to another account or reviving
+    // a deleted draft. Navigation itself already awaits its final write.
+    if (!_draftClosed && !_draftLoading && _draftSession != null) {
+      unawaited(_saveDraft(updateUi: false));
+    }
     widget.controller.removeListener(_controllerChanged);
     _title.dispose();
     _description.dispose();
@@ -272,7 +673,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
   Future<void> _chooseArea() async {
     final row = await _choose(title: 'Участок', rows: _reference('areas'));
     if (!mounted || row == null) return;
-    setState(() {
+    _edit(() {
       if (_areaId != row['id']) _equipmentId = null;
       _areaId = row['id'] as int;
       _error = null;
@@ -287,7 +688,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
           .toList(),
       subtitle: (row) => 'Инв. № ${row['inventory_number'] ?? '—'}',
     );
-    if (mounted && row != null) setState(() => _equipmentId = row['id'] as int);
+    if (mounted && row != null) _edit(() => _equipmentId = row['id'] as int);
   }
 
   Future<void> _chooseAssignee() async {
@@ -298,16 +699,42 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
       subtitle: _byBrigade ? null : _employeeDetail,
     );
     if (!mounted || row == null) return;
-    setState(() {
+    _edit(() {
       if (_byBrigade) {
         _brigadeId = row['id'] as int;
         _assigneeId = null;
+        _responsibleId = null;
       } else {
         _assigneeId = row['id'] as int;
         _brigadeId = null;
+        _responsibleId = null;
       }
       _error = null;
     });
+  }
+
+  List<Json> get _eligibleParticipants => widget.controller.employees
+      .where(
+        (row) =>
+            row['brigade_id'] == _brigadeId &&
+            row['role'] == 'worker' &&
+            row['on_shift'] == true,
+      )
+      .toList();
+
+  Future<void> _chooseResponsible() async {
+    final row = await _choose(
+      title: 'Ответственный за общий результат',
+      rows: _eligibleParticipants,
+      employees: true,
+      subtitle: _employeeDetail,
+    );
+    if (mounted && row != null) {
+      _edit(() {
+        _responsibleId = row['id'] as int;
+        _error = null;
+      });
+    }
   }
 
   Future<void> _chooseDeadline() async {
@@ -335,7 +762,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
       time.hour,
       time.minute,
     ).toUtc();
-    setState(() {
+    _edit(() {
       _deadline = deadline;
       _error = deadline.isAfter(DateTime.now().toUtc())
           ? null
@@ -357,17 +784,17 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
         imageQuality: 90,
       );
       if (picked == null) return;
-      final bytes = await compute(
-        prepareOrderPhoto,
-        await picked.readAsBytes(),
-      );
+      final original = await picked.readAsBytes();
+      final bytes =
+          await (widget.photoPreparer?.call(original) ??
+              compute(prepareOrderPhoto, original));
       if (bytes.length > 10 * 1024 * 1024) {
         throw const FormatException(
           'Фото слишком большое. Выберите другой снимок.',
         );
       }
       if (mounted) {
-        setState(
+        _edit(
           () => _photos.add(
             _DraftPhoto(
               bytes,
@@ -375,6 +802,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
             ),
           ),
         );
+        await _saveDraft();
       }
     } catch (_) {
       if (mounted) {
@@ -394,6 +822,17 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
       return false;
     }
     final employee = _find(widget.controller.employees, _assigneeId);
+    if (_byBrigade &&
+        (_eligibleParticipants.isEmpty ||
+            (_responsibleId != null &&
+                !_eligibleParticipants.any(
+                  (row) => row['id'] == _responsibleId,
+                )))) {
+      setState(
+        () => _error = 'В бригаде нет работников на смене либо выбранный ответственный недоступен. Проверьте назначение.',
+      );
+      return false;
+    }
     if (!_byBrigade &&
         (employee == null ||
             employee['on_shift'] == false ||
@@ -419,7 +858,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
     }
     if (valid) {
       FocusScope.of(context).unfocus();
-      setState(() {
+      _edit(() {
         _step = 1;
         _error = null;
       });
@@ -427,7 +866,14 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
   }
 
   Future<void> _submit() async {
-    if (_busy || _picking || _creationUncertain) return;
+    if (_busy ||
+        _picking ||
+        _creationUncertain ||
+        _draftUncertain ||
+        _draftLoading ||
+        _draftSession == null) {
+      return;
+    }
     if (_created == null && !_validateAssignment()) return;
     setState(() {
       _busy = true;
@@ -445,14 +891,27 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
             'brigade_id': _brigadeId
           else
             'assignee_id': _assigneeId,
+          if (_byBrigade && _responsibleId != null)
+            'responsible_id': _responsibleId,
           'priority': _priority,
           'deadline': _deadline.toUtc().toIso8601String(),
           'comment': _comment.text.trim(),
         };
         try {
+          _operation = 'create';
+          if (!await _saveDraft(state: FormDraftState.submitting)) return;
+          _ensureDraftContext();
           final created = await widget.controller.createOrder(payload);
           if (!mounted) return;
           setState(() => _created = created);
+          _photoBasis = widget.controller.captureOrderBasis(created);
+          _operation = null;
+          if (!await _saveDraft(
+            state: FormDraftState.editing,
+            acknowledgeSubmission: true,
+          )) {
+            return;
+          }
         } on ApiException catch (error) {
           if (!mounted) return;
           setState(() {
@@ -461,6 +920,14 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
                 ? 'Ответ о выдаче не получен. Наряд мог сохраниться. Вернитесь к списку и проверьте его перед новой выдачей.'
                 : error.message;
           });
+          _draftUncertain = _creationUncertain;
+          _operation = _creationUncertain ? 'create' : null;
+          await _saveDraft(
+            state: _creationUncertain
+                ? FormDraftState.uncertain
+                : FormDraftState.editing,
+            acknowledgeSubmission: !_creationUncertain,
+          );
           return;
         } catch (_) {
           if (mounted) {
@@ -469,6 +936,8 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
               _error = 'Не удалось подтвердить выдачу. Проверьте список нарядов перед новой попыткой.';
             });
           }
+          _draftUncertain = true;
+          await _saveDraft(state: FormDraftState.uncertain);
           return;
         }
       }
@@ -483,17 +952,32 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
           photo.error = null;
         });
         try {
-          await widget.controller.uploadPhoto(
+          _operation = 'photo';
+          if (!await _saveDraft(state: FormDraftState.submitting)) {
+            if (mounted) setState(() => photo.state = _PhotoState.failed);
+            return;
+          }
+          _ensureDraftContext();
+          final commandId = await widget.controller.uploadPhoto(
             _created!.id,
             photo.bytes,
             photo.filename,
             'before',
+            basis: _photoBasis,
           );
+          _photoBasis = OrderWriteBasis(previousCommandId: commandId);
           if (!mounted) return;
           setState(() {
             photo.state = _PhotoState.uploaded;
             photo.queued = widget.controller.isOrderPending(_created!.id);
           });
+          _operation = null;
+          if (!await _saveDraft(
+            state: FormDraftState.editing,
+            acknowledgeSubmission: true,
+          )) {
+            return;
+          }
         } on ApiException catch (error) {
           if (!mounted) return;
           setState(() {
@@ -504,6 +988,14 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
                 ? 'Нет подтверждения. Проверьте фото в наряде.'
                 : error.message;
           });
+          _draftUncertain = error.requestMayHaveSucceeded;
+          _operation = _draftUncertain ? 'photo' : null;
+          await _saveDraft(
+            state: _draftUncertain
+                ? FormDraftState.uncertain
+                : FormDraftState.editing,
+            acknowledgeSubmission: !_draftUncertain,
+          );
           // An uncertain upload must never be replayed without server deduplication.
           if (error.requestMayHaveSucceeded) break;
         } catch (_) {
@@ -512,12 +1004,27 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
             photo.state = _PhotoState.uncertain;
             photo.error = 'Нет подтверждения. Проверьте фото в наряде.';
           });
+          _draftUncertain = true;
+          await _saveDraft(state: FormDraftState.uncertain);
           break;
         }
       }
       if (!mounted) return;
       if (_photos.every((photo) => photo.state == _PhotoState.uploaded)) {
-        Navigator.pop(context, _created);
+        try {
+          await _draftSession!.delete();
+          if (!mounted) return;
+          setState(() => _draftClosed = true);
+          await WidgetsBinding.instance.endOfFrame;
+          if (mounted) Navigator.pop(context, _created);
+        } catch (error) {
+          if (mounted) {
+            setState(
+              () => _draftError =
+                  'Наряд обработан, но не удалось удалить черновик: $error',
+            );
+          }
+        }
       } else {
         setState(
           () => _error = _created!.pendingSync
@@ -647,7 +1154,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
               if (_created == null && !_busy && !_creationUncertain)
                 IconButton(
                   tooltip: 'Убрать снимок ${_photos.indexOf(photo) + 1}',
-                  onPressed: () => setState(() => _photos.remove(photo)),
+                  onPressed: () => _edit(() => _photos.remove(photo)),
                   icon: const Icon(Icons.close),
                 ),
             ],
@@ -759,7 +1266,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
             ],
             selected: {_workType},
             onSelectionChanged: (selected) =>
-                setState(() => _workType = selected.first),
+                _edit(() => _workType = selected.first),
           ),
           const SizedBox(height: 20),
           TextFormField(
@@ -802,6 +1309,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
   Widget _assignment() {
     final employee = _find(widget.controller.employees, _assigneeId);
     final brigade = _find(_reference('brigades'), _brigadeId);
+    final responsible = _find(widget.controller.employees, _responsibleId);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -816,10 +1324,11 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
             ButtonSegment(value: true, label: Text('Бригада')),
           ],
           selected: {_byBrigade},
-          onSelectionChanged: (selected) => setState(() {
+          onSelectionChanged: (selected) => _edit(() {
             _byBrigade = selected.first;
             _assigneeId = null;
             _brigadeId = null;
+            _responsibleId = null;
           }),
         ),
         const SizedBox(height: 16),
@@ -833,14 +1342,28 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
               ? null
               : _employeeDetail(employee),
         ),
-        if (_byBrigade)
-          const Padding(
-            padding: EdgeInsets.only(bottom: 16),
+        if (_byBrigade) ...[
+          _choice(
+            'Ответственный за сдачу',
+            _responsibleId == null
+                ? 'Автоматический выбор сервера'
+                : '${responsible?['name'] ?? 'Выбранный работник недоступен'}',
+            _brigadeId == null ? null : _chooseResponsible,
+            detail: 'Общий наряд читают все назначенные участники; принимает и сдаёт один ответственный.',
+          ),
+          if (_responsibleId != null)
+            TextButton(
+              onPressed: () => _edit(() => _responsibleId = null),
+              child: const Text('Выбрать ответственного автоматически'),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
             child: Text(
-              'В текущей версии сервер назначит одного доступного работника бригады. Ответственный появится в выданном наряде.',
-              style: TextStyle(fontSize: 14, color: Color(0xFF536275)),
+              'Сервер зафиксирует состав работников на смене при назначении. Без выбора ответственного назначит наименее загруженного. Состав и ответственный подтверждаются после отправки.',
+              style: const TextStyle(fontSize: 14, color: Color(0xFF536275)),
             ),
           ),
+        ],
         _choice(
           'Срок исполнения *',
           _deadlineLabel(),
@@ -853,7 +1376,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
             for (final hours in [1, 2, 4])
               ActionChip(
                 label: Text('Через $hours ч'),
-                onPressed: () => setState(() {
+                onPressed: () => _edit(() {
                   _deadline = DateTime.now().toUtc().add(
                     Duration(hours: hours),
                   );
@@ -884,7 +1407,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
                 selectedColor: item.key == 'emergency'
                     ? const Color(0xFFFCE8E6)
                     : null,
-                onSelected: (_) => setState(() => _priority = item.key),
+                onSelected: (_) => _edit(() => _priority = item.key),
               ),
           ],
         ),
@@ -944,7 +1467,10 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
           photo.state == _PhotoState.ready || photo.state == _PhotoState.failed,
     );
     return PopScope(
-      canPop: !_busy && !_picking,
+      canPop: _draftClosed,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) unawaited(_leave());
+      },
       child: Scaffold(
         appBar: AppBar(
           title: Text(
@@ -957,180 +1483,241 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> {
           leading: IconButton(
             tooltip: 'Назад',
             icon: const Icon(Icons.arrow_back),
-            onPressed: _busy || _picking
+            onPressed: _busy || _leaving || _picking || _draftLoading
                 ? null
                 : () {
-                    if (_step == 1 && !partial && !_creationUncertain) {
-                      setState(() {
+                    if (_draftSession == null) {
+                      unawaited(_closeUnavailable());
+                      return;
+                    }
+                    if (_step == 1 &&
+                        !partial &&
+                        !_creationUncertain &&
+                        !_draftLoading) {
+                      _edit(() {
                         _step = 0;
                         _error = null;
                       });
                     } else {
-                      Navigator.pop(context, _created);
+                      unawaited(_leave());
                     }
                   },
           ),
         ),
-        body: SafeArea(
-          child: Column(
-            children: [
-              if (!partial && !_creationUncertain)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-                  child: Row(
-                    children: [
-                      Text(
-                        'Шаг ${_step + 1} из 2',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          color: Color(0xFF536275),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: LinearProgressIndicator(
-                          value: (_step + 1) / 2,
-                          minHeight: 3,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              Expanded(
-                child: SingleChildScrollView(
-                  key: ValueKey((
-                    _step,
-                    _created?.id,
-                    _creationUncertain,
-                    _error,
-                  )),
-                  primary: false,
-                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (!partial &&
-                          !_creationUncertain &&
-                          widget.controller.error != null)
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 12),
-                          child: Text(
-                            'Не удалось обновить данные. Занятость исполнителей может измениться; сервер проверит назначение при выдаче.',
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Color(0xFF8E211B),
-                            ),
-                          ),
-                        ),
-                      if (_error != null)
-                        Container(
-                          margin: const EdgeInsets.only(bottom: 16),
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFFF0EF),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFFE8BCB8)),
-                          ),
-                          child: Semantics(
-                            liveRegion: true,
-                            child: Text(
-                              _error!,
+        body: _draftLoading
+            ? const Center(child: CircularProgressIndicator())
+            : SafeArea(
+                child: Column(
+                  children: [
+                    if (!partial && !_creationUncertain)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                        child: Row(
+                          children: [
+                            Text(
+                              'Шаг ${_step + 1} из 2',
                               style: const TextStyle(
-                                color: Color(0xFF8E211B),
-                                height: 1.4,
+                                fontSize: 14,
+                                color: Color(0xFF536275),
                               ),
                             ),
-                          ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: LinearProgressIndicator(
+                                value: (_step + 1) / 2,
+                                minHeight: 3,
+                              ),
+                            ),
+                          ],
                         ),
-                      if (partial) ...[
-                        Text(
-                          '№ ${_created!.data['number']}',
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _created!.pendingSync
-                              ? 'Наряд сохранён на устройстве и ожидает отправки. Ниже — состояние каждого снимка.'
-                              : 'Наряд сохранён на сервере. Ниже — состояние каждого снимка.',
-                        ),
-                        const SizedBox(height: 20),
-                        _photoList(),
-                      ] else if (_creationUncertain) ...[
-                        Text(
-                          _title.text,
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Повторная отправка заблокирована, чтобы не создать второй наряд. Черновик находится только на этом экране и не сохраняется после его закрытия.',
-                        ),
-                      ] else
-                        AbsorbPointer(
-                          absorbing: _busy,
-                          child: _step == 0 ? _task() : _assignment(),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (partial && !_busy) ...[
-                      if (hasRetryablePhotos)
-                        OutlinedButton.icon(
-                          onPressed: _submit,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Повторить неотправленные фото'),
-                        ),
-                      const SizedBox(height: 8),
-                      FilledButton(
-                        onPressed: () => Navigator.pop(context, _created),
-                        child: const Text('Открыть выданный наряд'),
                       ),
-                    ] else
-                      FilledButton(
-                        style: FilledButton.styleFrom(
-                          minimumSize: const Size.fromHeight(54),
-                        ),
-                        onPressed: _busy || _picking
-                            ? null
-                            : _creationUncertain
-                            ? () => Navigator.pop(context)
-                            : _step == 0
-                            ? _next
-                            : _submit,
-                        child: _busy
-                            ? const Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
+                    Expanded(
+                      child: SingleChildScrollView(
+                        key: ValueKey((
+                          _step,
+                          _created?.id,
+                          _creationUncertain,
+                          _error,
+                        )),
+                        primary: false,
+                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Text(
+                              _draftSaving
+                                  ? 'Сохранение черновика…'
+                                  : _draftSaved
+                                  ? 'Черновик сохранён на устройстве'
+                                  : 'Черновик ещё не сохранён',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: Color(0xFF536275),
+                              ),
+                            ),
+                            if (_draftError != null)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                child: Text(
+                                  _draftError!,
+                                  style: const TextStyle(
+                                    color: Color(0xFFB3261E),
+                                  ),
+                                ),
+                              ),
+                            if (_draftError != null)
+                              TextButton(
+                                onPressed: () => _draftSession == null
+                                    ? _restoreDraft()
+                                    : _saveDraft(),
+                                child: const Text(
+                                  'Повторить сохранение черновика',
+                                ),
+                              ),
+                            if (!partial &&
+                                !_creationUncertain &&
+                                widget.controller.error != null)
+                              const Padding(
+                                padding: EdgeInsets.only(bottom: 12),
+                                child: Text(
+                                  'Не удалось обновить данные. Занятость исполнителей может измениться; сервер проверит назначение при выдаче.',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Color(0xFF8E211B),
+                                  ),
+                                ),
+                              ),
+                            if (_error != null)
+                              Container(
+                                margin: const EdgeInsets.only(bottom: 16),
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFF0EF),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: const Color(0xFFE8BCB8),
+                                  ),
+                                ),
+                                child: Semantics(
+                                  liveRegion: true,
+                                  child: Text(
+                                    _error!,
+                                    style: const TextStyle(
+                                      color: Color(0xFF8E211B),
+                                      height: 1.4,
                                     ),
                                   ),
-                                  SizedBox(width: 12),
-                                  Text('Отправка…'),
-                                ],
-                              )
-                            : Text(
-                                _creationUncertain
-                                    ? 'Проверить список нарядов'
-                                    : _step == 0
-                                    ? 'Далее · назначение'
-                                    : 'Выдать наряд',
+                                ),
                               ),
+                            if (partial) ...[
+                              Text(
+                                '№ ${_created!.data['number']}',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .headlineSmall,
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _created!.pendingSync
+                                    ? 'Наряд сохранён на устройстве и ожидает отправки. Ниже — состояние каждого снимка.'
+                                    : 'Наряд сохранён на сервере. Ниже — состояние каждого снимка.',
+                              ),
+                              const SizedBox(height: 20),
+                              _photoList(),
+                            ] else if (_creationUncertain) ...[
+                              Text(
+                                _title.text,
+                                style: Theme.of(context).textTheme.titleLarge,
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Повторная отправка заблокирована, чтобы не создать второй наряд. Черновик сохраняется на устройстве; проверьте список и очередь отправки.',
+                              ),
+                            ] else
+                              AbsorbPointer(
+                                absorbing:
+                                    _busy || _leaving || _draftSession == null,
+                                child: _step == 0 ? _task() : _assignment(),
+                              ),
+                          ],
+                        ),
                       ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (partial && !_busy) ...[
+                            if (hasRetryablePhotos && !_draftUncertain)
+                              OutlinedButton.icon(
+                                onPressed: _submit,
+                                icon: const Icon(Icons.refresh),
+                                label: const Text(
+                                  'Повторить неотправленные фото',
+                                ),
+                              ),
+                            const SizedBox(height: 8),
+                            FilledButton(
+                              onPressed: _leave,
+                              child: const Text('Открыть выданный наряд'),
+                            ),
+                          ] else
+                            FilledButton(
+                              style: FilledButton.styleFrom(
+                                minimumSize: const Size.fromHeight(54),
+                              ),
+                              onPressed:
+                                  _busy ||
+                                      _picking ||
+                                      _draftLoading ||
+                                      _draftSession == null
+                                  ? null
+                                  : _creationUncertain
+                                  ? _leave
+                                  : _step == 0
+                                  ? _next
+                                  : _submit,
+                              child: _busy
+                                  ? const Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        ),
+                                        SizedBox(width: 12),
+                                        Text('Отправка…'),
+                                      ],
+                                    )
+                                  : Text(
+                                      _creationUncertain
+                                          ? 'Проверить список нарядов'
+                                          : _step == 0
+                                          ? 'Далее · назначение'
+                                          : 'Выдать наряд',
+                                    ),
+                            ),
+                          if (!_busy &&
+                              !_picking &&
+                              !_draftLoading &&
+                              _draftSession != null)
+                            TextButton(
+                              onPressed: () => _leave(delete: true),
+                              child: const Text('Удалить черновик'),
+                            ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
-            ],
-          ),
-        ),
       ),
     );
   }

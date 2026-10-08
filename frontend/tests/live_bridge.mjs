@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { api, post } from "../src/model.ts";
+import { api, post, postOrder } from "../src/model.ts";
 
 const base = new URL(process.env.LIVE_WEB_URL || "http://127.0.0.1:5174");
 const title = process.env.BRIDGE_TITLE;
@@ -121,10 +121,14 @@ try {
   });
   // Let Android assert its submitted UI before an external transition arrives.
   await delay(10000);
-  const returned = await post(`/orders/${order.id}/transition`, {
-    action: "rework",
-    reason: "Учебная проверка: выполнить дополнительный контроль крепления.",
-  });
+  const returned = await postOrder(
+    `/orders/${order.id}/transition`,
+    first.version,
+    {
+      action: "rework",
+      reason: "Учебная проверка: выполнить дополнительный контроль крепления.",
+    },
+  );
   assert.equal(returned.status, "rework");
   record("web-returned-for-rework");
   const second = await waitOrder(
@@ -137,10 +141,14 @@ try {
   assert.equal(second.completion.materials[0].quantity, 3);
   record("android-revised-report", { materialQuantity: 3, attempts: 2 });
   await delay(10000);
-  const closed = await post(`/orders/${order.id}/transition`, {
-    action: "close",
-    score: 5,
-  });
+  const closed = await postOrder(
+    `/orders/${order.id}/transition`,
+    second.version,
+    {
+      action: "close",
+      score: 5,
+    },
+  );
   assert.equal(closed.status, "closed");
   assert.equal(closed.score, 5);
   assert.equal(closed.completion.materials[0].quantity, 3);
@@ -178,7 +186,7 @@ try {
     try {
       const latest = await api(`/orders/${order.id}`);
       if (!["closed", "cancelled"].includes(latest.status))
-        await post(`/orders/${order.id}/transition`, {
+        await postOrder(`/orders/${order.id}/transition`, latest.version, {
           action: "cancel",
           reason: "Очистка собственного незавершённого синтетического теста.",
         });

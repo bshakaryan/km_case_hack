@@ -302,7 +302,21 @@ class OrderCard extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.only(top: 5),
                     child: Text(
-                      o.assigneeName,
+                      o.isBrigade
+                          ? 'Ответственный: ${o.assigneeName}'
+                          : o.assigneeName,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                if (o.isBrigade)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 5),
+                    child: Text(
+                      o.id < 0
+                          ? 'Состав и ответственный ожидают подтверждения сервера'
+                          : o.participantsSource == 'legacy_snapshot'
+                          ? 'Прежний состав бригады не восстановлен'
+                          : 'Участников: ${o.participants.length}',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ),

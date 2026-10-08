@@ -22,7 +22,7 @@ def snapshot(engine):
     metadata = sa.MetaData()
     metadata.reflect(engine)
     with engine.connect() as connection:
-        return {name: [{key: value for key, value in row.items() if key != "assigned_at"}
+        return {name: [{key: value for key, value in row.items() if key not in {"assigned_at", "version"} and (name != "client_commands" or key not in {"order_id", "order_version"})}
                        for row in connection.execute(sa.select(table).order_by(table.c.id)).mappings()]
                 for name, table in metadata.tables.items() if name != "alembic_version"}
 
@@ -85,11 +85,11 @@ def test_filled_legacy_upgrade_preserves_data_and_backfills_current_assignment(t
     upgrade_database(engine)
     after = snapshot(engine)
     assert {name: rows for name, rows in after.items() if name in before} == before
-    schema = expected_schema("0003_push")
+    schema = expected_schema("0007_assignment_participants")
     with engine.connect() as connection:
         assigned = dict(connection.execute(sa.select(schema.tables["orders"].c.id, schema.tables["orders"].c.assigned_at)).all())
         assert assigned == {1: created + timedelta(minutes=40), 2: created, 3: created, 4: created + timedelta(minutes=30), 5: created}
-        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0003_push"
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0007_assignment_participants"
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
         assert not connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     upgrade_database(engine)
@@ -127,8 +127,8 @@ builtins.__import__ = guarded_import
 from app.migrations import alembic_config
 engine = sa.create_engine(DATABASE_URL)
 with engine.connect() as connection:
-    command.upgrade(alembic_config(connection), '0001_initial')
-assert 'client_commands' not in sa.inspect(engine).get_table_names()
+    command.upgrade(alembic_config(connection), 'head')
+assert 'submission_attempts' in sa.inspect(engine).get_table_names()
 engine.dispose()
 """
     code = code.replace("DATABASE_URL", repr(f"sqlite:///{tmp_path / 'no-orm.sqlite'}"))
@@ -199,7 +199,8 @@ def test_assignment_migration_downgrade_and_upgrade_preserve_filled_database(tmp
     before = snapshot(engine)
     with engine.connect() as connection:
         command.downgrade(alembic_config(connection), "0002_client_commands")
-    assert snapshot(engine) == {name: rows for name, rows in before.items() if name not in {"device_tokens", "push_tasks"}}
+    removed = {"device_tokens", "push_tasks", "order_assignments", "order_assignment_participants", "submission_attempts", "submission_photos", "submission_writeoffs", "submission_decisions", "ai_review_jobs"}
+    assert snapshot(engine) == {name: rows for name, rows in before.items() if name not in removed}
     assert "assigned_at" not in {column["name"] for column in sa.inspect(engine).get_columns("orders")}
     upgrade_database(engine)
     assert snapshot(engine) == before
@@ -210,3 +211,4 @@ def test_postgresql_check_normalization_keeps_boolean_meaning():
     assert check_expression("status IN ('issued','closed')") == check_expression("((status)::text = ANY ((ARRAY['issued'::character varying, 'closed'::character varying])::text[]))")
     assert check_expression("score IS NULL OR (score >= 1 AND score <= 5)") == check_expression("((score IS NULL) OR ((score >= (1)::double precision) AND (score <= (5)::double precision)))")
     assert check_expression("score IS NULL OR (score >= 1 AND score <= 5)") != check_expression("(score IS NULL OR score >= 1) AND score <= 5")
+    assert check_expression("source != 'live' OR author_id IS NOT NULL") == check_expression("((source)::text <> 'live'::text) OR (author_id IS NOT NULL)")

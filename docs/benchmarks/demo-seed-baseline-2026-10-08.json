@@ -1,0 +1,257 @@
+{
+  "schema_revision": "0007_assignment_participants",
+  "table_counts": {
+    "ai_assessments": 541,
+    "ai_review_jobs": 0,
+    "alembic_version": 1,
+    "areas": 4,
+    "auth_sessions": 0,
+    "brigades": 3,
+    "client_commands": 0,
+    "device_tokens": 0,
+    "employees": 19,
+    "equipment": 25,
+    "fault_codes": 20,
+    "integration_logs": 0,
+    "material_writeoffs": 540,
+    "materials": 40,
+    "notifications": 0,
+    "order_assignment_participants": 556,
+    "order_assignments": 556,
+    "order_events": 3434,
+    "orders": 556,
+    "photos": 0,
+    "push_tasks": 0,
+    "submission_attempts": 541,
+    "submission_decisions": 0,
+    "submission_photos": 0,
+    "submission_writeoffs": 0,
+    "time_norms": 6
+  },
+  "roles": {
+    "master": 2,
+    "manager": 1,
+    "admin": 1,
+    "worker": 15
+  },
+  "workers_per_brigade": {
+    "1": 5,
+    "2": 5,
+    "3": 5
+  },
+  "status_counts": {
+    "closed": 540,
+    "in_progress": 2,
+    "issued": 6,
+    "paused": 1,
+    "accepted": 2,
+    "queued": 2,
+    "ai_review": 1,
+    "rework": 1,
+    "rejected": 1
+  },
+  "calendar": {
+    "min_created_utc": "2026-07-11T09:57:20+00:00",
+    "max_created_utc": "2026-10-08T11:30:00+00:00",
+    "created_span_seconds": 7695160.0,
+    "oldest_age_days_at_control": 89.08518518518518,
+    "historical_min_created_utc": "2026-07-11T09:57:20+00:00",
+    "historical_max_created_utc": "2026-10-08T06:00:00+00:00",
+    "historical_counts_per_month": {
+      "2026-07": 125,
+      "2026-08": 188,
+      "2026-09": 183,
+      "2026-10": 44
+    },
+    "rolling_three_calendar_months_start_utc": "2026-07-08T12:00:00+00:00",
+    "rolling_three_calendar_months_oldest_gap_seconds": 251840.0,
+    "note": "PDF does not specify rolling versus completed calendar months; this is an explicit calendar comparison, not adoption of enterprise policy."
+  },
+  "history": {
+    "event_actions": {
+      "issue": 556,
+      "accept": 540,
+      "start": 582,
+      "complete": 582,
+      "ai_review": 582,
+      "rework": 42,
+      "close": 540,
+      "seed_state": 10
+    },
+    "assignment_sources": {
+      "legacy_snapshot": 556
+    },
+    "participant_sources": {
+      "legacy_snapshot": 556
+    },
+    "attempt_sources": {
+      "legacy_snapshot": 541
+    },
+    "attempts_with_known_author_assignment": 0,
+    "attempts_with_assessment_link": 0,
+    "frozen_roster_size_distribution": {
+      "1": 556
+    },
+    "completion_count_mismatch_shapes": {
+      "2_complete_events_1_attempts_closed": 42,
+      "0_complete_events_1_attempts_ai_review": 1
+    },
+    "legacy_note": "Legacy provenance/ended_at absence is conservative migration behavior, not database corruption. Newly generated known history can provide native provenance."
+  },
+  "material_photo": {
+    "positive_writeoffs": 540,
+    "linked_writeoffs": 0,
+    "photos": 0,
+    "submission_photo_links": 0
+  },
+  "d19": {
+    "current_active_conflicts_count": 0,
+    "current_active_conflict_order_examples": [],
+    "current_waiting_count": 4,
+    "historical_known_execution_overlap_pairs_count": 13,
+    "historical_overlap_examples": [
+      [
+        335,
+        334
+      ],
+      [
+        253,
+        252
+      ],
+      [
+        414,
+        413
+      ],
+      [
+        269,
+        268
+      ],
+      [
+        188,
+        187
+      ],
+      [
+        183,
+        182
+      ],
+      [
+        235,
+        234
+      ],
+      [
+        56,
+        55
+      ]
+    ],
+    "historical_overlap_definition": "Same assignee first accept to last complete; constructed history intervals, not measured work, shifts or Q04 downtime."
+  },
+  "findings": {
+    "completion_count_attempt_count_mismatch": {
+      "count": 43,
+      "examples": [
+        1,
+        14,
+        27,
+        40,
+        53,
+        66,
+        79,
+        92
+      ]
+    },
+    "invalid_domain_transition": {
+      "count": 42,
+      "examples": [
+        7,
+        89,
+        171,
+        253,
+        335,
+        417,
+        499,
+        581
+      ]
+    },
+    "latest_complete_summary_time_mismatch": {
+      "count": 42,
+      "examples": [
+        1,
+        14,
+        27,
+        40,
+        53,
+        66,
+        79,
+        92
+      ]
+    },
+    "non_domain_event_action": {
+      "count": 10,
+      "examples": [
+        3410,
+        3413,
+        3415,
+        3417,
+        3419,
+        3421,
+        3424,
+        3427
+      ]
+    },
+    "terminal_assignment_not_ended": {
+      "count": 540,
+      "examples": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    }
+  },
+  "foreign_key_check_count": 0,
+  "logical_snapshot_before_second_seed_sha256": "66a7409807546ccf2fb89b6269a8b5ea592f7f960cf7d339deb32692769ac9c2",
+  "manifest_version": 1,
+  "synthetic": true,
+  "scope": "Actual fresh SQLite captured-seed baseline, followed by readonly aggregate re-evaluation; no server, working database, push or real AI. Findings are not acceptance.",
+  "control_utc": "2026-10-08T12:00:00+00:00",
+  "rng_seed": 42,
+  "source_commit": "7804605ebf5560379e0dd556c2417e8e8d4ad8cc",
+  "source_seed_sha256": "890b3c1e56c25c0fab91e159d22974dd51830e52298d1aacae9b7fb509cf630d",
+  "immutable_migration_sha256": {
+    "0001_initial.py": "fcf8c2d33a0291570155d78fe1e1291f3ba6f90683c06e303035b64dae4c97b2",
+    "0002_client_commands.py": "54f9a62c45a958265a5e0b0cd00525c0d710397e261b4920862c3affa2f73906",
+    "0003_assignment_time.py": "4cdc29586950773f82d28cbd195f08665564442fab4de42e5480c6f55cd32288",
+    "0003_push.py": "582bd2336be87dd50117135536e9c5241fa9ace1b4dbebd62fcddd13bf2ab14f",
+    "0004_order_history.py": "5c2f17e4b65805e0b84dd0cecc546a13153661651632725c58c11d74c3d38a7a",
+    "0005_ai_review_jobs.py": "f6121d53cba45fe81177337798128a50c208644b3cb0a7d07f962b9c071c1f08",
+    "0006_order_versions.py": "6a064a7ed95699dfad365c9ca588c3118512ddf062fecbd31399215abff00134",
+    "0007_assignment_participants.py": "bcfd96a9e839d47efd85f9d358fe7be50ff2ff993df487408e77695f964535e2"
+  },
+  "second_seed": {
+    "logical_snapshot_after_sha256": "66a7409807546ccf2fb89b6269a8b5ea592f7f960cf7d339deb32692769ac9c2",
+    "unchanged": true,
+    "same_counts": true
+  },
+  "seed_execution_count": 2,
+  "readonly_oracle_re_evaluation": true,
+  "limits": [
+    "SQLite does not prove PostgreSQL row-locking/concurrency",
+    "No source photo semantics or repeat/staleness AI verdict invented",
+    "No Q01-Q06 choices; existing seeded patterns do not prove AI accuracy",
+    "Cryptographic PIN salts remain random; repeat stability is within this fixture, not byte-identical independent databases",
+    "No crash/fsync/power-loss/Android acceptance",
+    "Transition checks cover the current seed action subset, not every API edit/reassign/cancel command; unknown actions require review, not automatic R40 failure."
+  ],
+  "reproduce_current_source": {
+    "command": "python backend/tools/demo_seed_audit.py --output-dir <new-owned-directory-outside-Git> --now 2026-10-08T12:00:00Z",
+    "note": "Run against the cited source commit to reproduce these aggregate findings. PIN salts and the whole-row digest differ between independent fixtures; second-seed digest equality is within one fixture."
+  },
+  "rng_seed_source": "app/seed.py unique literal random.Random(42), bound by source_seed_sha256",
+  "seed_execution_script_sha256": "5777ccc09559ef970143d38186c373cbadb0a87cdfb7592ed0f39129e4588d98",
+  "readonly_oracle_tool_sha256": "972295c556d7d27d0bb73603525ff1c9ce298c2a7d63ab152310377a14874530",
+  "reproduction_tool_sha256": "0c119cd4ce5f54646b8e65c0f19afb2c3e689374a155848b17afaa391a9e89a0"
+}

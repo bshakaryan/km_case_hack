@@ -20,6 +20,11 @@ def make_engine(url: str | None = None):
         @event.listens_for(engine, "connect")
         def foreign_keys(connection, _):
             connection.execute("PRAGMA foreign_keys=ON")
+            # SQLite's built-in lower/LIKE does not fold Cyrillic. Explicitly
+            # used only by the new paged search, preserving legacy API search.
+            connection.create_function("naryad_lower", 1,
+                lambda value: value.lower() if isinstance(value, str) else value,
+                deterministic=True)
     return engine
 
 

@@ -13,6 +13,7 @@ import 'package:naryad_ai/data/models.dart';
 
 Json orderJson(int id) => {
   'id': id,
+  'version': 1,
   'number': 'Н-$id',
   'title': 'Проверить двигатель',
   'description': 'Перегрев двигателя',
@@ -134,7 +135,7 @@ void main() {
         client: MockClient((request) async {
           requests.add(request);
           if (request.method == 'GET') return http.Response.bytes(bytes, 200);
-          return jsonResponse({'id': 9}, 201);
+          return jsonResponse({'id': 9, 'order_version': 1}, 201);
         }),
       )..token = 'photo-token';
       addTearDown(api.close);

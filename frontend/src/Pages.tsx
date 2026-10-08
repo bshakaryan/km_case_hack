@@ -1246,12 +1246,14 @@ export function ReferencePage({
   refresh,
   notify,
   onCreate,
+  onEquipment,
 }: {
   reference: Reference;
   user: User;
   refresh: () => Promise<void>;
   notify: (s: string) => void;
   onCreate?: (context: { assigneeId?: Id; equipmentId?: Id }) => void;
+  onEquipment?: (id: Id) => void;
 }) {
   const [collection, setCollection] = useState("equipment");
   const [search, setSearch] = useState("");
@@ -1436,6 +1438,7 @@ export function ReferencePage({
                 ))}
                 {user.role === "admin" && <th />}
                 {canIssue && <th>Наряд на оборудование</th>}
+                {collection === "equipment" && onEquipment && <th>История</th>}
               </tr>
             </thead>
             <tbody>
@@ -1462,6 +1465,17 @@ export function ReferencePage({
                         onClick={() => onCreate?.({ equipmentId: item.id })}
                       >
                         <Plus size={16} /> Выдать наряд
+                      </button>
+                    </td>
+                  )}
+                  {collection === "equipment" && onEquipment && (
+                    <td>
+                      <button
+                        type="button"
+                        className="button secondary"
+                        onClick={() => onEquipment(item.id)}
+                      >
+                        История ремонтов
                       </button>
                     </td>
                   )}

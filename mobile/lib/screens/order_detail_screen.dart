@@ -1,12 +1,21 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../data/app_controller.dart';
+import '../data/api.dart';
+import '../data/local_store.dart';
 import '../data/models.dart';
+import '../domain/navigation_scope.dart';
 import '../ui.dart' as app_ui;
 import '../widgets/order_photo.dart';
+import '../widgets/order_history.dart';
+import '../widgets/ai_job_status.dart';
 import 'completion_screen.dart';
+import 'order_journal_screen.dart';
+import 'create_order_screen.dart' show prepareOrderPhoto;
 
 const _blue = Color(0xFF173E68);
 const _red = Color(0xFFB4232D);
@@ -16,9 +25,15 @@ class OrderDetailScreen extends StatefulWidget {
     super.key,
     required this.controller,
     required this.orderId,
+    this.notificationEntry = false,
+    this.imagePicker,
+    this.photoPreparer,
   });
   final AppController controller;
   final int orderId;
+  final bool notificationEntry;
+  final ImagePicker? imagePicker;
+  final Future<Uint8List> Function(Uint8List)? photoPreparer;
 
   @override
   State<OrderDetailScreen> createState() => _OrderDetailScreenState();
@@ -30,17 +45,29 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   bool _loading = true;
   bool _busy = false;
   bool _fetching = false;
+  bool _aiRetryUncertain = false;
   int _revision = 0;
   DateTime? _updatedAt;
   Timer? _timer;
+  late final NavigationScope _scope;
+  bool _detailRead = false;
+  bool _accessDenied = false;
+  ModalRoute<dynamic>? _dialogRoute;
+  NavigatorState? _dialogNavigator;
 
   @override
   void initState() {
     super.initState();
+    _scope = widget.controller.captureNavigationScope();
+    widget.controller.addListener(_controllerChanged);
+    if (!_scope.isCurrent) {
+      _loading = false;
+      _error = 'Войдите в приложение и откройте наряд заново.';
+    }
     _seedFromCache();
     unawaited(_load());
     _timer = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (widget.controller.offline) return;
+      if (!_scope.isCurrent || widget.controller.offline) return;
       if (!_busy && mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
         unawaited(_load(silent: true));
       }
@@ -48,6 +75,10 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   }
 
   void _seedFromCache() {
+    if (!_scope.isCurrent ||
+        !widget.controller.canUseCachedOrder(widget.orderId)) {
+      return;
+    }
     for (final item in widget.controller.orders) {
       if (item.id == widget.orderId) {
         _order = item;
@@ -60,36 +91,294 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   @override
   void dispose() {
     _timer?.cancel();
+    widget.controller.removeListener(_controllerChanged);
     super.dispose();
   }
 
+  bool get _current => mounted && _scope.isCurrent;
+  bool get _canWrite =>
+      _scope.isCurrent &&
+      widget.controller.canUseCachedOrder(widget.orderId) &&
+      !_accessDenied &&
+      (_detailRead || (!widget.notificationEntry && _order != null));
+  bool get _writeBusy => _busy || widget.controller.referenceWriteBusy;
+
+  void _controllerChanged() {
+    if (!mounted) return;
+    if (!_scope.isCurrent) {
+      _revision++;
+      final route = _dialogRoute;
+      final navigator = _dialogNavigator;
+      if (route != null && navigator != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (navigator.mounted && route.isActive) navigator.removeRoute(route);
+        });
+      }
+      setState(() {
+        _order = null;
+        _loading = false;
+        _error = 'Сессия или сервер изменились. Откройте наряд заново.';
+      });
+      return;
+    }
+    if (!widget.controller.canUseCachedOrder(widget.orderId)) {
+      _order = null;
+      _accessDenied = true;
+    }
+    if (!_accessDenied) {
+      final cached = widget.controller.orders
+          .where((order) => order.id == widget.orderId)
+          .firstOrNull;
+      if (cached != null) {
+        _order = cached.withCachedHistory(_order);
+      }
+    }
+    setState(() {});
+  }
+
+  Future<T?> _showScopedDialog<T>(WidgetBuilder builder) async {
+    if (!_current) return null;
+    return _pushScopedRoute(DialogRoute<T>(context: context, builder: builder));
+  }
+
+  Future<T?> _showScopedSheet<T>(WidgetBuilder builder) async {
+    if (!_current) return null;
+    return _pushScopedRoute(
+      ModalBottomSheetRoute<T>(
+        builder: builder,
+        isScrollControlled: false,
+        useSafeArea: true,
+      ),
+    );
+  }
+
+  Future<T?> _pushScopedRoute<T>(ModalRoute<T> route) async {
+    if (!_current) return null;
+    final navigator = Navigator.of(context, rootNavigator: true);
+    _dialogRoute = route;
+    _dialogNavigator = navigator;
+    try {
+      return await navigator.push(route);
+    } finally {
+      if (identical(_dialogRoute, route)) {
+        _dialogRoute = null;
+        _dialogNavigator = null;
+      }
+    }
+  }
+
   Future<void> _load({bool silent = false}) async {
-    if (_fetching) return;
+    if (_fetching || !_scope.isCurrent) return;
     final revision = _revision;
     _fetching = true;
     if (!silent && mounted) setState(() => _loading = _order == null);
     try {
       final order = await widget.controller.loadOrder(widget.orderId);
-      if (!mounted || revision != _revision) return;
+      if (!_current || revision != _revision) return;
+      if (_accessDenied && widget.controller.offline) {
+        // loadOrder may fall back to a retained snapshot. A cached result is
+        // not evidence that the earlier server denial has been lifted.
+        setState(() {
+          _error =
+              'Доступ к наряду ранее был отклонён сервером. '
+              'Без связи повторная проверка доступа не выполнена.';
+        });
+        return;
+      }
       setState(() {
         _order = order;
         _error = null;
         _updatedAt = DateTime.now();
+        _detailRead = true;
+        _accessDenied = false;
+        if (!widget.controller.offline) _aiRetryUncertain = false;
       });
     } catch (error) {
-      if (mounted && revision == _revision) {
-        setState(() => _error = error.toString());
+      if (_current && revision == _revision) {
+        setState(() {
+          _error = error.toString();
+          if (error is ApiException && {403, 404}.contains(error.statusCode)) {
+            // Retained controller data and drafts are not deleted. The server
+            // denial removes this screen's obsolete presentation and actions.
+            _order = null;
+            _accessDenied = true;
+          }
+        });
       }
     } finally {
       _fetching = false;
-      if (mounted) setState(() => _loading = false);
+      if (_current) setState(() => _loading = false);
     }
   }
 
-  bool get _master => widget.controller.user?.isMaster ?? false;
+  Future<void> _retryAiReview() async {
+    final order = _order;
+    if (!_canWrite ||
+        _writeBusy ||
+        _aiRetryUncertain ||
+        order == null ||
+        !order.canRetryAiReview) {
+      return;
+    }
+    _revision++;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final updated = await widget.controller.retryAiReview(
+        order.id,
+        (order.aiReviewJob!['attempt_id'] as num).toInt(),
+        basis: OrderWriteBasis(expectedVersion: order.version),
+      );
+      if (!mounted || !_scope.isCurrent) return;
+      setState(() {
+        _order = updated;
+        _updatedAt = DateTime.now();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Проверка поставлена в очередь. Отчёт сохранён.'),
+        ),
+      );
+    } catch (failure) {
+      if (mounted && _scope.isCurrent) {
+        setState(() {
+          _error = failure.toString();
+          _aiRetryUncertain =
+              failure is! ApiException || failure.requestMayHaveSucceeded;
+        });
+      }
+    } finally {
+      if (_current) setState(() => _busy = false);
+    }
+  }
+
+  bool get _master =>
+      _scope.isCurrent && (widget.controller.user?.isMaster ?? false);
   bool get _canExecute =>
+      _canWrite &&
       (widget.controller.user?.isWorker ?? false) &&
-      _order?.data['assignee_id'] == widget.controller.user?.id;
+      (_order?.isResponsible(widget.controller.user?.id) ?? false);
+
+  bool _canAddPhoto(WorkOrder order) {
+    if (!_canWrite) return false;
+    if ({'ai_review', 'closed', 'cancelled'}.contains(order.status)) {
+      return false;
+    }
+    final user = widget.controller.user;
+    return user?.isMaster == true ||
+        (user?.isWorker == true && order.hasParticipant(user?.id));
+  }
+
+  Future<void> _addPhoto(String kind) async {
+    final order = _order;
+    if (_writeBusy || order == null || !_canAddPhoto(order)) return;
+    final controller = widget.controller;
+    final api = controller.api;
+    final ownerId = controller.user?.id;
+    // Freeze before the picker and compression; a GET cannot rebase this write.
+    final basis = controller.captureOrderBasis(order);
+    final saved = _maps(order.data['photos'])
+        .where((p) => p['kind'] == kind)
+        .length;
+    final waiting = controller.outbox
+        .where(
+          (command) =>
+              command.kind == OutboxKind.uploadPhoto &&
+              command.photoKind == kind &&
+              (command.orderId == order.id ||
+                  command.localRef == '${order.id}'),
+        )
+        .length;
+    if (saved + waiting >= 5) {
+      setState(
+        () => _error = 'Допускается до 5 фото каждого вида на наряд. Проверьте карточку и очередь.',
+      );
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final source = await _showScopedSheet<ImageSource>(
+        (context) => Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(kind == 'before' ? 'Фото до ремонта' : 'Фото после ремонта'),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(context, ImageSource.camera),
+                icon: const Icon(Icons.camera_alt_outlined),
+                label: const Text('Сделать снимок'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.pop(context, ImageSource.gallery),
+                icon: const Icon(Icons.photo_library_outlined),
+                label: const Text('Выбрать из галереи'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (!_current || source == null) return;
+      final file = await (widget.imagePicker ?? ImagePicker()).pickImage(
+        source: source,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 88,
+      );
+      if (!_current || file == null) return;
+      final original = await file.readAsBytes();
+      if (original.length > 30 * 1024 * 1024) {
+        throw const ApiException('Выберите снимок до 30 МБ.', 413);
+      }
+      final bytes =
+          await (widget.photoPreparer?.call(original) ??
+              compute(prepareOrderPhoto, original));
+      if (!mounted || !_scope.isCurrent) return;
+      if (!identical(controller.api, api) || controller.user?.id != ownerId) {
+        throw const ApiException(
+          'Аккаунт или сервер изменился. Фото не отправлено.',
+          401,
+        );
+      }
+      final current = controller.orders
+          .where((item) => item.id == order.id)
+          .firstOrNull;
+      if (!_canAddPhoto(current ?? order)) {
+        throw const ApiException(
+          'Вы больше не можете добавлять фото в этот наряд.',
+          403,
+        );
+      }
+      await controller.uploadPhoto(
+        order.id,
+        bytes,
+        '$kind-${DateTime.now().microsecondsSinceEpoch}.jpg',
+        kind,
+        basis: basis,
+      );
+      if (!mounted || !_scope.isCurrent) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            controller.isOrderPending(order.id)
+                ? 'Фото сохранено в очереди на устройстве. Ожидает отправки.'
+                : 'Фотография подтверждена сервером.',
+          ),
+        ),
+      );
+      await _load(silent: true);
+    } catch (error) {
+      if (_current) setState(() => _error = '$error');
+    } finally {
+      if (_current) setState(() => _busy = false);
+    }
+  }
 
   bool _hasOtherOpenOrder(WorkOrder order) {
     final userId = widget.controller.user?.id;
@@ -125,8 +414,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     });
   }
 
-  Future<void> _act(String action, {String? reason, double? score}) async {
-    if (_busy) return;
+  Future<void> _act(
+    String action, {
+    String? reason,
+    double? score,
+    OrderWriteBasis? basis,
+  }) async {
+    if (!_canWrite || _writeBusy) return;
+    if (!_master && !_canExecute) return;
     _revision++;
     setState(() {
       _busy = true;
@@ -138,8 +433,13 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         action,
         reason: reason,
         score: score,
+        basis:
+            basis ??
+            (_order == null
+                ? const OrderWriteBasis()
+                : widget.controller.captureOrderBasis(_order!)),
       );
-      if (!mounted) return;
+      if (!mounted || !_scope.isCurrent) return;
       setState(() {
         _order = updated;
         _updatedAt = DateTime.now();
@@ -158,18 +458,21 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
       );
     } catch (error) {
-      if (mounted) setState(() => _error = error.toString());
+      if (_current) setState(() => _error = error.toString());
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (_current) setState(() => _busy = false);
     }
   }
 
   Future<void> _reason(String action, String title) async {
+    if (!_canWrite || _writeBusy) return;
+    final basis = _order == null
+        ? const OrderWriteBasis()
+        : widget.controller.captureOrderBasis(_order!);
     final controller = TextEditingController();
     final key = GlobalKey<FormState>();
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
+    final result = await _showScopedDialog<String>(
+      (context) => AlertDialog(
         title: Text(title),
         content: Form(
           key: key,
@@ -206,14 +509,19 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       ),
     );
     // The dialog route may still animate; the controller is no longer modified.
-    if (result != null && mounted) await _act(action, reason: result);
+    if (result != null && _current) {
+      await _act(action, reason: result, basis: basis);
+    }
   }
 
   Future<void> _closeOrder() async {
+    if (!_canWrite || _writeBusy) return;
+    final basis = _order == null
+        ? const OrderWriteBasis()
+        : widget.controller.captureOrderBasis(_order!);
     double? selected;
-    final score = await showDialog<double>(
-      context: context,
-      builder: (context) => StatefulBuilder(
+    final score = await _showScopedDialog<double>(
+      (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           title: const Text('Принять работу'),
           content: Column(
@@ -270,21 +578,23 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         ),
       ),
     );
-    if (score != null && mounted) await _act('close', score: score);
+    if (score != null && _current) {
+      await _act('close', score: score, basis: basis);
+    }
   }
 
   Future<void> _complete() async {
     final order = _order;
-    if (order == null) return;
+    if (_writeBusy || order == null || !_canExecute) return;
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) =>
             CompletionScreen(controller: widget.controller, order: order),
       ),
     );
-    if (mounted) {
+    if (mounted && _scope.isCurrent) {
       await _load();
-      if (result == true && mounted) {
+      if (result == true && mounted && _scope.isCurrent) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -309,7 +619,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         actions: [
           IconButton(
             tooltip: 'Обновить наряд',
-            onPressed: _busy ? null : () => _load(),
+            onPressed: !_scope.isCurrent || _busy ? null : () => _load(),
             icon: const Icon(Icons.refresh),
           ),
           if (order != null &&
@@ -317,7 +627,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               !{'closed', 'cancelled'}.contains(order.status))
             PopupMenuButton<String>(
               tooltip: 'Другие действия',
-              enabled: !_busy,
+              enabled: _canWrite && !_writeBusy,
               onSelected: (_) => _reason('cancel', 'Отменить наряд'),
               itemBuilder: (_) => [
                 const PopupMenuItem(
@@ -349,7 +659,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                     ),
                     const SizedBox(height: 20),
                     FilledButton.icon(
-                      onPressed: _load,
+                      onPressed: _scope.isCurrent ? _load : null,
                       icon: const Icon(Icons.refresh),
                       label: const Text('Повторить загрузку'),
                     ),
@@ -365,6 +675,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   if (_error != null) _errorNotice(),
                   _overview(order),
                   const SizedBox(height: 16),
+                  if (order.priority == 'emergency') _emergencyResponse(order),
                   _section('Задание', [
                     Text(
                       order.description.isEmpty
@@ -382,7 +693,31 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   _section('Сроки и оборудование', [
                     _row('Участок', order.areaName),
                     _row('Оборудование', order.equipmentName),
-                    _row('Исполнитель', order.assigneeName),
+                    if (const {
+                          'master',
+                          'manager',
+                          'admin',
+                        }.contains(widget.controller.user?.role) &&
+                        order.data['equipment_id'] is int)
+                      TextButton.icon(
+                        onPressed: !_scope.isCurrent || _busy
+                            ? null
+                            : () => Navigator.of(context).push<void>(
+                                MaterialPageRoute(
+                                  builder: (_) => OrderJournalScreen(
+                                    controller: widget.controller,
+                                    equipmentId:
+                                        order.data['equipment_id'] as int,
+                                  ),
+                                ),
+                              ),
+                        icon: const Icon(Icons.history),
+                        label: const Text('История оборудования'),
+                      ),
+                    _row(
+                      order.isBrigade ? 'Ответственный' : 'Исполнитель',
+                      order.assigneeName,
+                    ),
                     _row('Выдан', _date(order.data['created_at'])),
                     _row(
                       'Срок',
@@ -410,9 +745,48 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                       ),
                     ],
                   ]),
+                  if (order.isBrigade)
+                    _section('Участники назначения', [
+                      if (order.id < 0)
+                        const Text(
+                          'Состав и ответственный пока не подтверждены сервером.',
+                        )
+                      else ...[
+                        for (final participant in order.participants)
+                          _row(
+                            participant.isResponsible
+                                ? 'Ответственный'
+                                : 'Участник',
+                            participant.name,
+                          ),
+                        if (order.participantsSource == 'legacy_snapshot')
+                          const Text(
+                            'Из прежних данных подтверждён только сохранённый исполнитель. Полный состав этой бригады неизвестен.',
+                          ),
+                        if (widget.controller.user?.isWorker == true &&
+                            !_canExecute)
+                          const Text(
+                            'Вы участвуете в общем наряде и можете добавлять фотографии. Переходы и сдачу выполняет ответственный.',
+                          ),
+                      ],
+                    ]),
                   _photos(order),
                   if (order.data['completion'] is Map) _report(order),
-                  if (order.data['ai_review'] is Map) _review(order),
+                  if (!order.pendingSync)
+                    AiJobStatus(
+                      job: order.aiReviewJob,
+                      onRetry: _master && order.canRetryAiReview
+                          ? _retryAiReview
+                          : null,
+                      busy: _busy,
+                      uncertain: _aiRetryUncertain,
+                      offline: widget.controller.offline,
+                    ),
+                  if (order.data['ai_review'] is Map &&
+                      order.showAiReview &&
+                      !order.pendingSync)
+                    _review(order),
+                  OrderHistory(order: order, controller: widget.controller),
                   _history(order),
                   if (_updatedAt != null)
                     Padding(
@@ -510,7 +884,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               : 'Внеплановый ремонт',
           style: const TextStyle(color: Color(0xFF64748B)),
         ),
-        if (order.status == 'ai_review') ...[
+        if ({'completed', 'ai_review'}.contains(order.status)) ...[
           const Divider(height: 28),
           Text(
             order.pendingSync || widget.controller.isOrderPending(order.id)
@@ -531,6 +905,119 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       ],
     ),
   );
+
+  Widget _emergencyResponse(WorkOrder order) {
+    final pending =
+        order.pendingSync || widget.controller.isOrderPending(order.id);
+    final responsible =
+        widget.controller.user?.isWorker == true &&
+        order.isResponsible(widget.controller.user?.id);
+    final responsePending = widget.controller.outbox.any(
+      (command) =>
+          command.kind == OutboxKind.transition &&
+          (command.orderId == order.id || command.localRef == '${order.id}') &&
+          {'accept', 'queue', 'reject'}.contains(command.payload['action']),
+    );
+    final waitingResponse = {'issued', 'rework'}.contains(order.status);
+    String message;
+    if (!_detailRead && widget.notificationEntry) {
+      message =
+          'Проверяем доступ и текущее состояние наряда на сервере. '
+          'Уведомление само по себе не подтверждает назначение.';
+    } else if (responsePending) {
+      message =
+          'Рабочий ответ сохранён на устройстве. Сервер ещё не подтвердил '
+          'его результат. Ожидающая отправка и конфликт разбираются в очереди.';
+    } else if (pending) {
+      message =
+          'Есть изменения без подтверждения сервера. Показанное состояние '
+          'может включать локальные действия; проверьте очередь.';
+    } else if (waitingResponse && responsible) {
+      if (order.status == 'rework') {
+        message = _hasOtherOpenOrder(order)
+            ? 'Требуется ваш рабочий ответ. У вас уже есть незавершённое задание: '
+                  'поставьте доработку в очередь.'
+            : 'Требуется ваш рабочий ответ: примите доработку или поставьте её '
+                  'в очередь.';
+      } else {
+        message = _hasOtherOpenOrder(order)
+            ? 'Требуется ваш рабочий ответ. У вас уже есть незавершённое задание: '
+                  'поставьте этот наряд в очередь или отклоните с причиной.'
+            : 'Требуется ваш рабочий ответ: примите задание, поставьте в очередь '
+                  'или отклоните с причиной.';
+      }
+    } else if (waitingResponse && widget.controller.user?.isWorker == true) {
+      message = order.hasParticipant(widget.controller.user?.id)
+          ? 'Вы участник бригады. Рабочий ответ и переходы выполняет '
+                'ответственный: ${order.assigneeName}.'
+          : 'Вы больше не ответственный за этот наряд. Рабочие действия '
+                'для вас недоступны.';
+    } else if ({
+      'accepted',
+      'queued',
+      'in_progress',
+      'paused',
+    }.contains(order.status)) {
+      message = widget.controller.offline
+          ? 'Показано последнее полученное состояние: ${_status(order.status)}. '
+                'Текущее состояние на сервере без связи не проверено.'
+          : 'Последнее подтверждённое состояние: ${_status(order.status)}. '
+                'Следующее рабочее действие выбирается отдельно.';
+    } else if ({'closed', 'cancelled', 'rejected'}.contains(order.status)) {
+      message =
+          'Наряд ${_status(order.status).toLowerCase()}. '
+          'Принять или начать его из уведомления нельзя.';
+    } else {
+      message =
+          'Аварийный приоритет сохранён. '
+          'Текущее состояние: ${_status(order.status)}.';
+    }
+    return Container(
+      key: const ValueKey('emergency-response'),
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF1F1),
+        border: Border.all(color: const Color(0xFFEFC2C4)),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: _red),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Аварийный наряд',
+                  style: TextStyle(color: _red, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(message, style: const TextStyle(height: 1.4)),
+          if (widget.controller.offline && waitingResponse && !pending) ...[
+            const SizedBox(height: 8),
+            const Text(
+              'Нет связи. Ответ будет сохранён в локальную очередь и не '
+              'считается принятым сервером до подтверждения.',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ],
+          if (waitingResponse || pending) ...[
+            const SizedBox(height: 8),
+            const Text(
+              'Открытие и прочтение уведомления не принимают наряд и не '
+              'останавливают эскалацию непринятого задания.',
+              style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   Widget _section(String title, List<Widget> children) => Container(
     margin: const EdgeInsets.only(bottom: 16),
@@ -638,7 +1125,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  _date(photo['created_at']),
+                                  '${photo['author_name'] ?? 'Автор не зафиксирован'} · ${_date(photo['created_at'])}',
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: Color(0xFF64748B),
@@ -654,6 +1141,23 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             ],
           ],
         ),
+      if (_canAddPhoto(order)) ...[
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final kind in ['before', 'after'])
+              OutlinedButton.icon(
+                onPressed: _writeBusy ? null : () => _addPhoto(kind),
+                icon: const Icon(Icons.add_a_photo_outlined),
+                label: Text(
+                  kind == 'before' ? 'Добавить фото до' : 'Добавить фото после',
+                ),
+              ),
+          ],
+        ),
+      ],
     ]);
   }
 
@@ -788,7 +1292,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   }
 
   Widget? _actions(WorkOrder order) {
-    if ((!_canExecute && !(_master && order.status == 'ai_review')) ||
+    if (!_canWrite ||
+        (!_canExecute && !(_master && order.status == 'ai_review')) ||
         {
           'closed',
           'cancelled',
@@ -811,7 +1316,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       action = _closeOrder;
       secondary.add(
         OutlinedButton(
-          onPressed: _busy
+          onPressed: _writeBusy
               ? null
               : () => _reason('rework', 'Вернуть на доработку'),
           child: const Text('На доработку'),
@@ -826,7 +1331,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         action = () => _act('accept');
         secondary.add(
           OutlinedButton(
-            onPressed: _busy ? null : () => _act('queue'),
+            onPressed: _writeBusy ? null : () => _act('queue'),
             child: const Text('В очередь'),
           ),
         );
@@ -840,7 +1345,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         action = () => _act('accept');
         secondary.add(
           OutlinedButton(
-            onPressed: _busy ? null : () => _act('queue'),
+            onPressed: _writeBusy ? null : () => _act('queue'),
             child: const Text('В очередь'),
           ),
         );
@@ -851,7 +1356,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       if (order.status == 'accepted') {
         secondary.add(
           OutlinedButton(
-            onPressed: _busy ? null : () => _act('queue'),
+            onPressed: _writeBusy ? null : () => _act('queue'),
             child: const Text('В очередь'),
           ),
         );
@@ -861,7 +1366,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       action = _complete;
       secondary.add(
         OutlinedButton(
-          onPressed: _busy ? null : () => _reason('pause', 'Приостановить'),
+          onPressed: _writeBusy
+              ? null
+              : () => _reason('pause', 'Приостановить'),
           child: const Text('Приостановить'),
         ),
       );
@@ -872,7 +1379,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     if ({'issued', 'accepted', 'queued'}.contains(order.status)) {
       secondary.add(
         TextButton(
-          onPressed: _busy
+          onPressed: _writeBusy
               ? null
               : () => _reason('reject', 'Отклонить задание'),
           child: const Text('Отклонить'),
@@ -897,7 +1404,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 backgroundColor: _blue,
               ),
               onPressed:
-                  _busy ||
+                  _writeBusy ||
                       (primary == 'Начать исполнение' && startBlocked) ||
                       (primary == 'Продолжить работу' &&
                           _hasOtherInProgressOrder(order))

@@ -27,6 +27,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../test/support/ai_review_wait.dart';
+
 const _run = String.fromEnvironment('OFFLINE_RUN');
 const _baseUrl = String.fromEnvironment(
   'API_BASE_URL',
@@ -61,6 +63,8 @@ void main() {
       try {
         if (saved == null) {
           await _verifyLegacyUpgrade('$directory-legacy');
+          await _verifyLegacyUpgrade('$directory-legacy-v2', fromVersion: 2);
+          await _verifyLegacyUpgrade('$directory-legacy-v3', fromVersion: 3);
           await const FlutterSecureStorage().delete(
             key: 'naryad.native.session.v1',
           );
@@ -313,7 +317,7 @@ void main() {
               }
             },
           );
-          final submitted = await controller.api.order(orderId);
+          final submitted = await waitForAiReview(controller.api, orderId);
           expect(submitted.status, 'ai_review');
           expect(
             _maps(submitted.data['events'])
@@ -406,20 +410,20 @@ Uint8List _picture(int green) {
   return Uint8List.fromList(img.encodePng(image));
 }
 
-Future<void> _verifyLegacyUpgrade(String path) async {
+Future<void> _verifyLegacyUpgrade(String path, {int fromVersion = 1}) async {
   await Directory(path).create(recursive: true);
   final bytes = _picture(120);
   final photoPath = '$path/legacy.photo';
   await File(photoPath).writeAsBytes(bytes, flush: true);
   final database = await openDatabase(
     '$path/local_store.db',
-    version: 1,
+    version: fromVersion,
     onCreate: (db, version) async {
       await db.execute(
         'CREATE TABLE snapshot (key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)',
       );
       await db.execute(
-        'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, order_id INTEGER, local_ref TEXT, payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
+        'CREATE TABLE outbox (command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at INTEGER NOT NULL, owner_id INTEGER, ${fromVersion >= 2 ? "server_url TEXT," : ""} order_id INTEGER, local_ref TEXT, ${fromVersion >= 3 ? "expected_version INTEGER, previous_command_id TEXT," : ""} payload TEXT NOT NULL, photo_path TEXT, photo_filename TEXT, photo_kind TEXT, attempts INTEGER NOT NULL, state TEXT NOT NULL, response_status INTEGER, response TEXT, last_error TEXT)',
       );
       await db.execute(
         'CREATE INDEX ix_outbox_state ON outbox (state, created_at)',
@@ -446,29 +450,63 @@ Future<void> _verifyLegacyUpgrade(String path) async {
     'kind': OutboxKind.uploadPhoto,
     'created_at': 1,
     'owner_id': 6,
+    if (fromVersion >= 2) 'server_url': NaryadApi.normalizeBaseUrl(_baseUrl),
+    if (fromVersion >= 3) 'expected_version': 2,
     'order_id': 9,
-    'payload': '{}',
+    'payload': jsonEncode({'work_done': 'Preserve the legacy draft text'}),
     'photo_path': photoPath,
     'photo_filename': 'legacy.png',
     'photo_kind': 'after',
     'attempts': 0,
     'state': OutboxState.running,
   });
+  await database.insert('id_map', {
+    'local_ref': 'legacy-local',
+    'server_id': 9,
+  });
+  await database.insert('photo_cache', {
+    'url': 'legacy-photo',
+    'path': photoPath,
+    'size': bytes.length,
+    'last_used_at': 1,
+  });
   await database.close();
   final migrated = SqfliteLocalStore(directoryPath: path);
   try {
     await migrated.open();
     final legacy = (await migrated.outbox()).single;
-    expect(legacy.serverUrl, isNull);
-    expect(legacy.state, OutboxState.conflict);
+    expect(
+      legacy.serverUrl,
+      fromVersion == 1 ? null : NaryadApi.normalizeBaseUrl(_baseUrl),
+    );
+    expect(
+      legacy.state,
+      fromVersion < 3 ? OutboxState.conflict : OutboxState.pending,
+    );
+    expect(legacy.expectedVersion, fromVersion < 3 ? null : 2);
+    expect(legacy.previousCommandId, isNull);
+    expect(legacy.canRetry, fromVersion >= 3);
+    expect(legacy.payload['work_done'], 'Preserve the legacy draft text');
     expect(await migrated.outboxPhoto(legacy.commandId), orderedEquals(bytes));
     expect((await migrated.getSnapshot('profile'))?.data, isNotNull);
+    expect(await migrated.serverId('legacy-local'), 9);
+    expect(await migrated.getPhoto('legacy-photo'), orderedEquals(bytes));
+    final draft = {
+      'schema': 1,
+      'data': {'text': 'Saved draft', 'photo': base64Encode(bytes)},
+    };
+    await migrated.putFormDraft('migration-draft', draft);
+    await migrated.close();
     await migrated.open();
-    expect((await migrated.outbox()).single.state, OutboxState.conflict);
+    expect(
+      (await migrated.outbox()).single.state,
+      fromVersion < 3 ? OutboxState.conflict : OutboxState.pending,
+    );
+    expect(await migrated.getFormDraft('migration-draft'), draft);
     _step('STORE_UPGRADE_PASS', {
-      'from': 1,
-      'to': 2,
-      'quarantined': 1,
+      'from': fromVersion,
+      'to': 4,
+      'quarantined': fromVersion < 3 ? 1 : 0,
       'mediaPreserved': true,
     });
   } finally {

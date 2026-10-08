@@ -4,6 +4,7 @@ from datetime import timedelta
 from sqlalchemy import select, text
 from .models import AIAssessment, Area, Brigade, Employee, Equipment, FaultCode, Material, MaterialWriteoff, Order, OrderEvent, TimeNorm, utcnow
 from .security import hash_pin
+from .migrations import seed_legacy_history
 
 
 def seed_database(db):
@@ -86,6 +87,8 @@ def seed_database(db):
             db.add(MaterialWriteoff(order_id=order.id, material_id=usage["material_id"], quantity=usage["quantity"], author_id=order.assignee_id, created_at=order.completed_at))
         if order.ai_review:
             db.add(AIAssessment(order_id=order.id, created_at=order.completed_at, **order.ai_review))
+    db.flush()
+    seed_legacy_history(db.connection())
     db.commit()
     repair_sequences(db)
 
