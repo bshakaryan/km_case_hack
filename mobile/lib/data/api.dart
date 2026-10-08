@@ -34,6 +34,7 @@ class NaryadApi {
 
   final String baseUrl;
   final http.Client _client;
+  bool _closed = false;
   String? token;
   static const _timeout = Duration(seconds: 30);
   static const _readTimeout = Duration(seconds: 8);
@@ -60,11 +61,49 @@ class NaryadApi {
   Future<http.Response> _send(http.BaseRequest request) async {
     final changesData = request.method != 'GET';
     final timeout = changesData ? _timeout : _readTimeout;
+    final clock = Stopwatch()..start();
+    final capturedToken = token;
+    // Capture a replayable bodyless read BEFORE send finalizes the source.
+    // Writes and streamed/body-bearing requests never enter this path.
+    final retryRequest =
+        request is http.Request &&
+            request.method == 'GET' &&
+            request.bodyBytes.isEmpty
+        ? (http.Request(request.method, request.url)
+            ..headers.addAll(request.headers)
+            ..followRedirects = request.followRedirects
+            ..maxRedirects = request.maxRedirects
+            ..persistentConnection = request.persistentConnection)
+        : null;
+    Future<http.Response> perform() async {
+      http.StreamedResponse streamed;
+      try {
+        streamed = await _client.send(request);
+      } on http.ClientException catch (failure) {
+        // This catch covers send BEFORE any headers. Loss during body reading,
+        // HTTP rejection, timeout and an unknown write outcome cannot retry.
+        if (retryRequest == null ||
+            _closed ||
+            token != capturedToken ||
+            clock.elapsed >= timeout ||
+            request is! http.Request ||
+            request.bodyBytes.isNotEmpty ||
+            !const {
+              'Connection closed before full header was received',
+              'Connection closed before response was received',
+              'Connection closed before data was received',
+            }.contains(failure.message)) {
+          rethrow;
+        }
+        streamed = await _client.send(retryRequest);
+      }
+      return http.Response.fromStream(streamed);
+    }
+
     try {
-      final response = await _client
-          .send(request)
-          .then(http.Response.fromStream)
-          .timeout(timeout);
+      // The single timeout includes both attempts and body consumption. The
+      // Stopwatch guard also prevents a late abandoned send from retrying.
+      final response = await perform().timeout(timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw ApiException(
           _errorMessage(response),
@@ -433,5 +472,8 @@ class NaryadApi {
     }
   }
 
-  void close() => _client.close();
+  void close() {
+    _closed = true;
+    _client.close();
+  }
 }

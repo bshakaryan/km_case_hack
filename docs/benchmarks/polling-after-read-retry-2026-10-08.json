@@ -1,0 +1,704 @@
+{
+  "schema": 1,
+  "kind": "naryad-live-polling-baseline",
+  "run_marker": "20261008-poll-fixed-8d792cf3",
+  "complete": true,
+  "nominal_transport_healthy": false,
+  "nominal_application_healthy": true,
+  "method": {
+    "binding": "LiveTestWidgetsFlutterBinding.fullyLive",
+    "time": "monotonic Stopwatch, real Timer/Future.delayed; no FakeAsync or timed pump",
+    "phase_boundary": "requests enrolled at send; late full responses retained in originating phase; drain excluded",
+    "network": "genuine loopback HTTP through injected IOClient; external authenticated PATCH excluded",
+    "bytes": "logical received response body bytes after IOClient decompression; not wire/TLS/request bytes",
+    "latency": "send entry to complete response stream consumption; excludes JSON decode and controller apply",
+    "display": "50ms real sampling of version-bound RenderParagraph after live frame, no pending layout/paint, inside view/scroll clips",
+    "lag": "client full-body 200 ACK to sampled first visible scene; last-absent/first-present interval, signed early observation retained",
+    "snapshot": "MemoryLocalStore.putSnapshot call counts only; no physical I/O/fsync/durability claims",
+    "application": "50ms sampled offline/error/outbox state; successful global refresh observed from lastUpdated changes inside phase, not individual GET success",
+    "warmup_excluded": true,
+    "target_phase_seconds": 60,
+    "target_edit_second": 31,
+    "target_sampling_ms": 50
+  },
+  "environment": {
+    "platform": "windows",
+    "dart_version": "3.13.0",
+    "viewport_logical_width": 480.0,
+    "viewport_logical_height": 1000.0,
+    "device_pixel_ratio": 1,
+    "role": "master",
+    "local_store": "counted memory platform double",
+    "secure_storage": "platform double",
+    "shared_preferences": "platform double",
+    "push": "NoopPushService",
+    "overview_position": "scrolled to existing emergency order card before phase",
+    "detail_background_overview_polling": true
+  },
+  "fixture": {
+    "orders": 500,
+    "status_distribution": {
+      "issued": 42,
+      "queued": 8,
+      "cancelled": 100,
+      "closed": 350
+    },
+    "reference_counts": {
+      "areas": 1,
+      "equipment": 1,
+      "employees": 2,
+      "brigades": 0,
+      "fault_codes": 1,
+      "materials": 1,
+      "time_norms": 1
+    },
+    "worker_count": 1
+  },
+  "limitations": [
+    "One isolated synthetic master and two phases; not load testing or a worst-case freshness SLA.",
+    "Flutter scene/layout/paint witness, not physical screen pixels, GPU presentation or Android device proof.",
+    "Loopback HTTP logical body bytes do not measure mobile radio, wire traffic or battery.",
+    "Local storage/session plugins and push are platform doubles; snapshot counts are controller calls only."
+  ],
+  "phases": [
+    {
+      "name": "master_overview",
+      "duration_ms": 60013.686,
+      "requests_started": 78,
+      "responses_fully_consumed": 72,
+      "transport_failures": 6,
+      "peak_concurrency": 6,
+      "in_flight_at_end": 0,
+      "unfinished_after_drain": 0,
+      "logical_response_body_bytes": 5765592,
+      "snapshot_put_calls": {
+        "orders": 1,
+        "reference": 1,
+        "employees": 1,
+        "dashboard": 1,
+        "notifications": 1,
+        "analytics": 1
+      },
+      "routes": {
+        "GET /api/reference": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 8892,
+          "request_start_ms": [
+            3681.798,
+            8680.358,
+            13681.07,
+            18681.266,
+            23681.209,
+            28680.967,
+            33681.222,
+            38680.948,
+            43681.045,
+            48680.746,
+            53680.284,
+            58680.658
+          ],
+          "full_response_latency_ms": {
+            "min": 37.121,
+            "mean": 42.11633333333333,
+            "p50": 40.515,
+            "p95": 53.027,
+            "max": 53.027
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/employees": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 2736,
+          "request_start_ms": [
+            3682.997,
+            8681.082,
+            13681.493,
+            18681.711,
+            23681.676,
+            28681.613,
+            33681.635,
+            38681.329,
+            43681.451,
+            48681.143,
+            53680.667,
+            58681.065
+          ],
+          "full_response_latency_ms": {
+            "min": 339.291,
+            "mean": 420.46924999999993,
+            "p50": 443.336,
+            "p95": 483.957,
+            "max": 483.957
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/orders": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 5685600,
+          "request_start_ms": [
+            3683.394,
+            8681.423,
+            13681.844,
+            18682.005,
+            23682.008,
+            28681.906,
+            33681.984,
+            38681.634,
+            43681.722,
+            48681.403,
+            53680.945,
+            58681.299
+          ],
+          "full_response_latency_ms": {
+            "min": 500.898,
+            "mean": 540.1357499999999,
+            "p50": 535.194,
+            "p95": 585.297,
+            "max": 585.297
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/dashboard": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 1896,
+          "request_start_ms": [
+            3683.768,
+            8681.825,
+            13682.112,
+            18682.62,
+            23682.289,
+            28682.144,
+            33682.266,
+            38681.988,
+            43682.076,
+            48681.712,
+            53681.272,
+            58681.633
+          ],
+          "full_response_latency_ms": {
+            "min": 376.342,
+            "mean": 396.401,
+            "p50": 388.274,
+            "p95": 432.316,
+            "max": 432.316
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/notifications": {
+          "requests": 15,
+          "status_counts": {
+            "200": 12,
+            "0": 3
+          },
+          "logical_response_body_bytes": 24,
+          "request_start_ms": [
+            3684.283,
+            8682.237,
+            13682.413,
+            18683.068,
+            23682.526,
+            28682.404,
+            28692.927,
+            33682.504,
+            38682.289,
+            43682.358,
+            43692.61,
+            48681.984,
+            53681.543,
+            53693.377,
+            58681.9
+          ],
+          "full_response_latency_ms": {
+            "min": 26.14,
+            "mean": 30.799666666666663,
+            "p50": 30.431,
+            "p95": 39.716,
+            "max": 39.716
+          },
+          "failures": [
+            {
+              "start_at_phase_ms": 28682.404,
+              "duration_ms": 10.482,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            },
+            {
+              "start_at_phase_ms": 43682.358,
+              "duration_ms": 10.215,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            },
+            {
+              "start_at_phase_ms": 53681.543,
+              "duration_ms": 11.793,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            }
+          ],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/analytics": {
+          "requests": 15,
+          "status_counts": {
+            "200": 12,
+            "0": 3
+          },
+          "logical_response_body_bytes": 66444,
+          "request_start_ms": [
+            3684.628,
+            8682.528,
+            13682.704,
+            13699.284,
+            18683.437,
+            18697.263,
+            23682.787,
+            23695.071,
+            28682.639,
+            33682.761,
+            38682.528,
+            43682.627,
+            48682.218,
+            53681.772,
+            58682.14
+          ],
+          "full_response_latency_ms": {
+            "min": 335.723,
+            "mean": 425.65675000000005,
+            "p50": 416.347,
+            "p95": 495.253,
+            "max": 495.253
+          },
+          "failures": [
+            {
+              "start_at_phase_ms": 13682.704,
+              "duration_ms": 16.325,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            },
+            {
+              "start_at_phase_ms": 18683.437,
+              "duration_ms": 13.654,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            },
+            {
+              "start_at_phase_ms": 23682.787,
+              "duration_ms": 12.18,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            }
+          ],
+          "responses_completed_after_phase_end": 0
+        }
+      },
+      "live_frames_completed": 3558,
+      "render_samples": 1140,
+      "max_sample_gap_ms": 113.701,
+      "application": {
+        "initial_offline": false,
+        "initial_has_error": false,
+        "offline_samples": 0,
+        "error_samples": 0,
+        "sampled_offline_transitions": 0,
+        "successful_global_refresh_observations": 12,
+        "refresh_last_updated_change_observed_at_phase_ms": [
+          4337.669,
+          9335.667,
+          14285.14,
+          19273.928,
+          24301.89,
+          29263.466,
+          34306.155,
+          39319.654,
+          44244.942,
+          49270.071,
+          54283.868,
+          59242.308
+        ],
+        "final_offline": false,
+        "final_has_error": false,
+        "initial_outbox_count": 0,
+        "final_outbox_count": 0,
+        "outbox_count_changed": false,
+        "nominal_application_healthy": true
+      },
+      "external_edit": {
+        "started_at_phase_ms": 31006.94,
+        "ack_at_phase_ms": 31056.43,
+        "ack_status": 200,
+        "ack_version": 2,
+        "last_absent_sample_at_phase_ms": 34207.914,
+        "first_present_sample_at_phase_ms": 34306.155,
+        "first_present_last_completed_frame_at_phase_ms": 34305.948,
+        "observed_present_at_or_before_ack": false,
+        "ack_to_first_observation_ms_signed": 3249.725,
+        "ack_to_render_interval_ms": {
+          "lower": 3151.484,
+          "upper": 3249.725
+        }
+      }
+    },
+    {
+      "name": "master_open_order_detail",
+      "duration_ms": 60049.583,
+      "requests_started": 89,
+      "responses_fully_consumed": 84,
+      "transport_failures": 5,
+      "peak_concurrency": 6,
+      "in_flight_at_end": 0,
+      "unfinished_after_drain": 0,
+      "logical_response_body_bytes": 5787582,
+      "snapshot_put_calls": {
+        "orders": 12,
+        "reference": 12,
+        "employees": 12,
+        "dashboard": 12,
+        "notifications": 12,
+        "analytics": 12
+      },
+      "routes": {
+        "GET /api/reference": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 8892,
+          "request_start_ms": [
+            2375.5,
+            7375.922,
+            12376.527,
+            17376.1,
+            22375.487,
+            27375.27,
+            32375.387,
+            37376.558,
+            42375.339,
+            47376.01,
+            52375.496,
+            57375.443
+          ],
+          "full_response_latency_ms": {
+            "min": 35.332,
+            "mean": 40.25791666666666,
+            "p50": 39.195,
+            "p95": 48.158,
+            "max": 48.158
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/employees": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 2736,
+          "request_start_ms": [
+            2375.857,
+            7376.522,
+            12377.032,
+            17376.659,
+            22375.93,
+            27375.677,
+            32376.027,
+            37376.934,
+            42375.754,
+            47376.395,
+            52375.884,
+            57375.819
+          ],
+          "full_response_latency_ms": {
+            "min": 335.561,
+            "mean": 455.3480833333333,
+            "p50": 448.285,
+            "p95": 554.136,
+            "max": 554.136
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/orders": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 5685834,
+          "request_start_ms": [
+            2376.12,
+            7376.855,
+            12377.448,
+            17377.003,
+            22376.195,
+            27375.908,
+            32376.441,
+            37377.163,
+            42375.985,
+            47376.623,
+            52376.155,
+            57376.136
+          ],
+          "full_response_latency_ms": {
+            "min": 509.704,
+            "mean": 583.8655833333333,
+            "p50": 579.661,
+            "p95": 682.277,
+            "max": 682.277
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/dashboard": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 1896,
+          "request_start_ms": [
+            2376.477,
+            7377.117,
+            12377.725,
+            17377.265,
+            22376.444,
+            27376.159,
+            32376.801,
+            37377.473,
+            42376.321,
+            47376.954,
+            52376.436,
+            57376.381
+          ],
+          "full_response_latency_ms": {
+            "min": 352.629,
+            "mean": 420.9165,
+            "p50": 420.976,
+            "p95": 488.538,
+            "max": 488.538
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/notifications": {
+          "requests": 16,
+          "status_counts": {
+            "200": 12,
+            "0": 4
+          },
+          "logical_response_body_bytes": 24,
+          "request_start_ms": [
+            2376.759,
+            7377.353,
+            7388.022,
+            12377.97,
+            17377.493,
+            17387.976,
+            22376.669,
+            27376.382,
+            32377.234,
+            37377.754,
+            37387.219,
+            42376.557,
+            47377.184,
+            47385.051,
+            52376.678,
+            57376.629
+          ],
+          "full_response_latency_ms": {
+            "min": 23.941,
+            "mean": 29.81516666666667,
+            "p50": 28.211,
+            "p95": 41.881,
+            "max": 41.881
+          },
+          "failures": [
+            {
+              "start_at_phase_ms": 7377.353,
+              "duration_ms": 10.62,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            },
+            {
+              "start_at_phase_ms": 17377.493,
+              "duration_ms": 10.445,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            },
+            {
+              "start_at_phase_ms": 37377.754,
+              "duration_ms": 9.415,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            },
+            {
+              "start_at_phase_ms": 47377.184,
+              "duration_ms": 7.678,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            }
+          ],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/analytics": {
+          "requests": 13,
+          "status_counts": {
+            "200": 12,
+            "0": 1
+          },
+          "logical_response_body_bytes": 66444,
+          "request_start_ms": [
+            2376.992,
+            7377.71,
+            12378.199,
+            17377.912,
+            22377.003,
+            27376.629,
+            27386.826,
+            32377.494,
+            37378.09,
+            42376.804,
+            47377.43,
+            52376.861,
+            57376.905
+          ],
+          "full_response_latency_ms": {
+            "min": 351.421,
+            "mean": 451.8959166666668,
+            "p50": 471.719,
+            "p95": 551.166,
+            "max": 551.166
+          },
+          "failures": [
+            {
+              "start_at_phase_ms": 27376.629,
+              "duration_ms": 10.131,
+              "status": 0,
+              "stage": "send",
+              "runtime_type": "ClientException",
+              "cause": "connection_closed_before_headers"
+            }
+          ],
+          "responses_completed_after_phase_end": 0
+        },
+        "GET /api/orders/:id": {
+          "requests": 12,
+          "status_counts": {
+            "200": 12
+          },
+          "logical_response_body_bytes": 21756,
+          "request_start_ms": [
+            3746.597,
+            8745.56,
+            13745.532,
+            18744.714,
+            23744.466,
+            28745.683,
+            33744.604,
+            38745.912,
+            43744.745,
+            48745.806,
+            53745.346,
+            58744.904
+          ],
+          "full_response_latency_ms": {
+            "min": 15.51,
+            "mean": 17.394166666666667,
+            "p50": 16.854,
+            "p95": 25.284,
+            "max": 25.284
+          },
+          "failures": [],
+          "responses_completed_after_phase_end": 0
+        }
+      },
+      "live_frames_completed": 3534,
+      "render_samples": 1153,
+      "max_sample_gap_ms": 115.566,
+      "application": {
+        "initial_offline": false,
+        "initial_has_error": false,
+        "offline_samples": 0,
+        "error_samples": 0,
+        "sampled_offline_transitions": 0,
+        "successful_global_refresh_observations": 12,
+        "refresh_last_updated_change_observed_at_phase_ms": [
+          3060.029,
+          8100.889,
+          12948.048,
+          17993.058,
+          23042.228,
+          27976.728,
+          33118.922,
+          37940.917,
+          42978.467,
+          48011.728,
+          53046.68,
+          58005.385
+        ],
+        "final_offline": false,
+        "final_has_error": false,
+        "initial_outbox_count": 0,
+        "final_outbox_count": 0,
+        "outbox_count_changed": false,
+        "nominal_application_healthy": true
+      },
+      "external_edit": {
+        "started_at_phase_ms": 31006.427,
+        "ack_at_phase_ms": 31040.94,
+        "ack_status": 200,
+        "ack_version": 2,
+        "last_absent_sample_at_phase_ms": 33749.062,
+        "first_present_sample_at_phase_ms": 33821.777,
+        "first_present_last_completed_frame_at_phase_ms": 33821.261,
+        "observed_present_at_or_before_ack": false,
+        "ack_to_first_observation_ms_signed": 2780.837,
+        "ack_to_render_interval_ms": {
+          "lower": 2708.122,
+          "upper": 2780.837
+        }
+      }
+    }
+  ],
+  "production_source": {
+    "base_commit": "e252e4e62b02cb3565533ae7723fce5340683811",
+    "production_changes": [
+      "mobile/lib/data/api.dart"
+    ],
+    "api_sha256": "cd9f1d6be9711828e57fb0b019a1b7ef39e0d568e6b945c3231c19dd732c47d5"
+  },
+  "interpretation": "Nominal sampled application behavior after one bounded pre-header GET retry; failed wire attempts remain visible. No payload-reduction optimization has been applied."
+}
