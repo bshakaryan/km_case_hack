@@ -243,6 +243,7 @@ export type Analytics = {
   }[];
   ai_summary: string;
   is_stub: boolean;
+  ai_summary_is_stub?: boolean;
 };
 export const statusNames: Record<string, string> = {
   issued: "Выдан",

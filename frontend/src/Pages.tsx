@@ -981,7 +981,7 @@ export function AnalyticsPage({
                   <div>
                     <strong>
                       Краткий обзор периода{" "}
-                      {data.is_stub && (
+                      {(data.ai_summary_is_stub ?? data.is_stub) && (
                         <span className="stub-tag">ЗАГЛУШКА</span>
                       )}
                     </strong>

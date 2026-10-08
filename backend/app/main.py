@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import make_engine, session_factory
+from .analytics_ai import add_narrative
 from .conditional_response import conditional_json_response
 from .ai_jobs import begin_sqlite_write, dispatch_ai_jobs, enqueue_job, job_dict, run_inline
 from .migrations import upgrade_database
@@ -945,7 +946,8 @@ def create_app(database_url=None, seed=True, monitor=True):
 
     @app.get("/api/analytics")
     def get_analytics(db: DB, user: User, days: int = Query(90, ge=1, le=731), from_date: str | None = None, to_date: str | None = None, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None):
-        return analytics_data(db, user, days, from_date, to_date, area_id, equipment_id, assignee_id, brigade_id)[1]
+        report = analytics_data(db, user, days, from_date, to_date, area_id, equipment_id, assignee_id, brigade_id)[1]
+        return add_narrative(report) if user.role in {"master", "manager", "admin"} else report
 
     @app.get("/api/reports/export")
     def export_report(db: DB, user: User, days: int = Query(90, ge=1, le=731), from_date: str | None = None, to_date: str | None = None, area_id: int | None = None, equipment_id: int | None = None, assignee_id: int | None = None, brigade_id: int | None = None, format: str = Query("csv", pattern="^(csv|xlsx)$")):
