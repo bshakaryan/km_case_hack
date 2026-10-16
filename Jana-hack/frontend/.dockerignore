@@ -1,0 +1,7 @@
+node_modules
+.next
+.tools
+.qa
+.env*
+*.tsbuildinfo
+npm-debug.log*

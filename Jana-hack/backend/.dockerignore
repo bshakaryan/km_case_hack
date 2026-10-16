@@ -1,0 +1,9 @@
+__pycache__
+.pytest_cache
+*.db
+*.db-*
+*.sqlite*
+.env*
+.venv
+.ruff_cache
+.coverage*
